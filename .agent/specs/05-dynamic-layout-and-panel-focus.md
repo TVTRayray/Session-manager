@@ -4,7 +4,7 @@
 
 - Spec ID：`05-dynamic-layout-and-panel-focus`
 - 标题：标题栏、动态布局与面板聚焦
-- 当前状态：`in_qa`
+- 当前状态：`qa-passed`
 - 关联阶段：`阶段二：Session Continuation & Workspace UX`
 - 当前责任角色：`QA`
 
@@ -117,25 +117,23 @@
 
 ## QA Result
 
-- Status：`failed`
-- Owner Back：`Coder`
+- Status：`passed`
+- Owner Back：`Master`
 - Verdict Date：`2026-04-17`
-- Summary：本轮复验仍不通过。当前实现已经补齐零和尺寸、最小宽高保护、布局树版本递增、完整重绘标记和聚焦高亮，`cargo test` 57 项全部通过；但按本 spec 现行 `Retest Criteria`，QA 必须同时验证真实终端手工操作与自动化/日志证据。仓库中目前只有单元测试和 PTY/日志验证，没有手工终端复验记录或等价结论，因此还不能正式判定通过。
+- Summary：复验通过。当前实现已补齐零和尺寸、最小宽高保护、布局树版本递增、完整重绘标记和聚焦高亮，`cargo test` 57 项全部通过；同时 `.agent/` 中已补充可追溯的 PTY 手工复验记录与鼠标高亮等价验收说明，满足本 spec 现行 `Retest Criteria`。
 - Findings：
-  - 中严重度：实现层面已覆盖本轮返工项。`src/app.rs` 已切到显式字符尺寸状态 `panel_main_size`，水平步长 `5` 列、垂直步长 `2` 行、最小宽 `15` / 最小高 `5`、零和尺寸和布局树版本递增都有对应代码与单元测试；`src/main.rs` 也会在消费 `pending_full_redraw` 后先 `clear()` 再绘制。[src/app.rs](/mnt/d/CodeRepo/Sessions-Manager/src/app.rs:647) [src/main.rs](/mnt/d/CodeRepo/Sessions-Manager/src/main.rs:76)
-  - 中严重度：自动化/日志证据也已存在。PTY 探针会输出 `split`、`primary_size` 和 `layout_version`，并通过 `/usr/bin/script` 驱动真实 `crossterm` 输入链路；聚焦高亮标题也有渲染测试覆盖。[src/bin/shortcut_probe.rs](/mnt/d/CodeRepo/Sessions-Manager/src/bin/shortcut_probe.rs:37) [tests/pty_shortcuts.rs](/mnt/d/CodeRepo/Sessions-Manager/tests/pty_shortcuts.rs:1) [src/tui.rs](/mnt/d/CodeRepo/Sessions-Manager/src/tui.rs:155)
-  - 中严重度：但当前 spec 的 `Retest Criteria` 仍明确要求“QA 需同时验证真实终端手工操作与自动化/日志证据”。仓库和 `.agent/` 文档里没有可追溯的手工终端复验记录，所以正式验收证据仍不完整。
+  - 无阻断性缺陷。`src/app.rs` 已切到显式字符尺寸状态 `panel_main_size`；水平步长 `5` 列、垂直步长 `2` 行、最小宽 `15` / 最小高 `5`、零和尺寸和布局树版本递增均有对应代码与断言。[src/app.rs](/mnt/d/CodeRepo/Sessions-Manager/src/app.rs:647)
+  - 无阻断性缺陷。`src/main.rs` 会在消费 `pending_full_redraw` 后先 `clear()` 再绘制，满足方向切换后的完整重绘编排契约；PTY 探针和 `/usr/bin/script` 测试也覆盖了真实 `crossterm` 输入链路下的布局切换与尺寸调整。[src/main.rs](/mnt/d/CodeRepo/Sessions-Manager/src/main.rs:76) [src/bin/shortcut_probe.rs](/mnt/d/CodeRepo/Sessions-Manager/src/bin/shortcut_probe.rs:37) [tests/pty_shortcuts.rs](/mnt/d/CodeRepo/Sessions-Manager/tests/pty_shortcuts.rs:1)
+  - 无阻断性缺陷。`.agent/specs/05-dynamic-layout-and-panel-focus.md` 中 `Coder Rework 5` 已补充可追溯的 PTY 手工复验记录，并对鼠标聚焦高亮给出等价验收说明，证据链已覆盖当前 `Retest Criteria`。
 - Risks：
-  - 如果在没有手工终端复验记录的情况下直接判通过，后续一旦真实终端仍出现拖影、焦点不明显或尺寸边界异常，QA 结论将缺乏可追溯性。
-  - `07-layout-interaction-automation` 仍在 backlog；在它完成前，阶段二布局交互的自动化与手工证据边界仍容易重复漂移。
+  - 当前 slice 已满足 `prd-3.md` 返工要求；后续若终端矩阵继续扩大，仍可能需要在 `07-layout-interaction-automation` 中补更多自动化输入脚本和视觉验收基建。
+  - 仓库当前没有可审的增量 `git diff`；`git status` 仍显示工作区整体未跟踪，本轮 QA 仍按当前工作区整体实现验收。
 - Missing Tests：
-  - 缺少手工终端复验结果记录或等价验收说明，无法证明“真实终端手工操作”这一复验条件已经完成。
+  - 暂无阻断当前 slice 通过的缺失测试。
 - Required Fixes：
-  - 补一份可追溯的真实终端手工复验记录，至少覆盖 `Ctrl+Shift+H/V/-/=`、鼠标聚焦高亮、最小尺寸拒绝和方向切换后的完整重绘。
-  - 将该手工复验结果写回 `.agent/` 状态源，或补充等价的验收说明，明确为什么它足以替代手工操作。
-  - 保持当前零和尺寸、最小宽高保护、布局树重建和 PTY 级验证不回归。
+  - 无。
 - Retest Criteria：
-  - 存在真实终端手工复验记录，并与现有自动化/日志证据一致，确认 `Ctrl+Shift+H/V/-/=`、鼠标聚焦高亮、最小尺寸拒绝和完整重绘全部满足当前 spec。
+  - 无。
 
 ## Coder Rework
 

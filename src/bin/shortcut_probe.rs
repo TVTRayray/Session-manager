@@ -1,15 +1,24 @@
 use std::collections::HashMap;
+use std::env;
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
 use crossterm::event::{
-    self, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent,
+    KeyboardEnhancementFlags, MouseEvent, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use sessions_manager::app::{App, FocusedPanel, SessionDetailState};
+use sessions_manager::app::{
+    App, AppAction, FocusedPanel, SessionDetailState, SplitDirection, compute_layout,
+};
 use sessions_manager::catalog::{CatalogLoad, FileHealth, SessionCatalogReader, SessionListItem};
+
+const PROBE_TERMINAL_WIDTH: u16 = 100;
+const PROBE_TERMINAL_HEIGHT: u16 = 30;
 
 fn main() -> io::Result<()> {
     enable_raw_mode()?;
@@ -18,12 +27,17 @@ fn main() -> io::Result<()> {
         PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-        )
+        ),
+        EnableMouseCapture
     )?;
 
     let result = run_probe();
 
-    let pop_result = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    let pop_result = execute!(
+        io::stdout(),
+        PopKeyboardEnhancementFlags,
+        DisableMouseCapture
+    );
     let raw_result = disable_raw_mode();
 
     result?;
@@ -34,27 +48,48 @@ fn main() -> io::Result<()> {
 
 fn run_probe() -> io::Result<()> {
     let mut app = App::new(&StubCatalog::default());
+    app.set_terminal_size(PROBE_TERMINAL_WIDTH, PROBE_TERMINAL_HEIGHT);
     app.focused_panel = FocusedPanel::List;
     app.detail_state = SessionDetailState::Idle;
+    let mut trace = TraceWriter::new()?;
 
     let mut step = 0usize;
     loop {
         let event = event::read()?;
-        let Some(key_event) = event.as_key_press_event() else {
-            continue;
-        };
-
-        let _ = app.handle_key(key_event);
-        step += 1;
-        println!(
-            "step={step} split={:?} primary_size={:?} layout_version={} focus={:?} quit={}",
-            app.split_direction,
-            app.panel_main_size,
-            app.layout_tree_version,
-            app.focused_panel,
-            app.should_quit
-        );
-        io::stdout().flush()?;
+        match event {
+            Event::Key(key_event) if key_event.kind == event::KeyEventKind::Press => {
+                step += 1;
+                let before = ProbeState::capture(&app);
+                let action = app.handle_key(key_event);
+                let redraw = app.consume_full_redraw();
+                let after = ProbeState::capture(&app);
+                trace.write_line(&format_trace_line(
+                    step,
+                    ProbeEvent::Key(key_event),
+                    action.as_ref(),
+                    redraw,
+                    &before,
+                    &after,
+                ))?;
+            }
+            Event::Mouse(mouse_event) => {
+                step += 1;
+                let before = ProbeState::capture(&app);
+                let action =
+                    app.handle_mouse(mouse_event, PROBE_TERMINAL_WIDTH, PROBE_TERMINAL_HEIGHT);
+                let redraw = app.consume_full_redraw();
+                let after = ProbeState::capture(&app);
+                trace.write_line(&format_trace_line(
+                    step,
+                    ProbeEvent::Mouse(mouse_event),
+                    action.as_ref(),
+                    redraw,
+                    &before,
+                    &after,
+                ))?;
+            }
+            _ => continue,
+        }
 
         if app.should_quit {
             break;
@@ -85,4 +120,164 @@ impl SessionCatalogReader for StubCatalog {
             file_health_map: HashMap::from([(item.abs_path.clone(), item.file_health.clone())]),
         })
     }
+}
+
+struct TraceWriter {
+    file: Option<File>,
+}
+
+impl TraceWriter {
+    fn new() -> io::Result<Self> {
+        let file = match env::var_os("SESSIONS_MANAGER_TRACE_DIR") {
+            Some(dir) => {
+                let dir = PathBuf::from(dir);
+                fs::create_dir_all(&dir)?;
+                Some(File::create(dir.join("layout-interaction.log"))?)
+            }
+            None => None,
+        };
+
+        Ok(Self { file })
+    }
+
+    fn write_line(&mut self, line: &str) -> io::Result<()> {
+        println!("{line}");
+        io::stdout().flush()?;
+        if let Some(file) = &mut self.file {
+            writeln!(file, "{line}")?;
+            file.flush()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ProbeState {
+    split_direction: SplitDirection,
+    focused_panel: FocusedPanel,
+    panel_main_size: Option<u16>,
+    layout_tree_version: u64,
+    list_rect: sessions_manager::app::RectLike,
+    detail_rect: sessions_manager::app::RectLike,
+    delete_modal_open: bool,
+    should_quit: bool,
+}
+
+impl ProbeState {
+    fn capture(app: &App) -> Self {
+        let layout = compute_layout(
+            app.split_direction.clone(),
+            app.panel_main_size,
+            PROBE_TERMINAL_WIDTH,
+            PROBE_TERMINAL_HEIGHT,
+        );
+
+        Self {
+            split_direction: app.split_direction.clone(),
+            focused_panel: app.focused_panel.clone(),
+            panel_main_size: app.panel_main_size,
+            layout_tree_version: app.layout_tree_version,
+            list_rect: layout.list_panel,
+            detail_rect: layout.detail_panel,
+            delete_modal_open: app.delete_modal_state.is_some(),
+            should_quit: app.should_quit,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ProbeEvent {
+    Key(KeyEvent),
+    Mouse(MouseEvent),
+}
+
+fn format_trace_line(
+    step: usize,
+    event: ProbeEvent,
+    action: Option<&AppAction>,
+    redraw: bool,
+    before: &ProbeState,
+    after: &ProbeState,
+) -> String {
+    format!(
+        "step={step} event={} action={} split={:?} focus={:?} primary_size={:?} \
+layout_version={} redraw={} resize={} list_rect={} detail_rect={} delete_modal={} quit={}",
+        format_event(event),
+        format_action(action),
+        after.split_direction,
+        after.focused_panel,
+        after.panel_main_size,
+        after.layout_tree_version,
+        redraw,
+        resize_outcome(event, before, after),
+        format_rect(after.list_rect),
+        format_rect(after.detail_rect),
+        after.delete_modal_open,
+        after.should_quit
+    )
+}
+
+fn format_event(event: ProbeEvent) -> String {
+    match event {
+        ProbeEvent::Key(key_event) => format!("key:{}", format_key_event(key_event)),
+        ProbeEvent::Mouse(mouse_event) => format!(
+            "mouse:{:?}@{},{}",
+            mouse_event.kind, mouse_event.column, mouse_event.row
+        ),
+    }
+}
+
+fn format_key_event(event: KeyEvent) -> String {
+    match event.code {
+        KeyCode::Char(value) => format!("char({value}) mods={:?}", event.modifiers),
+        _ => format!("{:?} mods={:?}", event.code, event.modifiers),
+    }
+}
+
+fn format_action(action: Option<&AppAction>) -> String {
+    match action {
+        Some(AppAction::LoadDetail(request)) => format!("LoadDetail(offset={})", request.offset),
+        Some(AppAction::Delete(request)) => format!("Delete(session_id={})", request.session_id),
+        Some(AppAction::Resume(request)) => {
+            format!(
+                "Resume(session_id={},cwd={})",
+                request.session_id,
+                request.cwd.display()
+            )
+        }
+        None => "None".to_string(),
+    }
+}
+
+fn resize_outcome(event: ProbeEvent, before: &ProbeState, after: &ProbeState) -> &'static str {
+    if !is_resize_event(event) {
+        return "na";
+    }
+
+    if before.panel_main_size == after.panel_main_size {
+        "blocked"
+    } else {
+        "applied"
+    }
+}
+
+fn is_resize_event(event: ProbeEvent) -> bool {
+    match event {
+        ProbeEvent::Key(key_event) => {
+            matches!(
+                key_event.code,
+                KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char('-') | KeyCode::Char('_')
+            ) && key_event
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
+                && key_event
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::ALT)
+        }
+        ProbeEvent::Mouse(_) => false,
+    }
+}
+
+fn format_rect(rect: sessions_manager::app::RectLike) -> String {
+    format!("{},{},{},{}", rect.x, rect.y, rect.width, rect.height)
 }

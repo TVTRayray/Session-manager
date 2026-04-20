@@ -250,28 +250,27 @@ impl App {
             return self.handle_delete_modal_key(event);
         }
 
-        if is_ctrl_shift_char(&event, 'h') {
+        if is_ctrl_alt_char(&event, 'h') {
             self.switch_split_direction(SplitDirection::Horizontal);
             return None;
         }
-        if is_ctrl_shift_char(&event, 'v') {
+        if is_ctrl_alt_char(&event, 'v') {
             self.switch_split_direction(SplitDirection::Vertical);
             return None;
         }
-        if is_ctrl_shift_arrow(&event, KeyCode::Left) || is_ctrl_shift_arrow(&event, KeyCode::Up) {
+        if is_ctrl_alt_arrow(&event, KeyCode::Left) || is_ctrl_alt_arrow(&event, KeyCode::Up) {
             self.focused_panel = FocusedPanel::List;
             return None;
         }
-        if is_ctrl_shift_arrow(&event, KeyCode::Right) || is_ctrl_shift_arrow(&event, KeyCode::Down)
-        {
+        if is_ctrl_alt_arrow(&event, KeyCode::Right) || is_ctrl_alt_arrow(&event, KeyCode::Down) {
             self.focused_panel = FocusedPanel::Detail;
             return None;
         }
-        if is_ctrl_shift_zoom_in(&event) {
+        if is_ctrl_alt_zoom_in(&event) {
             self.adjust_panel_size(true);
             return None;
         }
-        if is_ctrl_shift_char(&event, '-') {
+        if is_ctrl_alt_char(&event, '-') {
             self.adjust_panel_size(false);
             return None;
         }
@@ -680,6 +679,7 @@ impl App {
         };
 
         self.panel_main_size = Some(candidate);
+        self.pending_full_redraw = true;
     }
 
     fn refresh_header_summary(&mut self) {
@@ -887,7 +887,7 @@ fn restore_selection_after_delete(deleted_index: usize, remaining_len: usize) ->
 }
 
 fn default_status_message() -> &'static str {
-    "Navigate: Up/Down or j/k | Resume: Enter | Layout: Ctrl+Shift+H/V | Focus: Ctrl+Shift+Arrows | Resize: Ctrl+Shift+=/- | Delete: d/Delete | Quit: q"
+    "Navigate: Up/Down or j/k | Resume: Enter | Layout: Ctrl+Alt+H/V | Focus: Ctrl+Alt+Arrows | Resize: Ctrl+Alt+=/- | Delete: d/Delete | Quit: q"
 }
 
 fn with_status_message(info: Option<&str>, error: Option<&str>) -> String {
@@ -904,43 +904,35 @@ fn empty_header_summary() -> String {
     "SessionId: - | Time: - | Project: -".to_string()
 }
 
-fn is_ctrl_shift_char(event: &KeyEvent, expected: char) -> bool {
+fn is_ctrl_alt_char(event: &KeyEvent, expected: char) -> bool {
     match expected {
-        'h' | 'v' => is_ctrl_shift_letter(event, expected),
-        '-' => is_ctrl_shift_symbol(event, &['-', '_']),
-        '=' => is_ctrl_shift_symbol(event, &['=', '+']),
-        '+' => is_ctrl_shift_symbol(event, &['+', '=']),
+        'h' | 'v' => is_ctrl_alt_letter(event, expected),
+        '-' => is_ctrl_alt_symbol(event, &['-', '_']),
+        '=' => is_ctrl_alt_symbol(event, &['=', '+']),
+        '+' => is_ctrl_alt_symbol(event, &['+', '=']),
         _ => false,
     }
 }
 
-fn is_ctrl_shift_letter(event: &KeyEvent, expected: char) -> bool {
+fn is_ctrl_alt_letter(event: &KeyEvent, expected: char) -> bool {
     event.modifiers.contains(KeyModifiers::CONTROL)
-        && has_effective_shift(event)
+        && event.modifiers.contains(KeyModifiers::ALT)
         && matches!(event.code, KeyCode::Char(value) if value.eq_ignore_ascii_case(&expected))
 }
 
-fn is_ctrl_shift_symbol(event: &KeyEvent, accepted: &[char]) -> bool {
+fn is_ctrl_alt_symbol(event: &KeyEvent, accepted: &[char]) -> bool {
     event.modifiers.contains(KeyModifiers::CONTROL)
-        && has_effective_shift(event)
+        && event.modifiers.contains(KeyModifiers::ALT)
         && matches!(event.code, KeyCode::Char(value) if accepted.contains(&value))
 }
 
-fn has_effective_shift(event: &KeyEvent) -> bool {
-    event.modifiers.contains(KeyModifiers::SHIFT)
-        || matches!(
-            event.code,
-            KeyCode::Char(value) if value.is_ascii_uppercase() || matches!(value, '+' | '_')
-        )
+fn is_ctrl_alt_zoom_in(event: &KeyEvent) -> bool {
+    is_ctrl_alt_char(event, '=') || is_ctrl_alt_char(event, '+')
 }
 
-fn is_ctrl_shift_zoom_in(event: &KeyEvent) -> bool {
-    is_ctrl_shift_char(event, '=') || is_ctrl_shift_char(event, '+')
-}
-
-fn is_ctrl_shift_arrow(event: &KeyEvent, expected: KeyCode) -> bool {
+fn is_ctrl_alt_arrow(event: &KeyEvent, expected: KeyCode) -> bool {
     event.modifiers.contains(KeyModifiers::CONTROL)
-        && event.modifiers.contains(KeyModifiers::SHIFT)
+        && event.modifiers.contains(KeyModifiers::ALT)
         && event.code == expected
 }
 
@@ -999,19 +991,16 @@ mod tests {
         }
     }
 
-    fn ctrl_shift_char(ch: char) -> KeyEvent {
-        KeyEvent::new(
-            KeyCode::Char(ch),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        )
+    fn ctrl_alt_char(ch: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL | KeyModifiers::ALT)
     }
 
-    fn ctrl_shift_arrow(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+    fn ctrl_alt_arrow(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL | KeyModifiers::ALT)
     }
 
-    fn ctrl_char(ch: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
+    fn ctrl_alt_encoded_char(ch: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL | KeyModifiers::ALT)
     }
 
     #[test]
@@ -1068,20 +1057,20 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_shift_hv_switches_layout_direction() {
+    fn ctrl_alt_hv_switches_layout_direction() {
         let mut app = App::new(&stub_catalog(vec![item("one")]));
-        let _ = app.handle_key(ctrl_shift_char('v'));
+        let _ = app.handle_key(ctrl_alt_char('v'));
         assert_eq!(app.split_direction, SplitDirection::Vertical);
-        let _ = app.handle_key(ctrl_shift_char('h'));
+        let _ = app.handle_key(ctrl_alt_char('h'));
         assert_eq!(app.split_direction, SplitDirection::Horizontal);
     }
 
     #[test]
-    fn ctrl_shift_letters_accept_uppercase_char_without_shift_modifier() {
+    fn ctrl_alt_letters_accept_uppercase_char() {
         let mut app = App::new(&stub_catalog(vec![item("one")]));
-        let _ = app.handle_key(ctrl_char('V'));
+        let _ = app.handle_key(ctrl_alt_encoded_char('V'));
         assert_eq!(app.split_direction, SplitDirection::Vertical);
-        let _ = app.handle_key(ctrl_char('H'));
+        let _ = app.handle_key(ctrl_alt_encoded_char('H'));
         assert_eq!(app.split_direction, SplitDirection::Horizontal);
     }
 
@@ -1102,20 +1091,20 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_shift_arrows_switch_focused_panel() {
+    fn ctrl_alt_arrows_switch_focused_panel() {
         let mut app = App::new(&stub_catalog(vec![item("one")]));
-        let _ = app.handle_key(ctrl_shift_arrow(KeyCode::Right));
+        let _ = app.handle_key(ctrl_alt_arrow(KeyCode::Right));
         assert_eq!(app.focused_panel, FocusedPanel::Detail);
-        let _ = app.handle_key(ctrl_shift_arrow(KeyCode::Left));
+        let _ = app.handle_key(ctrl_alt_arrow(KeyCode::Left));
         assert_eq!(app.focused_panel, FocusedPanel::List);
     }
 
     #[test]
-    fn ctrl_shift_resize_changes_ratio_for_focused_panel() {
+    fn ctrl_alt_resize_changes_ratio_for_focused_panel() {
         let mut app = App::new(&stub_catalog(vec![item("one")]));
         app.set_terminal_size(100, 30);
         let original = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
-        let _ = app.handle_key(ctrl_shift_char('='));
+        let _ = app.handle_key(ctrl_alt_char('='));
         let grown = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
         assert_eq!(
             grown.list_panel.width - original.list_panel.width,
@@ -1127,7 +1116,7 @@ mod tests {
         );
         app.focused_panel = FocusedPanel::Detail;
         let before = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
-        let _ = app.handle_key(ctrl_shift_char('='));
+        let _ = app.handle_key(ctrl_alt_char('='));
         let detail_grown =
             compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
         assert_eq!(
@@ -1141,11 +1130,11 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_shift_plus_also_grows_focused_panel() {
+    fn ctrl_alt_plus_also_grows_focused_panel() {
         let mut app = App::new(&stub_catalog(vec![item("one")]));
         app.set_terminal_size(100, 30);
         let original = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
-        let _ = app.handle_key(ctrl_shift_char('+'));
+        let _ = app.handle_key(ctrl_alt_char('+'));
         let grown = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
         assert_eq!(
             grown.list_panel.width - original.list_panel.width,
@@ -1154,7 +1143,7 @@ mod tests {
 
         app.focused_panel = FocusedPanel::Detail;
         let before = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
-        let _ = app.handle_key(ctrl_shift_char('+'));
+        let _ = app.handle_key(ctrl_alt_char('+'));
         let detail_grown =
             compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
         assert_eq!(
@@ -1164,11 +1153,11 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_shift_resize_accepts_common_terminal_encoded_chars_without_shift_modifier() {
+    fn ctrl_alt_resize_accepts_common_terminal_encoded_chars() {
         let mut app = App::new(&stub_catalog(vec![item("one")]));
         app.set_terminal_size(100, 30);
         let original = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
-        let _ = app.handle_key(ctrl_char('+'));
+        let _ = app.handle_key(ctrl_alt_encoded_char('+'));
         let grown = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
         assert_eq!(
             grown.list_panel.width - original.list_panel.width,
@@ -1176,7 +1165,7 @@ mod tests {
         );
 
         let larger = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
-        let _ = app.handle_key(ctrl_char('_'));
+        let _ = app.handle_key(ctrl_alt_encoded_char('_'));
         let shrunk = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
         assert_eq!(
             larger.list_panel.width - shrunk.list_panel.width,
@@ -1200,8 +1189,8 @@ mod tests {
         app.set_terminal_size(100, 30);
         app.selected_index = Some(1);
         app.detail_state = SessionDetailState::Ready(ready_viewport());
-        let _ = app.handle_key(ctrl_shift_char('v'));
-        let _ = app.handle_key(ctrl_shift_char('='));
+        let _ = app.handle_key(ctrl_alt_char('v'));
+        let _ = app.handle_key(ctrl_alt_char('='));
         assert_eq!(app.selected_index, Some(1));
         assert_eq!(
             app.detail_state,
@@ -1229,10 +1218,37 @@ mod tests {
         assert_eq!(app.layout_tree_version, 0);
         assert!(!app.consume_full_redraw());
 
-        let _ = app.handle_key(ctrl_shift_char('v'));
+        let _ = app.handle_key(ctrl_alt_char('v'));
         assert_eq!(app.split_direction, SplitDirection::Vertical);
         assert_eq!(app.layout_tree_version, 1);
         assert!(app.consume_full_redraw());
+        assert!(!app.consume_full_redraw());
+    }
+
+    #[test]
+    fn resize_requests_full_redraw_when_size_changes() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        app.set_terminal_size(100, 30);
+        assert!(!app.consume_full_redraw());
+
+        let _ = app.handle_key(ctrl_alt_char('='));
+
+        assert_eq!(app.panel_main_size, Some(47));
+        assert!(app.consume_full_redraw());
+        assert!(!app.consume_full_redraw());
+    }
+
+    #[test]
+    fn rejected_resize_does_not_request_full_redraw() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        app.set_terminal_size(30, 20);
+        app.panel_main_size = Some(MIN_PANEL_WIDTH);
+        app.focused_panel = FocusedPanel::Detail;
+        assert!(!app.consume_full_redraw());
+
+        let _ = app.handle_key(ctrl_alt_char('='));
+
+        assert_eq!(app.panel_main_size, Some(MIN_PANEL_WIDTH));
         assert!(!app.consume_full_redraw());
     }
 
@@ -1244,7 +1260,7 @@ mod tests {
         app.focused_panel = FocusedPanel::Detail;
 
         let before = compute_layout(app.split_direction.clone(), app.panel_main_size, 30, 20);
-        let _ = app.handle_key(ctrl_shift_char('='));
+        let _ = app.handle_key(ctrl_alt_char('='));
         let after = compute_layout(app.split_direction.clone(), app.panel_main_size, 30, 20);
         assert_eq!(before, after);
     }
@@ -1253,10 +1269,10 @@ mod tests {
     fn vertical_resize_uses_zero_sum_row_step_and_min_height_guard() {
         let mut app = App::new(&stub_catalog(vec![item("one")]));
         app.set_terminal_size(100, 20);
-        let _ = app.handle_key(ctrl_shift_char('v'));
+        let _ = app.handle_key(ctrl_alt_char('v'));
 
         let original = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 20);
-        let _ = app.handle_key(ctrl_shift_char('='));
+        let _ = app.handle_key(ctrl_alt_char('='));
         let grown = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 20);
         assert_eq!(
             grown.list_panel.height - original.list_panel.height,
@@ -1271,7 +1287,7 @@ mod tests {
         app.focused_panel = FocusedPanel::Detail;
         let before_min = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 12);
         app.set_terminal_size(100, 12);
-        let _ = app.handle_key(ctrl_shift_char('='));
+        let _ = app.handle_key(ctrl_alt_char('='));
         let after_min = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 12);
         assert_eq!(before_min, after_min);
     }

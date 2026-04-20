@@ -81,16 +81,18 @@ fn run_app(
         if event::poll(Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key_event) => {
-                    if let Some(action) = app.handle_key(key_event) {
-                        dispatch_action(
-                            terminal,
-                            terminal_mode,
-                            app,
-                            action,
-                            &detail_request_tx,
-                            delete_executor,
-                            resume_executor,
-                        )?;
+                    if key_event.kind == event::KeyEventKind::Press {
+                        if let Some(action) = app.handle_key(key_event) {
+                            dispatch_action(
+                                terminal,
+                                terminal_mode,
+                                app,
+                                action,
+                                &detail_request_tx,
+                                delete_executor,
+                                resume_executor,
+                            )?;
+                        }
                     }
                 }
                 Event::Mouse(mouse_event) => {

@@ -3,24 +3,24 @@
 ## 项目摘要
 
 - 项目名称：`Codex Sessions Manager`
-- 当前目标：在已完成历史会话浏览、删除与稳定性硬化的基础上，推进第二阶段的动态布局与会话恢复能力。
-- 当前负责人：`QA`
+- 当前目标：阶段二布局交互自动化与 QA 基线已验收通过，等待 Master 决定下一阶段目标。
+- 当前负责人：`Master`
 - 开发语言：`Rust`
 - 推荐技术栈：`ratatui` + `crossterm`，按单一可执行二进制发布。
 
 ## 当前阶段
 
 - 阶段名称：`阶段二：Session Continuation & Workspace UX`
-- 阶段目标：完成顶部标题栏、可切换/可调整的动态布局，以及按 `Enter` 恢复会话并在外部 `codex` 退出后安全返回 TUI。
-- 当前活跃 Spec：`05-dynamic-layout-and-panel-focus`
+- 阶段目标：完成顶部标题栏、可切换/可调整的动态布局、按 `Enter` 恢复会话，以及可复用的布局交互自动化验收基线。
+- 当前活跃 Spec：`none`
 
 ## Backlog
 
-- [ ] `07-layout-interaction-automation`
+- [ ] 暂无未开始的 backlog 项。
 
 ## In Progress
 
-- [ ] 暂无当前编码中的 spec；`05-dynamic-layout-and-panel-focus` 已回到 QA 复验。
+- [ ] 暂无当前进行中的 spec。
 
 ## Blocked
 
@@ -28,16 +28,14 @@
 
 ## QA Tracking
 
-- Spec：`05-dynamic-layout-and-panel-focus`
-- Next Owner：`QA`
-- QA Status：`in_qa`
+- Spec：`07-layout-interaction-automation`
+- Next Owner：`Master`
+- QA Status：`passed`
 - Blocking Issue：
-  - 暂无编码侧阻塞；等待 QA 复核本轮新增的 PTY 手工复验记录与等价验收说明是否满足现行 `Retest Criteria`。
+  - 无。
 - Required Fixes：
-  - 已补充 PTY 手工复验记录与鼠标高亮等价验收说明，待 QA 复核。
-  - 维持当前零和尺寸、最小宽高保护、完整重绘和焦点高亮实现不回归。
-  - `07-layout-interaction-automation` 仍保留在 backlog，由后续独立 slice 承接完整自动化契约。
-- Retest Required：`yes`
+  - 无。
+- Retest Required：`no`
 
 ## Done
 
@@ -49,7 +47,9 @@
 - [x] `02-session-transcript-rendering`：QA 通过，流式 transcript 解析、噪音过滤、工具摘要和坏行容错已满足当前 slice 要求。
 - [x] `03-session-delete-flow`：QA 通过，删除确认、路径校验、失败反馈和选中态恢复已满足当前 slice 要求。
 - [x] `04-resilience-and-performance-hardening`：QA 复验通过，视口化详情读取、异常文件隔离、路径提示自动隐藏和交互不串扰已满足当前 slice 要求。
+- [x] `05-dynamic-layout-and-panel-focus`：QA 复验通过，零和尺寸、最小宽高保护、布局树重建与完整重绘、聚焦高亮，以及 PTY 手工复验证据已满足当前 slice 要求。
 - [x] `06-session-resume-handoff`：QA 复验通过，`Enter` 恢复、固定 `codex resume <SESSION_ID>`、`cwd` 绑定、终端让渡/返场恢复，以及返场失败控制流闭环已满足当前 slice 要求。
+- [x] `07-layout-interaction-automation`：QA 通过，PTY 探针 trace、鼠标/增强键输入覆盖、最小尺寸拒绝断言、trace 目录输出、固定入口和 TTY 复验证据已满足当前 slice 要求。
 
 ## 决策记录
 
