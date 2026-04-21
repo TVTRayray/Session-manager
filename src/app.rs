@@ -920,10 +920,18 @@ fn is_ctrl_alt_letter(event: &KeyEvent, expected: char) -> bool {
         && matches!(event.code, KeyCode::Char(value) if value.eq_ignore_ascii_case(&expected))
 }
 
+/// Matches Ctrl+Alt+symbol key events.
+///
+/// On Windows, `Ctrl+Alt` is treated as `AltGr` for symbol characters (`-`, `=`, `+`, `_`).
+/// The terminal reports only the `ALT` modifier—`CONTROL` is silently dropped.
+/// To handle this platform quirk, we accept **either** `CONTROL|ALT` or `ALT`-only
+/// when the keycode is one of the recognised resize symbols.
 fn is_ctrl_alt_symbol(event: &KeyEvent, accepted: &[char]) -> bool {
-    event.modifiers.contains(KeyModifiers::CONTROL)
-        && event.modifiers.contains(KeyModifiers::ALT)
-        && matches!(event.code, KeyCode::Char(value) if accepted.contains(&value))
+    let has_alt = event.modifiers.contains(KeyModifiers::ALT);
+    let has_ctrl_alt = has_alt && event.modifiers.contains(KeyModifiers::CONTROL);
+    // Accept CONTROL|ALT (Linux/macOS) **or** ALT-only (Windows AltGr fallback).
+    let modifier_ok = has_ctrl_alt || has_alt;
+    modifier_ok && matches!(event.code, KeyCode::Char(value) if accepted.contains(&value))
 }
 
 fn is_ctrl_alt_zoom_in(event: &KeyEvent) -> bool {
@@ -1001,6 +1009,12 @@ mod tests {
 
     fn ctrl_alt_encoded_char(ch: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL | KeyModifiers::ALT)
+    }
+
+    /// Simulates the exact event Windows Terminal reports for Ctrl+Alt+symbol:
+    /// CONTROL is dropped, only ALT remains.
+    fn alt_only_char(ch: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::ALT)
     }
 
     #[test]
@@ -1170,6 +1184,34 @@ mod tests {
         assert_eq!(
             larger.list_panel.width - shrunk.list_panel.width,
             HORIZONTAL_RESIZE_STEP
+        );
+    }
+
+    /// Regression: on Windows, Ctrl+Alt+symbol reports ALT-only (CONTROL is dropped).
+    /// This test uses the exact events captured by key_dump on Windows Terminal.
+    #[test]
+    fn windows_alt_only_symbol_events_trigger_resize() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        app.set_terminal_size(100, 30);
+
+        // Ctrl+Alt+= on Windows reports: Char('=') with ALT only
+        let original = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
+        let _ = app.handle_key(alt_only_char('='));
+        let grown = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
+        assert_eq!(
+            grown.list_panel.width - original.list_panel.width,
+            HORIZONTAL_RESIZE_STEP,
+            "Alt+= (Windows fallback for Ctrl+Alt+=) should grow the focused panel"
+        );
+
+        // Ctrl+Alt+- on Windows reports: Char('-') with ALT only
+        let before = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
+        let _ = app.handle_key(alt_only_char('-'));
+        let shrunk = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
+        assert_eq!(
+            before.list_panel.width - shrunk.list_panel.width,
+            HORIZONTAL_RESIZE_STEP,
+            "Alt+- (Windows fallback for Ctrl+Alt+-) should shrink the focused panel"
         );
     }
 

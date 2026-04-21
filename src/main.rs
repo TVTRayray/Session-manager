@@ -11,6 +11,7 @@ use sessions_manager::app::{
     drain_detail_results, spawn_detail_loader,
 };
 use sessions_manager::catalog::FilesystemSessionCatalog;
+use sessions_manager::config;
 use sessions_manager::delete::{FilesystemSessionDeleteExecutor, SessionDeleteExecutor};
 use sessions_manager::detail::JsonlDetailLoader;
 use sessions_manager::resume::{CodexResumeExecutor, ResumeSessionExecutor, ResumeSessionRequest};
@@ -28,8 +29,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .join("sessions");
     let delete_executor = FilesystemSessionDeleteExecutor::from_path(base_dir.clone());
     let resume_executor = CodexResumeExecutor::new();
+    let display_config = config::load_config();
     let (detail_request_tx, detail_result_rx) =
-        spawn_detail_loader(JsonlDetailLoader::from_path(base_dir));
+        spawn_detail_loader(JsonlDetailLoader::from_path(base_dir, display_config));
 
     if let Some(request) = app.initial_detail_request() {
         let _ = detail_request_tx.send(request);

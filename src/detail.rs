@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::catalog::validate_session_path;
+use crate::config::{BlockKind, DisplayConfig};
 
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct SessionMeta {
@@ -48,20 +49,25 @@ pub trait SessionDetailLoader {
     ) -> Result<DetailViewport, String>;
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct JsonlDetailLoader {
     base_dir: Option<PathBuf>,
+    display_config: DisplayConfig,
 }
 
 impl JsonlDetailLoader {
-    pub fn from_path(base_dir: PathBuf) -> Self {
+    pub fn from_path(base_dir: PathBuf, display_config: DisplayConfig) -> Self {
         Self {
             base_dir: Some(base_dir),
+            display_config,
         }
     }
 
     pub fn unrestricted_for_tests() -> Self {
-        Self { base_dir: None }
+        Self {
+            base_dir: None,
+            display_config: DisplayConfig::show_all(),
+        }
     }
 }
 
@@ -73,8 +79,14 @@ impl SessionDetailLoader for JsonlDetailLoader {
         height: usize,
     ) -> Result<DetailViewport, String> {
         match &self.base_dir {
-            Some(base_dir) => load_detail_viewport_with_root(base_dir, path, offset, height),
-            None => load_detail_viewport(path, offset, height),
+            Some(base_dir) => load_detail_viewport_with_root(
+                base_dir,
+                path,
+                offset,
+                height,
+                &self.display_config,
+            ),
+            None => load_detail_viewport(path, offset, height, &self.display_config),
         }
     }
 }
@@ -123,10 +135,15 @@ pub struct ViewportCollector {
     rendered_lines: Vec<String>,
     header_emitted: bool,
     has_more_after: bool,
+    display_config: DisplayConfig,
 }
 
 impl ViewportCollector {
-    pub fn new(requested_offset: usize, requested_height: usize) -> Self {
+    pub fn new(
+        requested_offset: usize,
+        requested_height: usize,
+        display_config: DisplayConfig,
+    ) -> Self {
         Self {
             session_meta: SessionMeta::default(),
             requested_offset,
@@ -135,6 +152,7 @@ impl ViewportCollector {
             rendered_lines: Vec::new(),
             header_emitted: false,
             has_more_after: false,
+            display_config,
         }
     }
 
@@ -154,10 +172,15 @@ impl ViewportCollector {
             process_value(&mut self.session_meta, &value, line_number)
         };
 
-        if !blocks.is_empty() {
+        let visible_blocks: Vec<_> = blocks
+            .into_iter()
+            .filter(|block| self.display_config.is_visible(&block_kind(block)))
+            .collect();
+
+        if !visible_blocks.is_empty() {
             self.emit_header_if_needed();
         }
-        for block in blocks {
+        for block in visible_blocks {
             for rendered_line in render_block_lines(&block) {
                 self.push_rendered_line(rendered_line);
                 if self.has_more_after {
@@ -242,10 +265,11 @@ pub fn load_detail_viewport(
     path: &Path,
     offset: usize,
     height: usize,
+    display_config: &DisplayConfig,
 ) -> Result<DetailViewport, String> {
     let file = File::open(path)
         .map_err(|err| format!("Unable to open session file {}: {err}", path.display()))?;
-    parse_viewport_reader(BufReader::new(file), offset, height)
+    parse_viewport_reader(BufReader::new(file), offset, height, display_config)
 }
 
 pub fn load_detail_viewport_with_root(
@@ -253,6 +277,7 @@ pub fn load_detail_viewport_with_root(
     path: &Path,
     offset: usize,
     height: usize,
+    display_config: &DisplayConfig,
 ) -> Result<DetailViewport, String> {
     let canonical_root = fs::canonicalize(base_dir).map_err(|err| {
         format!(
@@ -261,7 +286,7 @@ pub fn load_detail_viewport_with_root(
         )
     })?;
     let validated_path = validate_session_path(&canonical_root, path)?;
-    load_detail_viewport(&validated_path, offset, height)
+    load_detail_viewport(&validated_path, offset, height, display_config)
 }
 
 pub fn parse_reader<R: BufRead>(reader: R) -> Result<SessionDetail, String> {
@@ -279,8 +304,9 @@ pub fn parse_viewport_reader<R: BufRead>(
     reader: R,
     offset: usize,
     height: usize,
+    display_config: &DisplayConfig,
 ) -> Result<DetailViewport, String> {
-    let mut collector = ViewportCollector::new(offset, height);
+    let mut collector = ViewportCollector::new(offset, height, display_config.clone());
 
     for (index, line_result) in reader.lines().enumerate() {
         let line = line_result.map_err(|err| format!("Unable to read session file: {err}"))?;
@@ -502,6 +528,17 @@ fn summarize_tool_output(payload: &Value) -> String {
     format!("Tool output: {call_id}")
 }
 
+fn block_kind(block: &TranscriptBlock) -> BlockKind {
+    match block {
+        TranscriptBlock::UserText(_) => BlockKind::User,
+        TranscriptBlock::AssistantMarkdown(_) => BlockKind::Assistant,
+        TranscriptBlock::ToolCallSummary(_) => BlockKind::ToolCall,
+        TranscriptBlock::ToolOutputSummary(_) => BlockKind::ToolOutput,
+        TranscriptBlock::SystemContextFolded(_) => BlockKind::SystemContext,
+        TranscriptBlock::CorruptedLineNotice(_) => BlockKind::CorruptedLine,
+    }
+}
+
 fn render_block_lines(block: &TranscriptBlock) -> Vec<String> {
     match block {
         TranscriptBlock::UserText(text) => {
@@ -582,6 +619,7 @@ mod tests {
             ])),
             2,
             2,
+            &DisplayConfig::show_all(),
         ));
 
         assert_eq!(
@@ -665,7 +703,13 @@ mod tests {
         let linked = root_dir.path().join("linked.jsonl");
         must(symlink(&outside_file, &linked));
 
-        let result = load_detail_viewport_with_root(root_dir.path(), &linked, 0, 10);
+        let result = load_detail_viewport_with_root(
+            root_dir.path(),
+            &linked,
+            0,
+            10,
+            &DisplayConfig::show_all(),
+        );
         match result {
             Ok(_) => panic!("expected out-of-root rejection"),
             Err(err) => assert!(err.contains("Rejected out-of-root session file")),
@@ -716,7 +760,7 @@ mod tests {
         let metadata = must(fs::metadata(&path));
         assert!(metadata.len() > 100 * 1024 * 1024);
 
-        let viewport = must(load_detail_viewport(&path, 0, 12));
+        let viewport = must(load_detail_viewport(&path, 0, 12, &DisplayConfig::show_all()));
         assert!(!viewport.rendered_lines.is_empty());
         assert!(viewport.has_more_after);
         assert!(
@@ -725,5 +769,86 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("Session: large"))
         );
+    }
+
+    #[test]
+    fn default_config_filters_tool_blocks_but_keeps_user_and_assistant() {
+        let config = DisplayConfig::default(); // user + assistant only
+        let viewport = must(parse_viewport_reader(
+            Cursor::new(fixture(&[
+                r#"{"type":"session_meta","payload":{"id":"s1","timestamp":"2026-04-16T00:00:00Z","cwd":"/tmp"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"function_call","name":"exec","arguments":"{}"}}"#,
+                r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"done"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"world"}]}}"#,
+            ])),
+            0,
+            50,
+            &config,
+        ));
+
+        let joined = viewport.rendered_lines.join("\n");
+        assert!(joined.contains("Session: s1"), "header should always show");
+        assert!(joined.contains("User"), "user block should be visible");
+        assert!(joined.contains("hello"), "user text should be visible");
+        assert!(
+            joined.contains("Assistant"),
+            "assistant block should be visible"
+        );
+        assert!(
+            joined.contains("world"),
+            "assistant text should be visible"
+        );
+        assert!(
+            !joined.contains("[tool]"),
+            "tool_call should be filtered out"
+        );
+        assert!(
+            !joined.contains("[tool-output]"),
+            "tool_output should be filtered out"
+        );
+    }
+
+    #[test]
+    fn show_all_config_renders_tool_blocks() {
+        let config = DisplayConfig::show_all();
+        let viewport = must(parse_viewport_reader(
+            Cursor::new(fixture(&[
+                r#"{"type":"session_meta","payload":{"id":"s1","timestamp":"2026-04-16T00:00:00Z","cwd":"/tmp"}}"#,
+                r#"{"type":"response_item","payload":{"type":"function_call","name":"exec","arguments":"{}"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}"#,
+            ])),
+            0,
+            50,
+            &config,
+        ));
+
+        let joined = viewport.rendered_lines.join("\n");
+        assert!(joined.contains("[tool]"), "tool_call should be visible with show_all");
+        assert!(joined.contains("Assistant"), "assistant should be visible");
+    }
+
+    #[test]
+    fn session_header_always_shown_even_with_empty_visible_blocks() {
+        let config = DisplayConfig {
+            visible_blocks: std::collections::HashSet::new(),
+        };
+        let viewport = must(parse_viewport_reader(
+            Cursor::new(fixture(&[
+                r#"{"type":"session_meta","payload":{"id":"s1","timestamp":"2026-04-16T00:00:00Z","cwd":"/tmp"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"world"}]}}"#,
+            ])),
+            0,
+            50,
+            &config,
+        ));
+
+        // Header is always emitted even though no blocks pass the filter
+        // (header emission is triggered by the presence of session_meta, not blocks)
+        // With empty visible_blocks, no content blocks are rendered
+        let joined = viewport.rendered_lines.join("\n");
+        assert!(!joined.contains("User"), "user should be hidden");
+        assert!(!joined.contains("Assistant"), "assistant should be hidden");
     }
 }
