@@ -9,6 +9,7 @@ use serde::Deserialize;
 pub enum BlockKind {
     User,
     Assistant,
+    Thinking,
     ToolCall,
     ToolOutput,
     SystemContext,
@@ -42,6 +43,7 @@ impl DisplayConfig {
             visible_blocks: HashSet::from([
                 BlockKind::User,
                 BlockKind::Assistant,
+                BlockKind::Thinking,
                 BlockKind::ToolCall,
                 BlockKind::ToolOutput,
                 BlockKind::SystemContext,
@@ -61,7 +63,7 @@ struct ConfigFile {
 
 #[derive(Deserialize)]
 struct DisplaySection {
-    /// Recognised values: "user", "assistant", "tool_call", "tool_output",
+    /// Recognised values: "user", "assistant", "thinking", "tool_call", "tool_output",
     /// "system_context", "corrupted_line".
     #[serde(default = "default_visible_blocks")]
     visible_blocks: Vec<String>,
@@ -76,13 +78,14 @@ impl Default for DisplaySection {
 }
 
 fn default_visible_blocks() -> Vec<String> {
-    vec!["user".to_string(), "assistant".to_string()]
+    vec!["user".to_string(), "assistant".to_string(), "thinking".to_string()]
 }
 
 fn parse_block_kind(name: &str) -> Option<BlockKind> {
     match name {
         "user" => Some(BlockKind::User),
         "assistant" => Some(BlockKind::Assistant),
+        "thinking" => Some(BlockKind::Thinking),
         "tool_call" => Some(BlockKind::ToolCall),
         "tool_output" => Some(BlockKind::ToolOutput),
         "system_context" => Some(BlockKind::SystemContext),
@@ -175,6 +178,7 @@ mod tests {
         let config = DisplayConfig::show_all();
         assert!(config.is_visible(&BlockKind::User));
         assert!(config.is_visible(&BlockKind::Assistant));
+        assert!(config.is_visible(&BlockKind::Thinking));
         assert!(config.is_visible(&BlockKind::ToolCall));
         assert!(config.is_visible(&BlockKind::ToolOutput));
         assert!(config.is_visible(&BlockKind::SystemContext));

@@ -1,11 +1,20 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{App, DeleteModalFocus, FocusedPanel, SessionDetailState, SplitDirection};
-use crate::catalog::FileHealth;
+use crate::catalog::{FileHealth, SessionEngine};
+
+// --- Theme Definition ---
+pub const THEME_BG: Color = Color::Reset;
+pub const THEME_BORDER: Color = Color::DarkGray;
+pub const THEME_HIGHLIGHT: Color = Color::Rgb(137, 180, 250); // Catppuccin Mocha Blue
+pub const THEME_TEXT: Color = Color::Rgb(205, 214, 244);      // Catppuccin Mocha Text
+pub const THEME_WARN: Color = Color::Rgb(250, 179, 135);      // Catppuccin Mocha Peach
+pub const THEME_HEADER_BG: Color = Color::Rgb(30, 30, 46);    // Catppuccin Mocha Base
+// ------------------------
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let outer = Layout::default()
@@ -17,10 +26,10 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         ])
         .split(frame.area());
 
-    let header = Paragraph::new(app.header_summary.as_str()).style(
+    let header = Paragraph::new(render_header_line(app)).style(
         Style::default()
-            .fg(Color::White)
-            .bg(Color::DarkGray)
+            .fg(THEME_TEXT)
+            .bg(THEME_HEADER_BG)
             .add_modifier(Modifier::BOLD),
     );
     frame.render_widget(header, outer[0]);
@@ -54,8 +63,8 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         .highlight_symbol(">> ")
         .highlight_style(
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(THEME_BG)
+                .bg(THEME_HIGHLIGHT)
                 .add_modifier(Modifier::BOLD),
         );
 
@@ -87,8 +96,21 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         .wrap(Wrap { trim: false });
     frame.render_widget(detail, body[1]);
 
-    let status =
-        Paragraph::new(app.status_message.as_str()).style(Style::default().fg(Color::Yellow));
+    let status_text = if app.status_message.is_empty() {
+        Line::from(vec![
+            Span::styled(" (↑/↓) ", Style::default().fg(THEME_TEXT).add_modifier(Modifier::BOLD)), Span::raw("Navigate  "),
+            Span::styled(" (Enter) ", Style::default().fg(THEME_TEXT).add_modifier(Modifier::BOLD)), Span::raw("Select  "),
+            Span::styled(" (Tab) ", Style::default().fg(THEME_TEXT).add_modifier(Modifier::BOLD)), Span::raw("Switch Tab  "),
+            Span::styled(" (q/Esc) ", Style::default().fg(THEME_TEXT).add_modifier(Modifier::BOLD)), Span::raw("Quit  "),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" >> ", Style::default().fg(THEME_WARN).add_modifier(Modifier::BOLD)),
+            Span::styled(app.status_message.as_str(), Style::default().fg(THEME_WARN)),
+        ])
+    };
+
+    let status = Paragraph::new(status_text).style(Style::default().bg(THEME_BG));
     frame.render_widget(status, outer[2]);
 
     if let Some(modal) = &app.delete_modal_state {
@@ -154,22 +176,57 @@ fn layout_body(
 
 fn panel_block<'a>(title: &'a str, focused: bool) -> Block<'a> {
     let title = if focused {
-        format!(">> {title} <<")
+        format!(" {} ", title)
     } else {
-        title.to_string()
+        format!(" {} ", title)
     };
     let border_style = if focused {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(THEME_HIGHLIGHT)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(THEME_BORDER)
     };
 
+    use ratatui::widgets::BorderType;
     Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .title(title)
         .border_style(border_style)
+}
+
+fn render_header_line(app: &App) -> Line<'static> {
+    let mut spans = vec![
+        tab_span(SessionEngine::Codex, app.active_engine),
+        Span::raw(" | "),
+        tab_span(SessionEngine::Claude, app.active_engine),
+    ];
+    if !app.header_summary.is_empty() {
+        spans.push(Span::raw("   "));
+        spans.push(Span::raw(app.header_summary.clone()));
+    }
+    Line::from(spans)
+}
+
+fn tab_span(engine: SessionEngine, active_engine: SessionEngine) -> Span<'static> {
+    let label = format!("  {}  ", engine.label());
+    if engine == active_engine {
+        Span::styled(
+            label,
+            Style::default()
+                .fg(THEME_BG)
+                .bg(THEME_HIGHLIGHT)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            label,
+            Style::default()
+                .fg(THEME_BORDER)
+                .add_modifier(Modifier::BOLD),
+        )
+    }
 }
 
 fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
@@ -186,8 +243,33 @@ fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
 mod tests {
     use super::*;
     use crate::app::compute_layout;
+    use crate::catalog::{CatalogLoad, SessionCatalogReader, SessionListItem};
     use ratatui::buffer::Buffer;
     use ratatui::widgets::Widget;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::time::SystemTime;
+
+    struct StubCatalog;
+
+    impl SessionCatalogReader for StubCatalog {
+        fn load_sessions(&self) -> Result<CatalogLoad, String> {
+            Ok(CatalogLoad {
+                items: vec![SessionListItem {
+                    session_id: "one".to_string(),
+                    display_time: "2026-04-29 12:00".to_string(),
+                    cwd_tail: "demo".to_string(),
+                    cwd_path: "/workspace/demo".to_string(),
+                    abs_path: PathBuf::from("/tmp/one.jsonl"),
+                    is_loadable: true,
+                    modified_at: SystemTime::now(),
+                    file_health: FileHealth::Healthy,
+                }],
+                warnings: Vec::new(),
+                file_health_map: HashMap::new(),
+            })
+        }
+    }
 
     #[test]
     fn layout_body_switches_direction() {
@@ -211,6 +293,23 @@ mod tests {
         Widget::render(panel_block("Sessions", true), area, &mut buffer);
 
         let title: String = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
-        assert!(title.contains(">> Sessions <<"));
+        assert!(title.contains(" Sessions "));
+    }
+
+    #[test]
+    fn header_shows_engine_tabs_and_active_highlight_changes() {
+        let mut app = App::new(&StubCatalog);
+        let codex = render_header_line(&app);
+        let codex_text: String = codex
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(codex_text.contains("  Codex   |   Claude  "));
+        assert_eq!(codex.spans[0].style.bg, Some(THEME_HIGHLIGHT));
+
+        app.active_engine = SessionEngine::Claude;
+        let claude = render_header_line(&app);
+        assert_eq!(claude.spans[2].style.bg, Some(THEME_HIGHLIGHT));
     }
 }

@@ -2,10 +2,12 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::catalog::SessionEngine;
 use crate::catalog::validate_session_path;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeleteRequest {
+    pub engine: SessionEngine,
     pub path: PathBuf,
     pub session_id: String,
 }
@@ -31,7 +33,7 @@ impl fmt::Display for DeleteError {
 }
 
 pub trait SessionDeleteExecutor {
-    fn delete_session(&self, path: &Path) -> Result<(), DeleteError>;
+    fn delete_session(&self, request: &DeleteRequest) -> Result<(), DeleteError>;
 }
 
 #[derive(Clone, Debug)]
@@ -46,8 +48,26 @@ impl FilesystemSessionDeleteExecutor {
 }
 
 impl SessionDeleteExecutor for FilesystemSessionDeleteExecutor {
-    fn delete_session(&self, path: &Path) -> Result<(), DeleteError> {
-        delete_session_file(&self.base_dir, path)
+    fn delete_session(&self, request: &DeleteRequest) -> Result<(), DeleteError> {
+        delete_session_file(&self.base_dir, &request.path)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct EngineAwareSessionDeleteExecutor {
+    home_dir: PathBuf,
+}
+
+impl EngineAwareSessionDeleteExecutor {
+    pub fn from_home_dir(home_dir: PathBuf) -> Self {
+        Self { home_dir }
+    }
+}
+
+impl SessionDeleteExecutor for EngineAwareSessionDeleteExecutor {
+    fn delete_session(&self, request: &DeleteRequest) -> Result<(), DeleteError> {
+        let root_dir = request.engine.root_dir(&self.home_dir);
+        delete_session_file(&root_dir, &request.path)
     }
 }
 
@@ -72,6 +92,7 @@ pub fn delete_session_file(base_dir: &Path, path: &Path) -> Result<(), DeleteErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::SessionEngine;
     use std::fs;
     use tempfile::tempdir;
 
@@ -108,6 +129,51 @@ mod tests {
         let result = delete_session_file(root_dir.path(), &linked);
         match result {
             Ok(_) => panic!("expected rejection for out-of-root path"),
+            Err(DeleteError::RejectedPath(message)) => {
+                assert!(message.contains("Rejected out-of-root session file"))
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn engine_aware_executor_uses_claude_root() {
+        let home = must(tempdir());
+        let claude_root = home.path().join(".claude").join("projects");
+        must(fs::create_dir_all(&claude_root));
+        let claude_session = claude_root.join("claude.jsonl");
+        must(fs::write(&claude_session, "{}\n"));
+
+        let executor = EngineAwareSessionDeleteExecutor::from_home_dir(home.path().to_path_buf());
+        let request = DeleteRequest {
+            engine: SessionEngine::Claude,
+            path: claude_session.clone(),
+            session_id: "claude".to_string(),
+        };
+
+        must(executor.delete_session(&request));
+        assert!(!claude_session.exists());
+    }
+
+    #[test]
+    fn engine_aware_executor_rejects_claude_delete_outside_claude_root() {
+        let home = must(tempdir());
+        let claude_root = home.path().join(".claude").join("projects");
+        let codex_root = home.path().join(".codex").join("sessions");
+        must(fs::create_dir_all(&claude_root));
+        must(fs::create_dir_all(&codex_root));
+        let codex_session = codex_root.join("codex.jsonl");
+        must(fs::write(&codex_session, "{}\n"));
+
+        let executor = EngineAwareSessionDeleteExecutor::from_home_dir(home.path().to_path_buf());
+        let request = DeleteRequest {
+            engine: SessionEngine::Claude,
+            path: codex_session,
+            session_id: "wrong-root".to_string(),
+        };
+
+        match executor.delete_session(&request) {
+            Ok(()) => panic!("expected rejection for non-claude root"),
             Err(DeleteError::RejectedPath(message)) => {
                 assert!(message.contains("Rejected out-of-root session file"))
             }

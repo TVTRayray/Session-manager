@@ -107,7 +107,7 @@ fn pty_probe_covers_text_input_enter_and_mouse_focus() {
     );
     assert!(
         transcript.contains(
-            "step=2 event=key:Enter mods=KeyModifiers(0x0) action=Resume(session_id=probe,cwd=/workspace/probe)"
+            "step=2 event=key:Enter mods=KeyModifiers(0x0) action=Resume(engine=Codex,session_id=probe,cwd=/workspace/probe)"
         ),
         "unexpected transcript:\n{transcript}"
     );
@@ -168,4 +168,29 @@ fn pty_probe_logs_resize_boundaries_and_trace_file_output() {
         .unwrap_or_else(|err| panic!("failed to read trace log {}: {err}", trace_path.display()));
     assert!(trace_log.contains("event=key:char(v) mods=KeyModifiers(CONTROL | ALT)"));
     assert!(trace_log.contains("resize=blocked"));
+}
+
+#[test]
+fn pty_probe_covers_claude_tab_mouse_select_and_enter_resume() {
+    let transcript = run_probe(&[b"\t", b"\x1b[<0;3;3M", b"\x1b[13u", b"q"]);
+    assert!(
+        transcript.contains(
+            "step=1 event=key:Tab mods=KeyModifiers(0x0) action=LoadCatalog(engine=Claude,request_id=1)"
+        ),
+        "unexpected transcript:\n{transcript}"
+    );
+    assert!(
+        transcript.contains("step=2 event=mouse:Down(Left)@2,2 action=LoadDetail(offset=0)"),
+        "unexpected transcript:\n{transcript}"
+    );
+    assert!(
+        transcript.contains("step=2 event=mouse:Down(Left)@2,2 action=LoadDetail(offset=0) split=Horizontal focus=List"),
+        "unexpected transcript:\n{transcript}"
+    );
+    assert!(
+        transcript.contains(
+            "step=3 event=key:Enter mods=KeyModifiers(0x0) action=Resume(engine=Claude,session_id=probe-claude,cwd=/workspace/probe-claude)"
+        ),
+        "unexpected transcript:\n{transcript}"
+    );
 }

@@ -13,9 +13,12 @@ use crossterm::event::{
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use sessions_manager::app::{
-    App, AppAction, FocusedPanel, SessionDetailState, SplitDirection, compute_layout,
+    App, AppAction, CatalogLoadResult, CatalogRequest, FocusedPanel, SessionDetailState,
+    SplitDirection, compute_layout,
 };
-use sessions_manager::catalog::{CatalogLoad, FileHealth, SessionCatalogReader, SessionListItem};
+use sessions_manager::catalog::{
+    CatalogLoad, FileHealth, SessionCatalogReader, SessionEngine, SessionListItem,
+};
 
 const PROBE_TERMINAL_WIDTH: u16 = 100;
 const PROBE_TERMINAL_HEIGHT: u16 = 30;
@@ -61,6 +64,7 @@ fn run_probe() -> io::Result<()> {
                 step += 1;
                 let before = ProbeState::capture(&app);
                 let action = app.handle_key(key_event);
+                apply_probe_action_side_effects(&mut app, action.as_ref());
                 let redraw = app.consume_full_redraw();
                 let after = ProbeState::capture(&app);
                 trace.write_line(&format_trace_line(
@@ -77,6 +81,7 @@ fn run_probe() -> io::Result<()> {
                 let before = ProbeState::capture(&app);
                 let action =
                     app.handle_mouse(mouse_event, PROBE_TERMINAL_WIDTH, PROBE_TERMINAL_HEIGHT);
+                apply_probe_action_side_effects(&mut app, action.as_ref());
                 let redraw = app.consume_full_redraw();
                 let after = ProbeState::capture(&app);
                 trace.write_line(&format_trace_line(
@@ -99,12 +104,28 @@ fn run_probe() -> io::Result<()> {
     Ok(())
 }
 
-#[derive(Default)]
-struct StubCatalog;
+fn apply_probe_action_side_effects(app: &mut App, action: Option<&AppAction>) {
+    if let Some(AppAction::LoadCatalog(request)) = action {
+        app.apply_catalog_result(probe_catalog_result(request.clone()));
+    }
+}
 
-impl SessionCatalogReader for StubCatalog {
-    fn load_sessions(&self) -> Result<CatalogLoad, String> {
-        let item = SessionListItem {
+fn probe_catalog_result(request: CatalogRequest) -> CatalogLoadResult {
+    let item = probe_item_for(request.engine);
+    CatalogLoadResult {
+        request_id: request.request_id,
+        engine: request.engine,
+        result: Ok(CatalogLoad {
+            items: vec![item.clone()],
+            warnings: Vec::new(),
+            file_health_map: HashMap::from([(item.abs_path.clone(), item.file_health.clone())]),
+        }),
+    }
+}
+
+fn probe_item_for(engine: SessionEngine) -> SessionListItem {
+    match engine {
+        SessionEngine::Codex => SessionListItem {
             session_id: "probe".to_string(),
             display_time: "2026-04-17 12:00".to_string(),
             cwd_tail: "probe".to_string(),
@@ -113,7 +134,26 @@ impl SessionCatalogReader for StubCatalog {
             is_loadable: true,
             modified_at: SystemTime::now(),
             file_health: FileHealth::Healthy,
-        };
+        },
+        SessionEngine::Claude => SessionListItem {
+            session_id: "probe-claude".to_string(),
+            display_time: "2026-04-17 12:30".to_string(),
+            cwd_tail: "probe-claude".to_string(),
+            cwd_path: "/workspace/probe-claude".to_string(),
+            abs_path: PathBuf::from("/tmp/probe-claude.jsonl"),
+            is_loadable: true,
+            modified_at: SystemTime::now(),
+            file_health: FileHealth::Healthy,
+        },
+    }
+}
+
+#[derive(Default)]
+struct StubCatalog;
+
+impl SessionCatalogReader for StubCatalog {
+    fn load_sessions(&self) -> Result<CatalogLoad, String> {
+        let item = probe_item_for(SessionEngine::Codex);
         Ok(CatalogLoad {
             items: vec![item.clone()],
             warnings: Vec::new(),
@@ -236,11 +276,18 @@ fn format_key_event(event: KeyEvent) -> String {
 
 fn format_action(action: Option<&AppAction>) -> String {
     match action {
+        Some(AppAction::LoadCatalog(request)) => {
+            format!(
+                "LoadCatalog(engine={:?},request_id={})",
+                request.engine, request.request_id
+            )
+        }
         Some(AppAction::LoadDetail(request)) => format!("LoadDetail(offset={})", request.offset),
         Some(AppAction::Delete(request)) => format!("Delete(session_id={})", request.session_id),
         Some(AppAction::Resume(request)) => {
             format!(
-                "Resume(session_id={},cwd={})",
+                "Resume(engine={:?},session_id={},cwd={})",
+                request.engine,
                 request.session_id,
                 request.cwd.display()
             )

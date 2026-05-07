@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::catalog::validate_session_path;
+use crate::catalog::{SessionEngine, validate_session_path};
 use crate::config::{BlockKind, DisplayConfig};
 
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
@@ -18,6 +18,7 @@ pub struct SessionMeta {
 pub enum TranscriptBlock {
     UserText(String),
     AssistantMarkdown(String),
+    Thinking(String),
     ToolCallSummary(String),
     ToolOutputSummary(String),
     SystemContextFolded(String),
@@ -43,6 +44,7 @@ pub struct DetailViewport {
 pub trait SessionDetailLoader {
     fn load_viewport(
         &self,
+        engine: SessionEngine,
         path: &Path,
         offset: usize,
         height: usize,
@@ -51,21 +53,31 @@ pub trait SessionDetailLoader {
 
 #[derive(Clone, Debug)]
 pub struct JsonlDetailLoader {
-    base_dir: Option<PathBuf>,
+    home_dir: Option<PathBuf>,
     display_config: DisplayConfig,
 }
 
 impl JsonlDetailLoader {
     pub fn from_path(base_dir: PathBuf, display_config: DisplayConfig) -> Self {
         Self {
-            base_dir: Some(base_dir),
+            home_dir: base_dir
+                .parent()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf),
+            display_config,
+        }
+    }
+
+    pub fn from_home_path(home_dir: PathBuf, display_config: DisplayConfig) -> Self {
+        Self {
+            home_dir: Some(home_dir),
             display_config,
         }
     }
 
     pub fn unrestricted_for_tests() -> Self {
         Self {
-            base_dir: None,
+            home_dir: None,
             display_config: DisplayConfig::show_all(),
         }
     }
@@ -74,32 +86,43 @@ impl JsonlDetailLoader {
 impl SessionDetailLoader for JsonlDetailLoader {
     fn load_viewport(
         &self,
+        engine: SessionEngine,
         path: &Path,
         offset: usize,
         height: usize,
     ) -> Result<DetailViewport, String> {
-        match &self.base_dir {
-            Some(base_dir) => load_detail_viewport_with_root(
-                base_dir,
-                path,
-                offset,
-                height,
-                &self.display_config,
-            ),
-            None => load_detail_viewport(path, offset, height, &self.display_config),
+        match &self.home_dir {
+            Some(home_dir) => {
+                let base_dir = engine.root_dir(home_dir);
+                load_detail_viewport_with_root_for_engine(
+                    engine,
+                    &base_dir,
+                    path,
+                    offset,
+                    height,
+                    &self.display_config,
+                )
+            }
+            None => {
+                load_detail_viewport_for_engine(engine, path, offset, height, &self.display_config)
+            }
         }
     }
 }
 
-#[derive(Default)]
 pub struct TranscriptParser {
+    engine: SessionEngine,
     session_meta: SessionMeta,
     transcript_blocks: Vec<TranscriptBlock>,
 }
 
 impl TranscriptParser {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(engine: SessionEngine) -> Self {
+        Self {
+            engine,
+            session_meta: SessionMeta::default(),
+            transcript_blocks: Vec::new(),
+        }
     }
 
     pub fn push_line(&mut self, line_number: usize, line: &str) -> Vec<TranscriptBlock> {
@@ -114,7 +137,7 @@ impl TranscriptParser {
             }
         };
 
-        let blocks = process_value(&mut self.session_meta, &value, line_number);
+        let blocks = process_value(self.engine, &mut self.session_meta, &value, line_number);
         self.transcript_blocks.extend(blocks.iter().cloned());
         blocks
     }
@@ -128,6 +151,7 @@ impl TranscriptParser {
 }
 
 pub struct ViewportCollector {
+    engine: SessionEngine,
     session_meta: SessionMeta,
     requested_offset: usize,
     requested_height: usize,
@@ -140,11 +164,13 @@ pub struct ViewportCollector {
 
 impl ViewportCollector {
     pub fn new(
+        engine: SessionEngine,
         requested_offset: usize,
         requested_height: usize,
         display_config: DisplayConfig,
     ) -> Self {
         Self {
+            engine,
             session_meta: SessionMeta::default(),
             requested_offset,
             requested_height: requested_height.max(1),
@@ -169,7 +195,7 @@ impl ViewportCollector {
                 "Skipped corrupted JSON at line {line_number}"
             ))]
         } else {
-            process_value(&mut self.session_meta, &value, line_number)
+            process_value(self.engine, &mut self.session_meta, &value, line_number)
         };
 
         let visible_blocks: Vec<_> = blocks
@@ -245,12 +271,24 @@ impl ViewportCollector {
 }
 
 pub fn load_detail(path: &Path) -> Result<SessionDetail, String> {
+    load_detail_for_engine(SessionEngine::Codex, path)
+}
+
+pub fn load_detail_for_engine(engine: SessionEngine, path: &Path) -> Result<SessionDetail, String> {
     let file = File::open(path)
         .map_err(|err| format!("Unable to open session file {}: {err}", path.display()))?;
-    parse_reader(BufReader::new(file))
+    parse_reader_for_engine(engine, BufReader::new(file))
 }
 
 pub fn load_detail_with_root(base_dir: &Path, path: &Path) -> Result<SessionDetail, String> {
+    load_detail_with_root_for_engine(SessionEngine::Codex, base_dir, path)
+}
+
+pub fn load_detail_with_root_for_engine(
+    engine: SessionEngine,
+    base_dir: &Path,
+    path: &Path,
+) -> Result<SessionDetail, String> {
     let canonical_root = fs::canonicalize(base_dir).map_err(|err| {
         format!(
             "Unable to read session directory {}: {err}",
@@ -258,7 +296,7 @@ pub fn load_detail_with_root(base_dir: &Path, path: &Path) -> Result<SessionDeta
         )
     })?;
     let validated_path = validate_session_path(&canonical_root, path)?;
-    load_detail(&validated_path)
+    load_detail_for_engine(engine, &validated_path)
 }
 
 pub fn load_detail_viewport(
@@ -267,12 +305,40 @@ pub fn load_detail_viewport(
     height: usize,
     display_config: &DisplayConfig,
 ) -> Result<DetailViewport, String> {
+    load_detail_viewport_for_engine(SessionEngine::Codex, path, offset, height, display_config)
+}
+
+pub fn load_detail_viewport_for_engine(
+    engine: SessionEngine,
+    path: &Path,
+    offset: usize,
+    height: usize,
+    display_config: &DisplayConfig,
+) -> Result<DetailViewport, String> {
     let file = File::open(path)
         .map_err(|err| format!("Unable to open session file {}: {err}", path.display()))?;
-    parse_viewport_reader(BufReader::new(file), offset, height, display_config)
+    parse_viewport_reader_for_engine(engine, BufReader::new(file), offset, height, display_config)
 }
 
 pub fn load_detail_viewport_with_root(
+    base_dir: &Path,
+    path: &Path,
+    offset: usize,
+    height: usize,
+    display_config: &DisplayConfig,
+) -> Result<DetailViewport, String> {
+    load_detail_viewport_with_root_for_engine(
+        SessionEngine::Codex,
+        base_dir,
+        path,
+        offset,
+        height,
+        display_config,
+    )
+}
+
+pub fn load_detail_viewport_with_root_for_engine(
+    engine: SessionEngine,
     base_dir: &Path,
     path: &Path,
     offset: usize,
@@ -286,11 +352,18 @@ pub fn load_detail_viewport_with_root(
         )
     })?;
     let validated_path = validate_session_path(&canonical_root, path)?;
-    load_detail_viewport(&validated_path, offset, height, display_config)
+    load_detail_viewport_for_engine(engine, &validated_path, offset, height, display_config)
 }
 
 pub fn parse_reader<R: BufRead>(reader: R) -> Result<SessionDetail, String> {
-    let mut parser = TranscriptParser::new();
+    parse_reader_for_engine(SessionEngine::Codex, reader)
+}
+
+pub fn parse_reader_for_engine<R: BufRead>(
+    engine: SessionEngine,
+    reader: R,
+) -> Result<SessionDetail, String> {
+    let mut parser = TranscriptParser::new(engine);
 
     for (index, line_result) in reader.lines().enumerate() {
         let line = line_result.map_err(|err| format!("Unable to read session file: {err}"))?;
@@ -306,7 +379,17 @@ pub fn parse_viewport_reader<R: BufRead>(
     height: usize,
     display_config: &DisplayConfig,
 ) -> Result<DetailViewport, String> {
-    let mut collector = ViewportCollector::new(offset, height, display_config.clone());
+    parse_viewport_reader_for_engine(SessionEngine::Codex, reader, offset, height, display_config)
+}
+
+pub fn parse_viewport_reader_for_engine<R: BufRead>(
+    engine: SessionEngine,
+    reader: R,
+    offset: usize,
+    height: usize,
+    display_config: &DisplayConfig,
+) -> Result<DetailViewport, String> {
+    let mut collector = ViewportCollector::new(engine, offset, height, display_config.clone());
 
     for (index, line_result) in reader.lines().enumerate() {
         let line = line_result.map_err(|err| format!("Unable to read session file: {err}"))?;
@@ -320,10 +403,24 @@ pub fn parse_viewport_reader<R: BufRead>(
 }
 
 fn process_value(
+    engine: SessionEngine,
     session_meta: &mut SessionMeta,
     value: &Value,
     line_number: usize,
 ) -> Vec<TranscriptBlock> {
+    if value.get("type").and_then(Value::as_str) == Some("corrupted_line") {
+        return vec![TranscriptBlock::CorruptedLineNotice(format!(
+            "Skipped corrupted JSON at line {line_number}"
+        ))];
+    }
+
+    match engine {
+        SessionEngine::Codex => process_codex_value(session_meta, value),
+        SessionEngine::Claude => process_claude_value(session_meta, value),
+    }
+}
+
+fn process_codex_value(session_meta: &mut SessionMeta, value: &Value) -> Vec<TranscriptBlock> {
     match value.get("type").and_then(Value::as_str) {
         Some("session_meta") => {
             update_session_meta(session_meta, value.get("payload"));
@@ -331,15 +428,22 @@ fn process_value(
         }
         Some("event_msg") => Vec::new(),
         Some("response_item") => process_response_item(value.get("payload")),
-        _ => {
-            if value.get("type").and_then(Value::as_str) == Some("corrupted_line") {
-                vec![TranscriptBlock::CorruptedLineNotice(format!(
-                    "Skipped corrupted JSON at line {line_number}"
-                ))]
-            } else {
-                Vec::new()
-            }
+        _ => Vec::new(),
+    }
+}
+
+fn process_claude_value(session_meta: &mut SessionMeta, value: &Value) -> Vec<TranscriptBlock> {
+    match value.get("type").and_then(Value::as_str) {
+        Some("user") => {
+            update_session_meta_from_claude_message(session_meta, value);
+            process_claude_user_message(value)
         }
+        Some("assistant") => {
+            update_session_meta_from_claude_message(session_meta, value);
+            process_claude_assistant_message(value)
+        }
+        Some("file-history-snapshot") | Some("summary") | Some("system") => Vec::new(),
+        _ => Vec::new(),
     }
 }
 
@@ -393,6 +497,168 @@ fn process_message(payload: &Value) -> Vec<TranscriptBlock> {
             "[system context hidden]".to_string(),
         )],
     }
+}
+
+fn update_session_meta_from_claude_message(session_meta: &mut SessionMeta, value: &Value) {
+    if session_meta.id.is_empty() {
+        if let Some(id) = value.get("sessionId").and_then(Value::as_str) {
+            session_meta.id = id.to_string();
+        }
+    }
+    if session_meta.timestamp.is_empty() {
+        if let Some(timestamp) = value.get("timestamp").and_then(Value::as_str) {
+            session_meta.timestamp = timestamp.to_string();
+        }
+    }
+    if session_meta.cwd.is_empty() {
+        if let Some(cwd) = value.get("cwd").and_then(Value::as_str) {
+            session_meta.cwd = cwd.to_string();
+        }
+    }
+}
+
+fn process_claude_user_message(value: &Value) -> Vec<TranscriptBlock> {
+    let Some(content) = value.pointer("/message/content") else {
+        return Vec::new();
+    };
+
+    if let Some(text) = content.as_str() {
+        return split_user_message(text);
+    }
+
+    let Some(items) = content.as_array() else {
+        return Vec::new();
+    };
+
+    let mut blocks = Vec::new();
+    for item in items {
+        match item.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(text) = item.get("text").and_then(Value::as_str) {
+                    blocks.extend(split_user_message(text));
+                }
+            }
+            Some("tool_result") => {
+                let output_text = extract_claude_tool_result_text(item);
+                if !output_text.is_empty() {
+                    blocks.push(TranscriptBlock::ToolOutputSummary(
+                        summarize_claude_tool_output(item, &output_text),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    blocks
+}
+
+fn process_claude_assistant_message(value: &Value) -> Vec<TranscriptBlock> {
+    let Some(items) = value.pointer("/message/content").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    let mut blocks = Vec::new();
+    for item in items {
+        match item.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(text) = item.get("text").and_then(Value::as_str) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        blocks.push(TranscriptBlock::AssistantMarkdown(trimmed.to_string()));
+                    }
+                }
+            }
+            Some("thinking") => {
+                if let Some(thinking) = item.get("thinking").and_then(Value::as_str) {
+                    let trimmed = thinking.trim();
+                    if !trimmed.is_empty() {
+                        blocks.push(TranscriptBlock::Thinking(trimmed.to_string()));
+                    }
+                }
+            }
+            Some("tool_use") => {
+                blocks.push(TranscriptBlock::ToolCallSummary(summarize_claude_tool_use(
+                    item,
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    blocks
+}
+
+fn extract_claude_tool_result_text(item: &Value) -> String {
+    if let Some(text) = item.get("content").and_then(Value::as_str) {
+        return text.trim().to_string();
+    }
+    if let Some(items) = item.get("content").and_then(Value::as_array) {
+        let mut parts = Vec::new();
+        for block in items {
+            if let Some(text) = block.get("text").and_then(Value::as_str) {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed.to_string());
+                }
+            }
+        }
+        return parts.join("\n");
+    }
+
+    String::new()
+}
+
+fn summarize_claude_tool_use(item: &Value) -> String {
+    let name = item.get("name").and_then(Value::as_str).unwrap_or("tool");
+    let args = item.get("input").map(summarize_claude_input_object);
+
+    match args {
+        Some(args) if !args.is_empty() => format!("Tool call: {name} ({args})"),
+        _ => format!("Tool call: {name}"),
+    }
+}
+
+fn summarize_claude_input_object(input: &Value) -> String {
+    if let Some(cmd) = input.get("cmd").and_then(Value::as_str) {
+        return format!("cmd={}", truncate_single_line(cmd, 80));
+    }
+    if let Some(path) = input.get("path").and_then(Value::as_str) {
+        return format!("path={}", truncate_single_line(path, 80));
+    }
+    if let Some(command) = input.get("command").and_then(Value::as_str) {
+        return format!("cmd={}", truncate_single_line(command, 80));
+    }
+    if let Some(file_path) = input.get("file_path").and_then(Value::as_str) {
+        return format!("path={}", truncate_single_line(file_path, 80));
+    }
+
+    let serialized = serde_json::to_string(input).unwrap_or_default();
+    truncate_single_line(&serialized, 80)
+}
+
+fn summarize_claude_tool_output(item: &Value, output: &str) -> String {
+    if let Some(tool_use_id) = item.get("tool_use_id").and_then(Value::as_str) {
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("Process exited with code") || trimmed.starts_with("Exit code:")
+            {
+                return format!("Tool output: {tool_use_id} ({trimmed})");
+            }
+        }
+        return format!(
+            "Tool output: {tool_use_id} ({})",
+            truncate_single_line(output, 100)
+        );
+    }
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("Process exited with code") || trimmed.starts_with("Exit code:") {
+            return format!("Tool output ({trimmed})");
+        }
+    }
+    format!("Tool output ({})", truncate_single_line(output, 100))
 }
 
 fn collect_message_text(content: Option<&Value>) -> String {
@@ -532,6 +798,7 @@ fn block_kind(block: &TranscriptBlock) -> BlockKind {
     match block {
         TranscriptBlock::UserText(_) => BlockKind::User,
         TranscriptBlock::AssistantMarkdown(_) => BlockKind::Assistant,
+        TranscriptBlock::Thinking(_) => BlockKind::Thinking,
         TranscriptBlock::ToolCallSummary(_) => BlockKind::ToolCall,
         TranscriptBlock::ToolOutputSummary(_) => BlockKind::ToolOutput,
         TranscriptBlock::SystemContextFolded(_) => BlockKind::SystemContext,
@@ -542,13 +809,18 @@ fn block_kind(block: &TranscriptBlock) -> BlockKind {
 fn render_block_lines(block: &TranscriptBlock) -> Vec<String> {
     match block {
         TranscriptBlock::UserText(text) => {
-            let mut lines = vec!["User".to_string()];
+            let mut lines = vec!["🧑 User".to_string()];
             lines.extend(text.lines().map(ToOwned::to_owned));
             lines
         }
         TranscriptBlock::AssistantMarkdown(text) => {
-            let mut lines = vec!["Assistant".to_string()];
+            let mut lines = vec!["🤖 Assistant".to_string()];
             lines.extend(text.lines().map(ToOwned::to_owned));
+            lines
+        }
+        TranscriptBlock::Thinking(text) => {
+            let mut lines = vec!["🤔 Thinking".to_string()];
+            lines.extend(text.lines().map(|line| format!("  {line}")));
             lines
         }
         TranscriptBlock::ToolCallSummary(text) => vec![format!("[tool] {text}")],
@@ -760,7 +1032,12 @@ mod tests {
         let metadata = must(fs::metadata(&path));
         assert!(metadata.len() > 100 * 1024 * 1024);
 
-        let viewport = must(load_detail_viewport(&path, 0, 12, &DisplayConfig::show_all()));
+        let viewport = must(load_detail_viewport(
+            &path,
+            0,
+            12,
+            &DisplayConfig::show_all(),
+        ));
         assert!(!viewport.rendered_lines.is_empty());
         assert!(viewport.has_more_after);
         assert!(
@@ -789,16 +1066,13 @@ mod tests {
 
         let joined = viewport.rendered_lines.join("\n");
         assert!(joined.contains("Session: s1"), "header should always show");
-        assert!(joined.contains("User"), "user block should be visible");
+        assert!(joined.contains("🧑 User"), "user block should be visible");
         assert!(joined.contains("hello"), "user text should be visible");
         assert!(
-            joined.contains("Assistant"),
+            joined.contains("🤖 Assistant"),
             "assistant block should be visible"
         );
-        assert!(
-            joined.contains("world"),
-            "assistant text should be visible"
-        );
+        assert!(joined.contains("world"), "assistant text should be visible");
         assert!(
             !joined.contains("[tool]"),
             "tool_call should be filtered out"
@@ -824,8 +1098,14 @@ mod tests {
         ));
 
         let joined = viewport.rendered_lines.join("\n");
-        assert!(joined.contains("[tool]"), "tool_call should be visible with show_all");
-        assert!(joined.contains("Assistant"), "assistant should be visible");
+        assert!(
+            joined.contains("[tool]"),
+            "tool_call should be visible with show_all"
+        );
+        assert!(
+            joined.contains("🤖 Assistant"),
+            "assistant should be visible"
+        );
     }
 
     #[test]
@@ -848,7 +1128,133 @@ mod tests {
         // (header emission is triggered by the presence of session_meta, not blocks)
         // With empty visible_blocks, no content blocks are rendered
         let joined = viewport.rendered_lines.join("\n");
-        assert!(!joined.contains("User"), "user should be hidden");
-        assert!(!joined.contains("Assistant"), "assistant should be hidden");
+        assert!(!joined.contains("🧑 User"), "user should be hidden");
+        assert!(
+            !joined.contains("🤖 Assistant"),
+            "assistant should be hidden"
+        );
+    }
+
+    #[test]
+    fn claude_extracts_session_meta_from_message_fields() {
+        let detail = must(parse_reader_for_engine(
+            SessionEngine::Claude,
+            Cursor::new(fixture(&[
+                r#"{"type":"assistant","sessionId":"claude-1","timestamp":"2026-04-20T01:02:03Z","cwd":"/workspace/demo","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}"#,
+            ])),
+        ));
+
+        assert_eq!(detail.session_meta.id, "claude-1");
+        assert_eq!(detail.session_meta.timestamp, "2026-04-20T01:02:03Z");
+        assert_eq!(detail.session_meta.cwd, "/workspace/demo");
+    }
+
+    #[test]
+    fn claude_maps_user_assistant_and_tool_blocks() {
+        let detail = must(parse_reader_for_engine(
+            SessionEngine::Claude,
+            Cursor::new(fixture(&[
+                r#"{"type":"user","sessionId":"claude-1","cwd":"/workspace/demo","message":{"role":"user","content":[{"type":"text","text":"please inspect src"},{"type":"tool_result","tool_use_id":"tool_1","content":"Process exited with code 0"}]}}"#,
+                r#"{"type":"assistant","sessionId":"claude-1","cwd":"/workspace/demo","message":{"role":"assistant","content":[{"type":"text","text":"I checked it."},{"type":"tool_use","id":"tool_1","name":"exec_command","input":{"cmd":"rg --files src"}}]}}"#,
+            ])),
+        ));
+
+        assert_eq!(
+            detail.transcript_blocks,
+            vec![
+                TranscriptBlock::UserText("please inspect src".to_string()),
+                TranscriptBlock::ToolOutputSummary(
+                    "Tool output: tool_1 (Process exited with code 0)".to_string()
+                ),
+                TranscriptBlock::AssistantMarkdown("I checked it.".to_string()),
+                TranscriptBlock::ToolCallSummary(
+                    "Tool call: exec_command (cmd=rg --files src)".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_ignores_noise_and_degrades_bad_lines_locally() {
+        let detail = must(parse_reader_for_engine(
+            SessionEngine::Claude,
+            Cursor::new(fixture(&[
+                r#"{"type":"file-history-snapshot","data":{"ignored":true}}"#,
+                r#"{"type":"summary","summary":"ignored"}"#,
+                "not-json",
+                r#"{"type":"assistant","sessionId":"claude-1","cwd":"/workspace/demo","message":{"role":"assistant","content":[{"type":"text","text":"still here"}]}}"#,
+            ])),
+        ));
+
+        assert_eq!(
+            detail.transcript_blocks,
+            vec![
+                TranscriptBlock::CorruptedLineNotice(
+                    "Skipped corrupted JSON at line 3".to_string()
+                ),
+                TranscriptBlock::AssistantMarkdown("still here".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_viewport_reader_returns_only_requested_window() {
+        let viewport = must(parse_viewport_reader_for_engine(
+            SessionEngine::Claude,
+            Cursor::new(fixture(&[
+                r#"{"type":"assistant","sessionId":"claude-1","timestamp":"2026-04-20T01:02:03Z","cwd":"/workspace/demo","message":{"role":"assistant","content":[{"type":"text","text":"line-1\nline-2\nline-3"}]}}"#,
+                r#"{"type":"assistant","sessionId":"claude-1","cwd":"/workspace/demo","message":{"role":"assistant","content":[{"type":"text","text":"line-4"}]}}"#,
+            ])),
+            2,
+            2,
+            &DisplayConfig::show_all(),
+        ));
+
+        assert_eq!(
+            viewport.rendered_lines,
+            vec!["CWD: /workspace/demo".to_string(), "".to_string()]
+        );
+        assert!(viewport.has_more_before);
+        assert!(viewport.has_more_after);
+    }
+
+    #[test]
+    fn codex_final_render_uses_unified_user_and_assistant_screen_labels() {
+        let viewport = must(parse_viewport_reader(
+            Cursor::new(fixture(&[
+                r#"{"type":"session_meta","payload":{"id":"s1","timestamp":"2026-04-16T00:00:00Z","cwd":"/tmp"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"world"}]}}"#,
+            ])),
+            0,
+            50,
+            &DisplayConfig::show_all(),
+        ));
+
+        let joined = viewport.rendered_lines.join("\n");
+        assert!(joined.contains("🧑 User"));
+        assert!(joined.contains("🤖 Assistant"));
+        assert!(!joined.contains("\nUser\n"));
+        assert!(!joined.contains("\nAssistant\n"));
+    }
+
+    #[test]
+    fn claude_final_render_uses_unified_user_and_assistant_screen_labels() {
+        let viewport = must(parse_viewport_reader_for_engine(
+            SessionEngine::Claude,
+            Cursor::new(fixture(&[
+                r#"{"type":"user","sessionId":"claude-1","cwd":"/workspace/demo","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#,
+                r#"{"type":"assistant","sessionId":"claude-1","cwd":"/workspace/demo","message":{"role":"assistant","content":[{"type":"text","text":"world"}]}}"#,
+            ])),
+            0,
+            50,
+            &DisplayConfig::show_all(),
+        ));
+
+        let joined = viewport.rendered_lines.join("\n");
+        assert!(joined.contains("🧑 User"));
+        assert!(joined.contains("🤖 Assistant"));
+        assert!(!joined.contains("\nUser\n"));
+        assert!(!joined.contains("\nAssistant\n"));
     }
 }

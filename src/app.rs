@@ -5,7 +5,10 @@ use std::thread;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use crate::catalog::{CatalogLoad, FileHealth, SessionCatalogReader, SessionListItem};
+use crate::catalog::{
+    CatalogLoad, EngineCatalogReader, FileHealth, SessionCatalogReader, SessionEngine,
+    SessionListItem,
+};
 use crate::delete::DeleteRequest;
 use crate::detail::{DetailViewport, SessionDetailLoader};
 use crate::resume::ResumeSessionRequest;
@@ -60,19 +63,28 @@ pub enum DeleteResult {
 #[derive(Clone, Debug)]
 pub struct DetailLoadResult {
     pub request_id: u64,
+    pub engine: SessionEngine,
     pub result: Result<DetailViewport, String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DetailRequest {
     pub request_id: u64,
+    pub engine: SessionEngine,
     pub path: PathBuf,
     pub offset: usize,
     pub height: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogRequest {
+    pub request_id: u64,
+    pub engine: SessionEngine,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppAction {
+    LoadCatalog(CatalogRequest),
     LoadDetail(DetailRequest),
     Delete(DeleteRequest),
     Resume(ResumeSessionRequest),
@@ -112,13 +124,27 @@ pub enum ResumeState {
     Error,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CatalogLoadingState {
+    Idle,
+    Loading(SessionEngine),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerminalSizeState {
     pub width: u16,
     pub height: u16,
 }
 
+#[derive(Clone, Debug)]
+pub struct CatalogLoadResult {
+    pub request_id: u64,
+    pub engine: SessionEngine,
+    pub result: Result<CatalogLoad, String>,
+}
+
 pub struct App {
+    pub active_engine: SessionEngine,
     pub session_list: Vec<SessionListItem>,
     pub selected_index: Option<usize>,
     pub detail_state: SessionDetailState,
@@ -131,16 +157,20 @@ pub struct App {
     pub path_hint_state: Option<PathHintState>,
     pub detail_viewport_state: DetailViewportState,
     pub parse_cancellation_token: u64,
+    pub catalog_loading_state: CatalogLoadingState,
     pub split_direction: SplitDirection,
     pub focused_panel: FocusedPanel,
     pub panel_main_size: Option<u16>,
     pub header_summary: String,
     pub layout_tree_version: u64,
     pub resume_state: ResumeState,
+    pub resume_engine: Option<SessionEngine>,
     pub resume_result_message: Option<String>,
+    pub engine_status_messages: HashMap<SessionEngine, String>,
     tick_count: u64,
     pending_full_redraw: bool,
     terminal_size: TerminalSizeState,
+    catalog_request_token: u64,
 }
 
 impl App {
@@ -159,6 +189,7 @@ impl App {
                 };
 
                 let mut app = Self {
+                    active_engine: SessionEngine::Codex,
                     session_list,
                     selected_index,
                     detail_state,
@@ -174,21 +205,29 @@ impl App {
                         viewport_height: DEFAULT_VIEWPORT_HEIGHT,
                     },
                     parse_cancellation_token: 0,
+                    catalog_loading_state: CatalogLoadingState::Idle,
                     split_direction: SplitDirection::Horizontal,
                     focused_panel: FocusedPanel::List,
                     panel_main_size: None,
                     header_summary: String::new(),
                     layout_tree_version: 0,
                     resume_state: ResumeState::Idle,
+                    resume_engine: None,
                     resume_result_message: None,
+                    engine_status_messages: HashMap::from([(
+                        SessionEngine::Codex,
+                        with_status_message(None, warnings.last().map(String::as_str)),
+                    )]),
                     tick_count: 0,
                     pending_full_redraw: false,
                     terminal_size: default_terminal_size(),
+                    catalog_request_token: 0,
                 };
                 app.refresh_header_summary();
                 app
             }
             Err(err) => Self {
+                active_engine: SessionEngine::Codex,
                 session_list: Vec::new(),
                 selected_index: None,
                 detail_state: SessionDetailState::Error("No sessions found.".to_string()),
@@ -204,16 +243,23 @@ impl App {
                     viewport_height: DEFAULT_VIEWPORT_HEIGHT,
                 },
                 parse_cancellation_token: 0,
+                catalog_loading_state: CatalogLoadingState::Idle,
                 split_direction: SplitDirection::Horizontal,
                 focused_panel: FocusedPanel::List,
                 panel_main_size: None,
                 header_summary: empty_header_summary(),
                 layout_tree_version: 0,
                 resume_state: ResumeState::Idle,
+                resume_engine: None,
                 resume_result_message: None,
+                engine_status_messages: HashMap::from([(
+                    SessionEngine::Codex,
+                    with_status_message(None, Some(err.as_str())),
+                )]),
                 tick_count: 0,
                 pending_full_redraw: false,
                 terminal_size: default_terminal_size(),
+                catalog_request_token: 0,
             },
         }
     }
@@ -245,9 +291,47 @@ impl App {
         self.begin_detail_request()
     }
 
+    pub fn apply_catalog_result(&mut self, result: CatalogLoadResult) {
+        if result.request_id != self.catalog_request_token || result.engine != self.active_engine {
+            return;
+        }
+
+        self.catalog_loading_state = CatalogLoadingState::Idle;
+        self.file_health_map.clear();
+        self.detail_state = SessionDetailState::Idle;
+        self.detail_viewport_state.scroll_offset = 0;
+        self.selected_index = None;
+        self.parse_cancellation_token = self.parse_cancellation_token.saturating_add(1);
+
+        match result.result {
+            Ok(load) => {
+                let status = with_status_message(None, load.warnings.last().map(String::as_str));
+                self.session_list = load.items;
+                self.file_health_map = load.file_health_map;
+                self.status_message = status.clone();
+                self.engine_status_messages.insert(result.engine, status);
+            }
+            Err(err) => {
+                self.session_list.clear();
+                let status = with_status_message(None, Some(err.as_str()));
+                self.status_message = status.clone();
+                self.engine_status_messages.insert(result.engine, status);
+            }
+        }
+
+        self.refresh_header_summary();
+    }
+
     pub fn handle_key(&mut self, event: KeyEvent) -> Option<AppAction> {
         if self.delete_modal_state.is_some() {
             return self.handle_delete_modal_key(event);
+        }
+
+        if event.code == KeyCode::Tab {
+            return Some(AppAction::LoadCatalog(self.switch_engine(true)));
+        }
+        if event.code == KeyCode::BackTab {
+            return Some(AppAction::LoadCatalog(self.switch_engine(false)));
         }
 
         if is_ctrl_alt_char(&event, 'h') {
@@ -331,7 +415,11 @@ impl App {
                         .saturating_sub(layout.list_panel.y)
                         .saturating_sub(1) as usize;
                     if let Some(item) = self.session_list.get(row) {
-                        self.show_path_hint(item.abs_path.display().to_string());
+                        let absolute_path = item.abs_path.display().to_string();
+                        self.selected_index = Some(row);
+                        self.refresh_header_summary();
+                        self.show_path_hint(absolute_path);
+                        return self.begin_detail_request().map(AppAction::LoadDetail);
                     } else {
                         self.clear_path_hint();
                     }
@@ -374,7 +462,8 @@ impl App {
     }
 
     pub fn apply_detail_result(&mut self, result: DetailLoadResult) {
-        if result.request_id != self.parse_cancellation_token {
+        if result.request_id != self.parse_cancellation_token || result.engine != self.active_engine
+        {
             return;
         }
 
@@ -450,19 +539,23 @@ impl App {
     }
 
     pub fn apply_resume_result(&mut self, result: Result<(), String>) {
+        let engine = self.resume_engine.unwrap_or(self.active_engine);
+        let engine_label = engine.label();
         match result {
             Ok(()) => {
-                let message = "Returned from codex resume";
+                let message = format!("Returned from {engine_label} resume");
                 self.resume_state = ResumeState::Idle;
-                self.resume_result_message = Some(message.to_string());
-                self.status_message = with_status_message(Some(message), None);
+                self.resume_result_message = Some(message.clone());
+                self.status_message = with_status_message(Some(message.as_str()), None);
             }
             Err(err) => {
+                let message = format!("{engine_label} resume failed: {err}");
                 self.resume_state = ResumeState::Error;
-                self.resume_result_message = Some(err.clone());
-                self.status_message = with_status_message(None, Some(err.as_str()));
+                self.resume_result_message = Some(message.clone());
+                self.status_message = with_status_message(None, Some(message.as_str()));
             }
         }
+        self.resume_engine = None;
     }
 
     pub fn clear_path_hint(&mut self) {
@@ -487,10 +580,12 @@ impl App {
                 self.cancel_delete_confirmation();
                 None
             }
-            KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
+            KeyCode::Left | KeyCode::Right => {
                 self.toggle_delete_focus();
                 None
             }
+            KeyCode::Tab => Some(AppAction::LoadCatalog(self.switch_engine(true))),
+            KeyCode::BackTab => Some(AppAction::LoadCatalog(self.switch_engine(false))),
             KeyCode::Enter => match self
                 .delete_modal_state
                 .as_ref()
@@ -532,6 +627,7 @@ impl App {
         };
 
         self.pending_delete_target = Some(DeleteRequest {
+            engine: self.active_engine,
             path: selected.abs_path,
             session_id: selected.session_id.clone(),
         });
@@ -565,6 +661,16 @@ impl App {
     fn move_selection(&mut self, delta: isize) {
         self.clear_path_hint();
         let Some(current_index) = self.selected_index else {
+            if self.session_list.is_empty() {
+                self.refresh_header_summary();
+                return;
+            }
+            self.selected_index = Some(if delta >= 0 {
+                0
+            } else {
+                self.session_list.len().saturating_sub(1)
+            });
+            self.refresh_header_summary();
             self.refresh_header_summary();
             return;
         };
@@ -591,6 +697,7 @@ impl App {
 
         Some(DetailRequest {
             request_id: self.parse_cancellation_token,
+            engine: self.active_engine,
             path: selected.abs_path,
             offset: 0,
             height: self.detail_viewport_state.viewport_height,
@@ -599,21 +706,29 @@ impl App {
 
     fn begin_resume_request(&mut self) -> Option<ResumeSessionRequest> {
         let selected = self.selected_item()?.clone();
+        let engine = self.active_engine;
+        let engine_label = engine.label();
         let cwd = selected.cwd_path.trim();
         if cwd.is_empty() || cwd == "-" {
-            let message = format!("Session {} is missing cwd metadata", selected.session_id);
+            let message = format!(
+                "{engine_label} session {} is missing cwd metadata",
+                selected.session_id
+            );
             self.resume_state = ResumeState::Error;
+            self.resume_engine = Some(engine);
             self.resume_result_message = Some(message.clone());
             self.status_message = with_status_message(None, Some(message.as_str()));
             return None;
         }
 
         self.resume_state = ResumeState::Preparing;
-        let message = format!("Resuming session {}", selected.session_id);
+        self.resume_engine = Some(engine);
+        let message = format!("Resuming {engine_label} session {}", selected.session_id);
         self.resume_result_message = Some(message.clone());
         self.status_message = with_status_message(Some(message.as_str()), None);
 
         Some(ResumeSessionRequest {
+            engine,
             session_id: selected.session_id,
             cwd: PathBuf::from(cwd),
         })
@@ -621,6 +736,35 @@ impl App {
 
     fn invalidate_detail_requests(&mut self) {
         self.parse_cancellation_token = self.parse_cancellation_token.saturating_add(1);
+    }
+
+    fn switch_engine(&mut self, forward: bool) -> CatalogRequest {
+        self.active_engine = if forward {
+            self.active_engine.next()
+        } else {
+            self.active_engine.previous()
+        };
+        self.catalog_request_token = self.catalog_request_token.saturating_add(1);
+        self.catalog_loading_state = CatalogLoadingState::Loading(self.active_engine);
+        self.invalidate_detail_requests();
+        self.session_list.clear();
+        self.file_health_map.clear();
+        self.selected_index = None;
+        self.detail_state = SessionDetailState::Idle;
+        self.detail_viewport_state.scroll_offset = 0;
+        self.delete_modal_state = None;
+        self.pending_delete_target = None;
+        self.clear_path_hint();
+        self.refresh_header_summary();
+        self.status_message = format!(
+            "{} | Loading {} sessions...",
+            default_status_message(),
+            self.active_engine.label()
+        );
+        CatalogRequest {
+            request_id: self.catalog_request_token,
+            engine: self.active_engine,
+        }
     }
 
     fn scroll_detail(&mut self, delta: isize) -> Option<DetailRequest> {
@@ -637,6 +781,7 @@ impl App {
 
         Some(DetailRequest {
             request_id: self.parse_cancellation_token,
+            engine: self.active_engine,
             path: selected.abs_path,
             offset: next,
             height: self.detail_viewport_state.viewport_height,
@@ -701,10 +846,41 @@ pub fn spawn_detail_loader<L: SessionDetailLoader + Send + Sync + 'static>(
 
     thread::spawn(move || {
         while let Ok(request) = request_rx.recv() {
-            let result = loader.load_viewport(&request.path, request.offset, request.height);
+            let result = loader.load_viewport(
+                request.engine,
+                &request.path,
+                request.offset,
+                request.height,
+            );
             if result_tx
                 .send(DetailLoadResult {
                     request_id: request.request_id,
+                    engine: request.engine,
+                    result,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    (request_tx, result_rx)
+}
+
+pub fn spawn_catalog_loader<L: EngineCatalogReader + Send + Sync + 'static>(
+    loader: L,
+) -> (Sender<CatalogRequest>, Receiver<CatalogLoadResult>) {
+    let (request_tx, request_rx) = mpsc::channel::<CatalogRequest>();
+    let (result_tx, result_rx) = mpsc::channel::<CatalogLoadResult>();
+
+    thread::spawn(move || {
+        while let Ok(request) = request_rx.recv() {
+            let result = loader.load_sessions_for(request.engine);
+            if result_tx
+                .send(CatalogLoadResult {
+                    request_id: request.request_id,
+                    engine: request.engine,
                     result,
                 })
                 .is_err()
@@ -721,6 +897,15 @@ pub fn drain_detail_results(app: &mut App, receiver: &Receiver<DetailLoadResult>
     loop {
         match receiver.try_recv() {
             Ok(result) => app.apply_detail_result(result),
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+        }
+    }
+}
+
+pub fn drain_catalog_results(app: &mut App, receiver: &Receiver<CatalogLoadResult>) {
+    loop {
+        match receiver.try_recv() {
+            Ok(result) => app.apply_catalog_result(result),
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
         }
     }
@@ -887,7 +1072,7 @@ fn restore_selection_after_delete(deleted_index: usize, remaining_len: usize) ->
 }
 
 fn default_status_message() -> &'static str {
-    "Navigate: Up/Down or j/k | Resume: Enter | Layout: Ctrl+Alt+H/V | Focus: Ctrl+Alt+Arrows | Resize: Ctrl+Alt+=/- | Delete: d/Delete | Quit: q"
+    "Switch Engine: Tab/Shift+Tab | Navigate: Up/Down or j/k | Resume: Enter | Layout: Ctrl+Alt+H/V | Focus: Ctrl+Alt+Arrows | Resize: Ctrl+Alt+=/- | Delete: d/Delete | Quit: q"
 }
 
 fn with_status_message(info: Option<&str>, error: Option<&str>) -> String {
@@ -1017,6 +1202,26 @@ mod tests {
         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::ALT)
     }
 
+    fn catalog_result(
+        request_id: u64,
+        engine: SessionEngine,
+        items: Vec<SessionListItem>,
+    ) -> CatalogLoadResult {
+        let file_health_map = items
+            .iter()
+            .map(|item| (item.abs_path.clone(), item.file_health.clone()))
+            .collect();
+        CatalogLoadResult {
+            request_id,
+            engine,
+            result: Ok(CatalogLoad {
+                items,
+                warnings: Vec::new(),
+                file_health_map,
+            }),
+        }
+    }
+
     #[test]
     fn header_summary_shows_selected_session_fields() {
         let app = App::new(&stub_catalog(vec![item("one")]));
@@ -1033,17 +1238,425 @@ mod tests {
     }
 
     #[test]
+    fn default_startup_enters_codex_tab() {
+        let app = App::new(&stub_catalog(vec![item("one")]));
+        assert_eq!(app.active_engine, SessionEngine::Codex);
+    }
+
+    #[test]
+    fn tab_and_backtab_switch_engines_and_request_reload() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+
+        let action = app.handle_key(KeyEvent::from(KeyCode::Tab));
+        match action {
+            Some(AppAction::LoadCatalog(request)) => {
+                assert_eq!(request.engine, SessionEngine::Claude);
+                assert_eq!(app.active_engine, SessionEngine::Claude);
+                assert_eq!(
+                    app.catalog_loading_state,
+                    CatalogLoadingState::Loading(SessionEngine::Claude)
+                );
+            }
+            other => panic!("expected catalog load request, got {other:?}"),
+        }
+
+        let action = app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        match action {
+            Some(AppAction::LoadCatalog(request)) => {
+                assert_eq!(request.engine, SessionEngine::Codex);
+                assert_eq!(app.active_engine, SessionEngine::Codex);
+            }
+            other => panic!("expected catalog load request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn engine_switch_clears_list_selection_and_detail_until_reselect() {
+        let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        app.selected_index = Some(1);
+        app.detail_state = SessionDetailState::Ready(ready_viewport());
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Tab));
+
+        assert!(app.session_list.is_empty());
+        assert_eq!(app.selected_index, None);
+        assert_eq!(app.detail_state, SessionDetailState::Idle);
+        assert_eq!(app.header_summary, empty_header_summary());
+    }
+
+    #[test]
+    fn catalog_result_for_active_engine_populates_list_without_autoselect() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        let request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
+            Some(AppAction::LoadCatalog(request)) => request,
+            other => panic!("expected catalog load request, got {other:?}"),
+        };
+
+        app.apply_catalog_result(catalog_result(
+            request.request_id,
+            SessionEngine::Claude,
+            vec![item("claude-one")],
+        ));
+
+        assert_eq!(app.session_list.len(), 1);
+        assert_eq!(app.selected_index, None);
+        assert_eq!(app.detail_state, SessionDetailState::Idle);
+        assert_eq!(app.catalog_loading_state, CatalogLoadingState::Idle);
+    }
+
+    #[test]
+    fn stale_engine_results_do_not_override_current_tab() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        let claude_request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
+            Some(AppAction::LoadCatalog(request)) => request,
+            other => panic!("expected catalog load request, got {other:?}"),
+        };
+        let codex_request =
+            match app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)) {
+                Some(AppAction::LoadCatalog(request)) => request,
+                other => panic!("expected catalog load request, got {other:?}"),
+            };
+
+        app.apply_catalog_result(catalog_result(
+            claude_request.request_id,
+            SessionEngine::Claude,
+            vec![item("late-claude")],
+        ));
+        assert!(app.session_list.is_empty());
+
+        app.apply_catalog_result(catalog_result(
+            codex_request.request_id,
+            SessionEngine::Codex,
+            vec![item("fresh-codex")],
+        ));
+        assert_eq!(app.session_list.len(), 1);
+        assert_eq!(app.session_list[0].session_id, "fresh-codex");
+    }
+
+    #[test]
+    fn claude_load_error_stays_in_claude_context() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Tab));
+        app.apply_catalog_result(CatalogLoadResult {
+            request_id: 1,
+            engine: SessionEngine::Claude,
+            result: Err("Unable to read session directory /tmp/claude".to_string()),
+        });
+        assert!(
+            app.status_message
+                .contains("Unable to read session directory /tmp/claude")
+        );
+
+        let codex_request =
+            match app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)) {
+                Some(AppAction::LoadCatalog(request)) => request,
+                other => panic!("expected catalog load request, got {other:?}"),
+            };
+        app.apply_catalog_result(catalog_result(
+            codex_request.request_id,
+            SessionEngine::Codex,
+            vec![item("codex-back")],
+        ));
+
+        assert_eq!(app.active_engine, SessionEngine::Codex);
+        assert_eq!(app.session_list[0].session_id, "codex-back");
+        assert!(!app.status_message.contains("/tmp/claude"));
+    }
+
+    #[test]
+    fn claude_tab_uses_standard_delete_confirmation_flow() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        let request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
+            Some(AppAction::LoadCatalog(request)) => request,
+            other => panic!("expected catalog load request, got {other:?}"),
+        };
+        app.apply_catalog_result(catalog_result(
+            request.request_id,
+            SessionEngine::Claude,
+            vec![item("claude-one")],
+        ));
+        app.selected_index = Some(0);
+
+        let action = app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+
+        assert!(action.is_none());
+        assert!(app.delete_modal_state.is_some());
+        assert_eq!(
+            app.pending_delete_target
+                .as_ref()
+                .map(|request| (request.engine, request.session_id.as_str())),
+            Some((SessionEngine::Claude, "claude-one"))
+        );
+    }
+
+    #[test]
+    fn switching_engine_clears_delete_modal_and_pending_target() {
+        let mut app = App::new(&stub_catalog(vec![item("codex-one")]));
+
+        let claude_request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
+            Some(AppAction::LoadCatalog(request)) => request,
+            other => panic!("expected catalog load request, got {other:?}"),
+        };
+        app.apply_catalog_result(catalog_result(
+            claude_request.request_id,
+            SessionEngine::Claude,
+            vec![item("claude-one")],
+        ));
+        app.selected_index = Some(0);
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        assert!(app.delete_modal_state.is_some());
+        assert_eq!(
+            app.pending_delete_target
+                .as_ref()
+                .map(|request| request.engine),
+            Some(SessionEngine::Claude)
+        );
+
+        let codex_request =
+            match app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)) {
+                Some(AppAction::LoadCatalog(request)) => request,
+                other => panic!("expected catalog load request, got {other:?}"),
+            };
+        app.apply_catalog_result(catalog_result(
+            codex_request.request_id,
+            SessionEngine::Codex,
+            vec![item("codex-one")],
+        ));
+
+        assert!(app.delete_modal_state.is_none());
+        assert!(app.pending_delete_target.is_none());
+    }
+
+    #[test]
+    fn claude_delete_success_updates_list_and_requests_neighbor_detail() {
+        let mut app = App::new(&stub_catalog(vec![item("codex-one")]));
+        let request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
+            Some(AppAction::LoadCatalog(request)) => request,
+            other => panic!("expected catalog load request, got {other:?}"),
+        };
+        app.apply_catalog_result(catalog_result(
+            request.request_id,
+            SessionEngine::Claude,
+            vec![item("claude-one"), item("claude-two")],
+        ));
+        app.selected_index = Some(0);
+        app.detail_state = SessionDetailState::Ready(ready_viewport());
+
+        let next_detail = app.apply_delete_result(DeleteResult::Success(DeleteSuccess {
+            deleted_path: PathBuf::from("/tmp/claude-one.jsonl"),
+            deleted_session_id: "claude-one".to_string(),
+        }));
+
+        assert_eq!(app.active_engine, SessionEngine::Claude);
+        assert_eq!(app.session_list.len(), 1);
+        assert_eq!(app.session_list[0].session_id, "claude-two");
+        assert_eq!(app.selected_index, Some(0));
+        assert!(app.delete_modal_state.is_none());
+        assert!(app.pending_delete_target.is_none());
+        assert!(
+            app.status_message
+                .contains("Deleted session claude-one")
+        );
+        match next_detail {
+            Some(DetailRequest { engine, path, .. }) => {
+                assert_eq!(engine, SessionEngine::Claude);
+                assert_eq!(path, PathBuf::from("/tmp/claude-two.jsonl"));
+            }
+            other => panic!("expected neighbor detail request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claude_delete_failure_stays_in_claude_context_and_clears_pending_state() {
+        let mut app = App::new(&stub_catalog(vec![item("codex-one")]));
+        let request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
+            Some(AppAction::LoadCatalog(request)) => request,
+            other => panic!("expected catalog load request, got {other:?}"),
+        };
+        app.apply_catalog_result(catalog_result(
+            request.request_id,
+            SessionEngine::Claude,
+            vec![item("claude-one")],
+        ));
+        app.selected_index = Some(0);
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+
+        let next_detail = app.apply_delete_result(DeleteResult::Failure(DeleteFailure {
+            target_path: PathBuf::from("/tmp/claude-one.jsonl"),
+            target_session_id: "claude-one".to_string(),
+            message: "Rejected out-of-root session file /tmp/claude-one.jsonl".to_string(),
+        }));
+
+        assert_eq!(app.active_engine, SessionEngine::Claude);
+        assert_eq!(app.session_list.len(), 1);
+        assert_eq!(app.session_list[0].session_id, "claude-one");
+        assert_eq!(app.selected_index, Some(0));
+        assert!(app.delete_modal_state.is_none());
+        assert!(app.pending_delete_target.is_none());
+        assert!(next_detail.is_none());
+        assert!(
+            app.status_message
+                .contains("Rejected out-of-root session file /tmp/claude-one.jsonl")
+        );
+        assert_eq!(
+            app.delete_result_message.as_deref(),
+            Some("Rejected out-of-root session file /tmp/claude-one.jsonl")
+        );
+    }
+
+    #[test]
+    fn claude_selection_requests_claude_detail_loader() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        let request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
+            Some(AppAction::LoadCatalog(request)) => request,
+            other => panic!("expected catalog load request, got {other:?}"),
+        };
+        app.apply_catalog_result(catalog_result(
+            request.request_id,
+            SessionEngine::Claude,
+            vec![item("claude-one")],
+        ));
+        app.selected_index = Some(0);
+
+        let action = app.handle_key(KeyEvent::from(KeyCode::Down));
+        match action {
+            Some(AppAction::LoadDetail(request)) => {
+                assert_eq!(request.engine, SessionEngine::Claude);
+                assert_eq!(request.path, PathBuf::from("/tmp/claude-one.jsonl"));
+            }
+            other => panic!("expected detail load request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stale_detail_results_from_previous_engine_do_not_override_current_tab() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        let claude_catalog_request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
+            Some(AppAction::LoadCatalog(request)) => request,
+            other => panic!("expected catalog load request, got {other:?}"),
+        };
+        app.apply_catalog_result(catalog_result(
+            claude_catalog_request.request_id,
+            SessionEngine::Claude,
+            vec![item("claude-one")],
+        ));
+        app.selected_index = Some(0);
+        let claude_detail_request = match app.handle_key(KeyEvent::from(KeyCode::Down)) {
+            Some(AppAction::LoadDetail(request)) => request,
+            other => panic!("expected detail load request, got {other:?}"),
+        };
+
+        let codex_catalog_request =
+            match app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)) {
+                Some(AppAction::LoadCatalog(request)) => request,
+                other => panic!("expected catalog load request, got {other:?}"),
+            };
+        app.apply_catalog_result(catalog_result(
+            codex_catalog_request.request_id,
+            SessionEngine::Codex,
+            vec![item("codex-one")],
+        ));
+        app.selected_index = Some(0);
+
+        app.apply_detail_result(DetailLoadResult {
+            request_id: claude_detail_request.request_id,
+            engine: SessionEngine::Claude,
+            result: Ok(ready_viewport()),
+        });
+
+        assert_eq!(app.active_engine, SessionEngine::Codex);
+        assert_eq!(app.detail_state, SessionDetailState::Idle);
+    }
+
+    #[test]
     fn enter_creates_resume_request_from_selected_session() {
         let mut app = App::new(&stub_catalog(vec![item("one")]));
         let action = app.handle_key(KeyEvent::from(KeyCode::Enter));
         match action {
             Some(AppAction::Resume(request)) => {
+                assert_eq!(request.engine, SessionEngine::Codex);
                 assert_eq!(request.session_id, "one");
                 assert_eq!(request.cwd, PathBuf::from("/workspace/one"));
             }
             other => panic!("expected resume request, got {other:?}"),
         }
         assert_eq!(app.resume_state, ResumeState::Preparing);
+        assert_eq!(app.resume_engine, Some(SessionEngine::Codex));
+    }
+
+    #[test]
+    fn claude_enter_creates_claude_resume_request_from_selected_session() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        let request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
+            Some(AppAction::LoadCatalog(request)) => request,
+            other => panic!("expected catalog load request, got {other:?}"),
+        };
+        app.apply_catalog_result(catalog_result(
+            request.request_id,
+            SessionEngine::Claude,
+            vec![item("claude-one")],
+        ));
+        app.selected_index = Some(0);
+
+        let action = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        match action {
+            Some(AppAction::Resume(request)) => {
+                assert_eq!(request.engine, SessionEngine::Claude);
+                assert_eq!(request.session_id, "claude-one");
+                assert_eq!(request.cwd, PathBuf::from("/workspace/claude-one"));
+            }
+            other => panic!("expected resume request, got {other:?}"),
+        }
+        assert_eq!(app.resume_state, ResumeState::Preparing);
+        assert_eq!(app.resume_engine, Some(SessionEngine::Claude));
+        assert!(
+            app.status_message
+                .contains("Resuming Claude session claude-one")
+        );
+    }
+
+    #[test]
+    fn claude_mouse_selection_then_enter_triggers_claude_resume_request() {
+        let mut app = App::new(&stub_catalog(vec![item("codex-one")]));
+        let request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
+            Some(AppAction::LoadCatalog(request)) => request,
+            other => panic!("expected catalog load request, got {other:?}"),
+        };
+        app.apply_catalog_result(catalog_result(
+            request.request_id,
+            SessionEngine::Claude,
+            vec![item("claude-one")],
+        ));
+
+        let click_action = app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 2,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+            30,
+        );
+        match click_action {
+            Some(AppAction::LoadDetail(request)) => {
+                assert_eq!(request.engine, SessionEngine::Claude);
+                assert_eq!(request.path, PathBuf::from("/tmp/claude-one.jsonl"));
+            }
+            other => panic!("expected detail load request from mouse selection, got {other:?}"),
+        }
+        assert_eq!(app.selected_index, Some(0));
+
+        let enter_action = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        match enter_action {
+            Some(AppAction::Resume(request)) => {
+                assert_eq!(request.engine, SessionEngine::Claude);
+                assert_eq!(request.session_id, "claude-one");
+                assert_eq!(request.cwd, PathBuf::from("/workspace/claude-one"));
+            }
+            other => panic!("expected resume request after mouse selection, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1068,6 +1681,32 @@ mod tests {
         assert!(action.is_none());
         assert_eq!(app.resume_state, ResumeState::Error);
         assert!(app.status_message.contains("missing cwd metadata"));
+        assert!(app.status_message.contains("Codex session broken"));
+    }
+
+    #[test]
+    fn claude_enter_with_missing_cwd_reports_error_without_request() {
+        let mut broken = item("claude-broken");
+        broken.cwd_path = "-".to_string();
+        let mut app = App::new(&stub_catalog(vec![item("codex-one")]));
+        let request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
+            Some(AppAction::LoadCatalog(request)) => request,
+            other => panic!("expected catalog load request, got {other:?}"),
+        };
+        app.apply_catalog_result(catalog_result(
+            request.request_id,
+            SessionEngine::Claude,
+            vec![broken],
+        ));
+        app.selected_index = Some(0);
+
+        let action = app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert!(action.is_none());
+        assert_eq!(app.resume_state, ResumeState::Error);
+        assert!(app.status_message.contains("Claude session claude-broken"));
+        assert!(app.status_message.contains("missing cwd metadata"));
+        assert_eq!(app.resume_engine, Some(SessionEngine::Claude));
     }
 
     #[test]
@@ -1378,6 +2017,7 @@ mod tests {
         let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
         app.selected_index = Some(1);
         app.detail_state = SessionDetailState::Ready(ready_viewport());
+        app.resume_engine = Some(SessionEngine::Codex);
         app.apply_resume_result(Err("codex failed".to_string()));
         assert_eq!(app.selected_index, Some(1));
         assert_eq!(
@@ -1385,5 +2025,65 @@ mod tests {
             SessionDetailState::Ready(ready_viewport())
         );
         assert_eq!(app.resume_state, ResumeState::Error);
+    }
+
+    #[test]
+    fn apply_resume_result_uses_request_engine_context_for_success_message() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        app.active_engine = SessionEngine::Codex;
+        app.resume_engine = Some(SessionEngine::Claude);
+
+        app.apply_resume_result(Ok(()));
+
+        assert_eq!(app.resume_state, ResumeState::Idle);
+        assert_eq!(
+            app.resume_result_message.as_deref(),
+            Some("Returned from Claude resume")
+        );
+        assert!(app.status_message.contains("Returned from Claude resume"));
+        assert_eq!(app.resume_engine, None);
+    }
+
+    #[test]
+    fn apply_resume_result_uses_request_engine_context_for_error_message() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        app.active_engine = SessionEngine::Codex;
+        app.resume_engine = Some(SessionEngine::Claude);
+
+        app.apply_resume_result(Err("claude --resume exited with status 9".to_string()));
+
+        assert_eq!(app.resume_state, ResumeState::Error);
+        assert_eq!(
+            app.resume_result_message.as_deref(),
+            Some("Claude resume failed: claude --resume exited with status 9")
+        );
+        assert!(
+            app.status_message
+                .contains("Claude resume failed: claude --resume exited with status 9")
+        );
+        assert_eq!(app.resume_engine, None);
+    }
+
+    #[test]
+    fn apply_resume_result_preserves_engine_context_for_terminal_rebuild_errors() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        app.active_engine = SessionEngine::Codex;
+        app.resume_engine = Some(SessionEngine::Claude);
+
+        app.apply_resume_result(Err(
+            "Failed to rebuild TUI after resume: terminal create failed".to_string(),
+        ));
+
+        assert_eq!(app.resume_state, ResumeState::Error);
+        assert_eq!(
+            app.resume_result_message.as_deref(),
+            Some(
+                "Claude resume failed: Failed to rebuild TUI after resume: terminal create failed"
+            )
+        );
+        assert!(app.status_message.contains(
+            "Claude resume failed: Failed to rebuild TUI after resume: terminal create failed"
+        ));
+        assert_eq!(app.resume_engine, None);
     }
 }

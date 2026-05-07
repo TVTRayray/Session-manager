@@ -8,6 +8,39 @@ use std::time::SystemTime;
 use chrono::{DateTime, Local};
 use serde_json::Value;
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SessionEngine {
+    Codex,
+    Claude,
+}
+
+impl SessionEngine {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude",
+        }
+    }
+
+    pub fn root_dir(self, home_dir: &Path) -> PathBuf {
+        match self {
+            Self::Codex => home_dir.join(".codex").join("sessions"),
+            Self::Claude => home_dir.join(".claude").join("projects"),
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Codex => Self::Claude,
+            Self::Claude => Self::Codex,
+        }
+    }
+
+    pub fn previous(self) -> Self {
+        self.next()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FileHealth {
     Healthy,
@@ -38,6 +71,10 @@ pub trait SessionCatalogReader {
     fn load_sessions(&self) -> Result<CatalogLoad, String>;
 }
 
+pub trait EngineCatalogReader {
+    fn load_sessions_for(&self, engine: SessionEngine) -> Result<CatalogLoad, String>;
+}
+
 #[derive(Clone, Debug)]
 pub struct FilesystemSessionCatalog {
     base_dir: PathBuf,
@@ -58,6 +95,29 @@ impl FilesystemSessionCatalog {
 impl SessionCatalogReader for FilesystemSessionCatalog {
     fn load_sessions(&self) -> Result<CatalogLoad, String> {
         scan_session_dir(&self.base_dir)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct FilesystemMultiSessionCatalog {
+    home_dir: PathBuf,
+}
+
+impl FilesystemMultiSessionCatalog {
+    pub fn from_home_dir() -> Result<Self, String> {
+        let home_dir =
+            dirs::home_dir().ok_or_else(|| "Unable to resolve the home directory".to_string())?;
+        Ok(Self { home_dir })
+    }
+
+    pub fn from_path(home_dir: PathBuf) -> Self {
+        Self { home_dir }
+    }
+}
+
+impl EngineCatalogReader for FilesystemMultiSessionCatalog {
+    fn load_sessions_for(&self, engine: SessionEngine) -> Result<CatalogLoad, String> {
+        scan_session_dir(&engine.root_dir(&self.home_dir))
     }
 }
 
@@ -243,29 +303,47 @@ fn read_session_stub(path: &Path) -> StubRead {
             Ok(value) => value,
             Err(_) => continue,
         };
-        if value.get("type").and_then(Value::as_str) != Some("session_meta") {
-            continue;
-        }
+        
+        let msg_type = value.get("type").and_then(Value::as_str);
 
-        let Some(payload) = value.get("payload") else {
-            break;
-        };
-        let session_id = payload
-            .get("id")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| fallback_session_id(path));
-        let cwd_path = payload
-            .get("cwd")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| "-".to_string());
-        let cwd_tail = last_path_segment(&cwd_path).unwrap_or_else(|| "-".to_string());
-        return StubRead::Success {
-            session_id,
-            cwd_tail,
-            cwd_path,
-        };
+        if msg_type == Some("session_meta") {
+            let Some(payload) = value.get("payload") else {
+                continue;
+            };
+            let session_id = payload
+                .get("id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| fallback_session_id(path));
+            let cwd_path = payload
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| "-".to_string());
+            let cwd_tail = last_path_segment(&cwd_path).unwrap_or_else(|| "-".to_string());
+            return StubRead::Success {
+                session_id,
+                cwd_tail,
+                cwd_path,
+            };
+        } else if msg_type == Some("user") || msg_type == Some("assistant") {
+            let session_id = value
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| fallback_session_id(path));
+            let cwd_path = value
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| "-".to_string());
+            let cwd_tail = last_path_segment(&cwd_path).unwrap_or_else(|| "-".to_string());
+            return StubRead::Success {
+                session_id,
+                cwd_tail,
+                cwd_path,
+            };
+        }
     }
 
     StubRead::Warning(format!(
@@ -384,6 +462,32 @@ mod tests {
         assert_eq!(load.items.len(), 2);
         assert!(load.items[0].abs_path.ends_with("newer.jsonl"));
         assert!(load.items[1].abs_path.ends_with("older.jsonl"));
+    }
+
+    #[test]
+    fn multi_engine_catalog_uses_codex_and_claude_roots() {
+        let home = must(tempdir());
+        let codex_root = home.path().join(".codex").join("sessions");
+        let claude_root = home.path().join(".claude").join("projects");
+        must(fs::create_dir_all(&codex_root));
+        must(fs::create_dir_all(&claude_root));
+        must(fs::write(
+            codex_root.join("codex.jsonl"),
+            r#"{"type":"session_meta","payload":{"id":"codex","cwd":"/tmp/codex"}}"#,
+        ));
+        must(fs::write(
+            claude_root.join("claude.jsonl"),
+            r#"{"type":"session_meta","payload":{"id":"claude","cwd":"/tmp/claude"}}"#,
+        ));
+
+        let catalog = FilesystemMultiSessionCatalog::from_path(home.path().to_path_buf());
+        let codex = must(catalog.load_sessions_for(SessionEngine::Codex));
+        let claude = must(catalog.load_sessions_for(SessionEngine::Claude));
+
+        assert_eq!(codex.items.len(), 1);
+        assert_eq!(codex.items[0].session_id, "codex");
+        assert_eq!(claude.items.len(), 1);
+        assert_eq!(claude.items[0].session_id, "claude");
     }
 
     #[test]

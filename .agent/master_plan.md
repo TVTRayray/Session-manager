@@ -3,24 +3,24 @@
 ## 项目摘要
 
 - 项目名称：`Codex Sessions Manager`
-- 当前目标：阶段二布局交互自动化与 QA 基线已验收通过，等待 Master 决定下一阶段目标。
+- 当前目标：在已完成 Codex 单引擎浏览、布局和恢复链路的基础上，推进阶段三的双平台会话管理能力，统一支持 Codex 与 Claude Code 两套本地会话工作流。
 - 当前负责人：`Master`
 - 开发语言：`Rust`
 - 推荐技术栈：`ratatui` + `crossterm`，按单一可执行二进制发布。
 
 ## 当前阶段
 
-- 阶段名称：`阶段二：Session Continuation & Workspace UX`
-- 阶段目标：完成顶部标题栏、可切换/可调整的动态布局、按 `Enter` 恢复会话，以及可复用的布局交互自动化验收基线。
+- 阶段名称：`阶段三：Dual-Engine Session Hub`
+- 阶段目标：完成 Codex / Claude 双数据源切换、双模 transcript 解析，以及按当前引擎上下文执行差异化恢复命令的完整闭环。
 - 当前活跃 Spec：`none`
 
 ## Backlog
 
-- [ ] 暂无未开始的 backlog 项。
+- [ ] 暂无剩余 backlog。
 
 ## In Progress
 
-- [ ] 暂无当前进行中的 spec。
+- [ ] 暂无进行中 spec。
 
 ## Blocked
 
@@ -28,7 +28,7 @@
 
 ## QA Tracking
 
-- Spec：`07-layout-interaction-automation`
+- Spec：`08-engine-tab-and-source-switching`
 - Next Owner：`Master`
 - QA Status：`passed`
 - Blocking Issue：
@@ -50,6 +50,9 @@
 - [x] `05-dynamic-layout-and-panel-focus`：QA 复验通过，零和尺寸、最小宽高保护、布局树重建与完整重绘、聚焦高亮，以及 PTY 手工复验证据已满足当前 slice 要求。
 - [x] `06-session-resume-handoff`：QA 复验通过，`Enter` 恢复、固定 `codex resume <SESSION_ID>`、`cwd` 绑定、终端让渡/返场恢复，以及返场失败控制流闭环已满足当前 slice 要求。
 - [x] `07-layout-interaction-automation`：QA 通过，PTY 探针 trace、鼠标/增强键输入覆盖、最小尺寸拒绝断言、trace 目录输出、固定入口和 TTY 复验证据已满足当前 slice 要求。
+- [x] `08-engine-tab-and-source-switching`：QA 复验通过，双引擎 Tab、高亮、异步重载、晚到结果丢弃，以及 Codex / Claude 双根目录删除确认与结果回写已满足当前 slice 要求。
+- [x] `09-claude-transcript-adapter`：QA 复验通过，Claude transcript 适配、统一详情屏显语义、视口化读取、噪音过滤和晚到详情结果隔离已满足当前 slice 要求。
+- [x] `10-engine-aware-resume-handoff`：QA 复验通过，Claude Tab 鼠标选中后的 `Enter` 恢复链、双引擎固定命令模板、`cwd` 绑定、终端让渡/返场与请求级错误归属已满足当前 slice 要求。
 
 ## 决策记录
 
@@ -100,6 +103,30 @@
 - 日期：`2026-04-17`
   - 决策：阶段二布局交互必须配套独立的 TUI 自动化验证 slice，使用本地 `.agent/skills/test-tui` 作为验收基座。
   - 原因：仅靠单元测试和零散 PTY 验证不足以稳定覆盖真实交互链路，需要把自动化输入、trace 日志和复验要求写成正式状态源。
+
+- 日期：`2026-04-29`
+  - 决策：`docs/prd-4.md` 建模为新阶段 `阶段三：Dual-Engine Session Hub`，而不是阶段二 backlog 的扩充。
+  - 原因：该需求引入了新的产品域和新的运行时边界，包括双数据源切换、Claude 专属解析适配，以及与 Codex 不同的恢复命令链路，已超出阶段二“单引擎布局与恢复”的职责范围。
+
+- 日期：`2026-04-29`
+  - 决策：阶段三的双平台支持固定为两个受控根目录：Codex 使用 `~/.codex/sessions`，Claude 使用 `~/.claude/projects`；二者都必须维持各自根目录内的递归扫描、路径校验和删除边界。
+  - 原因：`prd-4.md` 要求在同一 TUI 中集成两套本地会话工作流，而 `../Sessions-Manager-cc/CLAUDE.md` 已给出 Claude 侧的现有实现事实：目录根为 `~/.claude/projects`，并且会递归扫描项目层级目录。
+
+- 日期：`2026-04-29`
+  - 决策：Claude 恢复链路固定采用 `claude --resume <SESSION_ID>`，工作目录绑定到该 Claude session 的原始 `cwd`。
+  - 原因：`../Sessions-Manager-cc/CLAUDE.md` 和 `../Sessions-Manager-cc/src/resume.rs` 已把 Claude 侧恢复命令与 `cwd` 绑定规则固化为现有实现；当前项目的阶段三 spec 不再留给 Coder 自行猜测命令模板。
+
+- 日期：`2026-04-29`
+  - 决策：阶段三拆为 3 个 vertical slices：引擎 Tab 与数据源切换、Claude transcript 适配、引擎感知恢复链路。
+  - 原因：这三块分别对应 UI 状态切换、数据解析抽象和外部终端接管，边界清晰，适合独立开发与验收。
+
+- 日期：`2026-04-30`
+  - 决策：`08-engine-tab-and-source-switching` 的删除边界从“Claude Tab 显式禁用删除”改为“Claude 与 Codex 都允许删除，但必须各自受限于对应根目录”。
+  - 原因：产品要求已明确调整为 Claude Tab 允许删除；继续保留旧边界会让 spec 与真实需求相冲突。
+
+- 日期：`2026-04-30`
+  - 决策：`10-engine-aware-resume-handoff` 因 Claude Tab 打开/恢复会话不生效而回退为返工状态。
+  - 原因：阶段三的恢复链路必须以真实终端用户操作可用为准；若 Claude Tab 下 `Enter` 不能真正恢复会话，则 spec 10 的通过结论无效。
 
 ## 风险记录
 
@@ -154,3 +181,23 @@
 - 风险：自动化验证若只覆盖 PTY 或只覆盖日志，不覆盖鼠标焦点高亮、最小尺寸截断和零和调整，仍可能出现“自动化通过但 UI 行为不稳”。
   - 影响：阶段二布局交互会持续反复返工，QA 成本升高。
   - 缓解方案：新增独立的 `07-layout-interaction-automation`，把输入脚本、日志断言、真实终端手工复验和边界场景统一固化。
+
+- 风险：阶段三把文件操作范围从单一 `~/.codex/sessions` 扩展到同时支持 `~/.claude/projects`，但当前 `.agent/AGENT.md` 仍写死 Codex 单根目录规则。
+  - 影响：实现阶段容易出现“按 PRD-4 属于需求内、按 AGENT 稳定规则像越界”的执行歧义，影响 Coder 和 QA 判断。
+  - 缓解方案：本轮先在 `master_plan.md` 与阶段三 specs 中显式声明双根目录的阶段性授权与边界；后续若项目确认长期双平台定位，再单独回收敛到 `AGENT.md` 稳定规则。
+
+- 风险：Claude transcript 的 JSONL 结构与 Codex 的 `session_meta / response_item / event_msg` 模型不同，若直接复用旧解析器，右侧会渲染错误或丢失关键消息。
+  - 影响：双平台切换成功后，Claude Tab 仍可能不可读，造成“能看到列表但不能读详情”的半成品状态。
+  - 缓解方案：将 Claude 解析抽象拆为独立 `09-claude-transcript-adapter`，明确适配器/策略模式、标准 `TranscriptBlock` 输出和真实样例回归。
+
+- 风险：恢复逻辑在阶段三需要根据当前 Tab 分别执行 `codex resume` 与 `claude --resume`，若引擎上下文、`cwd` 和 session_id 绑定不严谨，可能错误恢复到另一平台或错误项目目录。
+  - 影响：会直接破坏“从历史会话继续工作”的核心路径，且终端让渡失败时仍可能把用户留在半挂起状态。
+  - 缓解方案：将双模恢复拆为独立 `10-engine-aware-resume-handoff`，固定命令模板、引擎上下文状态和返场错误闭环，并要求在两条链路上分别做测试与 QA。
+
+- 风险：阶段三当前的删除实现和 QA 结论曾依赖“Claude Tab 禁用删除”的临时边界；需求改为 Claude 允许删除后，若不重建删除契约，容易出现错误根目录校验、误删或引擎上下文串用。
+  - 影响：Claude 用户会看到可切换、可查看、可恢复，但删除链路不一致或不安全，破坏双平台管理工具的完整性。
+  - 缓解方案：将 `08-engine-tab-and-source-switching` 回退为返工状态，明确 Claude 删除与 Codex 删除共享确认流程和选中态恢复，但分别绑定 `~/.claude/projects` 与 `~/.codex/sessions` 的安全校验。
+
+- 风险：`10-engine-aware-resume-handoff` 当前文档已标记通过，但若 Claude Tab 下 `Enter` 实际不能打开/恢复会话，则双平台最核心的继续工作链路在真实使用中是不成立的。
+  - 影响：用户会误以为 Claude 恢复能力已完成，实际操作却失败，直接破坏阶段三目标。
+  - 缓解方案：将 `10-engine-aware-resume-handoff` 回退为返工状态，要求以真实手测链路复核 Claude `Enter` 请求构造、命令分流、终端让渡和返场结果，而不是只依据既有单元测试结论。

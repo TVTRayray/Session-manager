@@ -7,14 +7,17 @@ use crossterm::event::{self, Event};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use sessions_manager::app::{
-    App, AppAction, DeleteFailure, DeleteResult, DeleteSuccess, DetailLoadResult, DetailRequest,
-    drain_detail_results, spawn_detail_loader,
+    App, AppAction, CatalogLoadResult, CatalogRequest, DeleteFailure, DeleteResult, DeleteSuccess,
+    DetailLoadResult, DetailRequest, drain_catalog_results, drain_detail_results,
+    spawn_catalog_loader, spawn_detail_loader,
 };
-use sessions_manager::catalog::FilesystemSessionCatalog;
+use sessions_manager::catalog::{FilesystemMultiSessionCatalog, FilesystemSessionCatalog};
 use sessions_manager::config;
-use sessions_manager::delete::{FilesystemSessionDeleteExecutor, SessionDeleteExecutor};
+use sessions_manager::delete::{EngineAwareSessionDeleteExecutor, SessionDeleteExecutor};
 use sessions_manager::detail::JsonlDetailLoader;
-use sessions_manager::resume::{CodexResumeExecutor, ResumeSessionExecutor, ResumeSessionRequest};
+use sessions_manager::resume::{
+    EngineAwareResumeExecutor, ResumeSessionExecutor, ResumeSessionRequest,
+};
 use sessions_manager::terminal::{CrosstermTerminalOps, TerminalModeGuard};
 use sessions_manager::tui;
 
@@ -22,16 +25,18 @@ type AppTerminal = Terminal<CrosstermBackend<io::Stdout>>;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let catalog = FilesystemSessionCatalog::from_home_dir().map_err(io::Error::other)?;
+    let catalog_loader =
+        FilesystemMultiSessionCatalog::from_home_dir().map_err(io::Error::other)?;
     let mut app = App::new(&catalog);
-    let base_dir = dirs::home_dir()
+    let home_dir = dirs::home_dir()
         .ok_or_else(|| io::Error::other("Unable to resolve the home directory"))?
-        .join(".codex")
-        .join("sessions");
-    let delete_executor = FilesystemSessionDeleteExecutor::from_path(base_dir.clone());
-    let resume_executor = CodexResumeExecutor::new();
+        .to_path_buf();
+    let delete_executor = EngineAwareSessionDeleteExecutor::from_home_dir(home_dir.clone());
+    let resume_executor = EngineAwareResumeExecutor::new();
     let display_config = config::load_config();
+    let (catalog_request_tx, catalog_result_rx) = spawn_catalog_loader(catalog_loader);
     let (detail_request_tx, detail_result_rx) =
-        spawn_detail_loader(JsonlDetailLoader::from_path(base_dir, display_config));
+        spawn_detail_loader(JsonlDetailLoader::from_home_path(home_dir, display_config));
 
     if let Some(request) = app.initial_detail_request() {
         let _ = detail_request_tx.send(request);
@@ -44,6 +49,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         &mut terminal,
         &mut terminal_mode,
         &mut app,
+        catalog_request_tx,
+        catalog_result_rx,
         detail_request_tx,
         detail_result_rx,
         &delete_executor,
@@ -62,6 +69,8 @@ fn run_app(
     terminal: &mut Option<AppTerminal>,
     terminal_mode: &mut TerminalModeGuard<CrosstermTerminalOps>,
     app: &mut App,
+    catalog_request_tx: Sender<CatalogRequest>,
+    catalog_result_rx: Receiver<CatalogLoadResult>,
     detail_request_tx: Sender<DetailRequest>,
     detail_result_rx: Receiver<DetailLoadResult>,
     delete_executor: &impl SessionDeleteExecutor,
@@ -74,6 +83,7 @@ fn run_app(
         app.set_terminal_size(size.width, size.height);
         app.set_detail_viewport_height(size.height.saturating_sub(3) as usize);
         app.on_tick();
+        drain_catalog_results(app, &catalog_result_rx);
         drain_detail_results(app, &detail_result_rx);
         if app.consume_full_redraw() {
             active_terminal(terminal)?.clear()?;
@@ -90,6 +100,7 @@ fn run_app(
                                 terminal_mode,
                                 app,
                                 action,
+                                &catalog_request_tx,
                                 &detail_request_tx,
                                 delete_executor,
                                 resume_executor,
@@ -104,6 +115,7 @@ fn run_app(
                             terminal_mode,
                             app,
                             action,
+                            &catalog_request_tx,
                             &detail_request_tx,
                             delete_executor,
                             resume_executor,
@@ -134,17 +146,22 @@ fn dispatch_action(
     terminal_mode: &mut TerminalModeGuard<CrosstermTerminalOps>,
     app: &mut App,
     action: AppAction,
+    catalog_request_tx: &Sender<CatalogRequest>,
     detail_request_tx: &Sender<DetailRequest>,
     delete_executor: &impl SessionDeleteExecutor,
     resume_executor: &impl ResumeSessionExecutor,
 ) -> io::Result<()> {
     match action {
+        AppAction::LoadCatalog(request) => {
+            let _ = catalog_request_tx.send(request);
+            Ok(())
+        }
         AppAction::LoadDetail(request) => {
             let _ = detail_request_tx.send(request);
             Ok(())
         }
         AppAction::Delete(request) => {
-            let result = match delete_executor.delete_session(&request.path) {
+            let result = match delete_executor.delete_session(&request) {
                 Ok(()) => DeleteResult::Success(DeleteSuccess {
                     deleted_path: request.path,
                     deleted_session_id: request.session_id,

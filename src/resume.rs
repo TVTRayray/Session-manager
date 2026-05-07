@@ -1,8 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::catalog::SessionEngine;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResumeSessionRequest {
+    pub engine: SessionEngine,
     pub session_id: String,
     pub cwd: PathBuf,
 }
@@ -80,22 +83,110 @@ impl<R> CodexResumeExecutor<R> {
 
 impl<R: ResumeCommandRunner> ResumeSessionExecutor for CodexResumeExecutor<R> {
     fn resume_session(&self, request: &ResumeSessionRequest) -> Result<(), ResumeSessionError> {
-        validate_resume_cwd(&request.cwd)?;
+        run_resume_command(
+            &self.runner,
+            "codex",
+            &["resume", request.session_id.as_str()],
+            &request.cwd,
+            "codex resume",
+        )
+    }
+}
 
-        let args = ["resume", request.session_id.as_str()];
-        let output = self
-            .runner
-            .run("codex", &args, &request.cwd)
-            .map_err(ResumeSessionError::new)?;
+#[derive(Clone, Debug)]
+pub struct ClaudeResumeExecutor<R = ProcessResumeCommandRunner> {
+    runner: R,
+}
 
-        if output.success {
-            Ok(())
-        } else {
-            Err(ResumeSessionError::new(match output.code {
-                Some(code) => format!("codex resume exited with status {code}"),
-                None => "codex resume terminated without an exit status".to_string(),
-            }))
+impl ClaudeResumeExecutor<ProcessResumeCommandRunner> {
+    pub fn new() -> Self {
+        Self {
+            runner: ProcessResumeCommandRunner,
         }
+    }
+}
+
+impl<R> ClaudeResumeExecutor<R> {
+    pub fn with_runner(runner: R) -> Self {
+        Self { runner }
+    }
+}
+
+impl<R: ResumeCommandRunner> ResumeSessionExecutor for ClaudeResumeExecutor<R> {
+    fn resume_session(&self, request: &ResumeSessionRequest) -> Result<(), ResumeSessionError> {
+        #[cfg(target_os = "windows")]
+        let program = "claude.cmd";
+        #[cfg(not(target_os = "windows"))]
+        let program = "claude";
+
+        run_resume_command(
+            &self.runner,
+            program,
+            &["--resume", request.session_id.as_str()],
+            &request.cwd,
+            "claude --resume",
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct EngineAwareResumeExecutor<
+    RCodex = ProcessResumeCommandRunner,
+    RClaude = ProcessResumeCommandRunner,
+> {
+    codex: CodexResumeExecutor<RCodex>,
+    claude: ClaudeResumeExecutor<RClaude>,
+}
+
+impl EngineAwareResumeExecutor<ProcessResumeCommandRunner, ProcessResumeCommandRunner> {
+    pub fn new() -> Self {
+        Self {
+            codex: CodexResumeExecutor::new(),
+            claude: ClaudeResumeExecutor::new(),
+        }
+    }
+}
+
+impl<RCodex, RClaude> EngineAwareResumeExecutor<RCodex, RClaude> {
+    pub fn with_executors(
+        codex: CodexResumeExecutor<RCodex>,
+        claude: ClaudeResumeExecutor<RClaude>,
+    ) -> Self {
+        Self { codex, claude }
+    }
+}
+
+impl<RCodex: ResumeCommandRunner, RClaude: ResumeCommandRunner> ResumeSessionExecutor
+    for EngineAwareResumeExecutor<RCodex, RClaude>
+{
+    fn resume_session(&self, request: &ResumeSessionRequest) -> Result<(), ResumeSessionError> {
+        match request.engine {
+            SessionEngine::Codex => self.codex.resume_session(request),
+            SessionEngine::Claude => self.claude.resume_session(request),
+        }
+    }
+}
+
+fn run_resume_command<R: ResumeCommandRunner>(
+    runner: &R,
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    command_label: &str,
+) -> Result<(), ResumeSessionError> {
+    validate_resume_cwd(cwd)?;
+
+    let output = runner
+        .run(program, args, cwd)
+        .map_err(ResumeSessionError::new)?;
+
+    if output.success {
+        Ok(())
+    } else {
+        Err(ResumeSessionError::new(match output.code {
+            Some(code) => format!("{command_label} exited with status {code}"),
+            None => format!("{command_label} terminated without an exit status"),
+        }))
     }
 }
 
@@ -177,6 +268,7 @@ mod tests {
         let runner = RecordingRunner::default();
         let executor = CodexResumeExecutor::with_runner(runner.clone());
         let request = ResumeSessionRequest {
+            engine: SessionEngine::Codex,
             session_id: "session-123".to_string(),
             cwd: temp.path().to_path_buf(),
         };
@@ -198,6 +290,7 @@ mod tests {
         let runner = RecordingRunner::default();
         let executor = CodexResumeExecutor::with_runner(runner.clone());
         let request = ResumeSessionRequest {
+            engine: SessionEngine::Codex,
             session_id: "session-123".to_string(),
             cwd: PathBuf::from("/definitely/missing/cwd"),
         };
@@ -216,6 +309,7 @@ mod tests {
         }));
         let executor = CodexResumeExecutor::with_runner(runner);
         let request = ResumeSessionRequest {
+            engine: SessionEngine::Codex,
             session_id: "session-123".to_string(),
             cwd: temp.path().to_path_buf(),
         };
@@ -234,6 +328,7 @@ mod tests {
             RecordingRunner::with_output(Err("Failed to launch codex: not found".to_string()));
         let executor = CodexResumeExecutor::with_runner(runner);
         let request = ResumeSessionRequest {
+            engine: SessionEngine::Codex,
             session_id: "session-123".to_string(),
             cwd: temp.path().to_path_buf(),
         };
@@ -243,5 +338,110 @@ mod tests {
             Ok(()) => panic!("expected launch failure"),
             Err(err) => assert!(err.message().contains("not found")),
         }
+    }
+
+    #[test]
+    fn claude_resume_executor_uses_fixed_claude_resume_command_and_request_cwd() {
+        let temp = tempdir().unwrap_or_else(|err| panic!("tempdir failed: {err}"));
+        let runner = RecordingRunner::default();
+        let executor = ClaudeResumeExecutor::with_runner(runner.clone());
+        let request = ResumeSessionRequest {
+            engine: SessionEngine::Claude,
+            session_id: "session-456".to_string(),
+            cwd: temp.path().to_path_buf(),
+        };
+
+        let result = executor.resume_session(&request);
+        assert!(result.is_ok());
+        
+        #[cfg(target_os = "windows")]
+        let expected_program = "claude.cmd".to_string();
+        #[cfg(not(target_os = "windows"))]
+        let expected_program = "claude".to_string();
+
+        assert_eq!(
+            runner.calls(),
+            vec![(
+                expected_program,
+                vec!["--resume".to_string(), "session-456".to_string()],
+                temp.path().to_path_buf()
+            )]
+        );
+    }
+
+    #[test]
+    fn claude_resume_executor_surfaces_non_zero_exit() {
+        let temp = tempdir().unwrap_or_else(|err| panic!("tempdir failed: {err}"));
+        let runner = RecordingRunner::with_output(Ok(ResumeCommandOutput {
+            success: false,
+            code: Some(9),
+        }));
+        let executor = ClaudeResumeExecutor::with_runner(runner);
+        let request = ResumeSessionRequest {
+            engine: SessionEngine::Claude,
+            session_id: "session-456".to_string(),
+            cwd: temp.path().to_path_buf(),
+        };
+
+        let result = executor.resume_session(&request);
+        match result {
+            Ok(()) => panic!("expected non-zero exit to fail"),
+            Err(err) => assert!(
+                err.message()
+                    .contains("claude --resume exited with status 9")
+            ),
+        }
+    }
+
+    #[test]
+    fn claude_resume_executor_surfaces_launch_failure() {
+        let temp = tempdir().unwrap_or_else(|err| panic!("tempdir failed: {err}"));
+        let runner =
+            RecordingRunner::with_output(Err("Failed to launch claude: not found".to_string()));
+        let executor = ClaudeResumeExecutor::with_runner(runner);
+        let request = ResumeSessionRequest {
+            engine: SessionEngine::Claude,
+            session_id: "session-456".to_string(),
+            cwd: temp.path().to_path_buf(),
+        };
+
+        let result = executor.resume_session(&request);
+        match result {
+            Ok(()) => panic!("expected launch failure"),
+            Err(err) => assert!(err.message().contains("not found")),
+        }
+    }
+
+    #[test]
+    fn engine_aware_executor_dispatches_by_request_engine() {
+        let temp = tempdir().unwrap_or_else(|err| panic!("tempdir failed: {err}"));
+        let codex_runner = RecordingRunner::default();
+        let claude_runner = RecordingRunner::default();
+        let executor = EngineAwareResumeExecutor::with_executors(
+            CodexResumeExecutor::with_runner(codex_runner.clone()),
+            ClaudeResumeExecutor::with_runner(claude_runner.clone()),
+        );
+
+        let codex_request = ResumeSessionRequest {
+            engine: SessionEngine::Codex,
+            session_id: "codex-session".to_string(),
+            cwd: temp.path().to_path_buf(),
+        };
+        let claude_request = ResumeSessionRequest {
+            engine: SessionEngine::Claude,
+            session_id: "claude-session".to_string(),
+            cwd: temp.path().to_path_buf(),
+        };
+
+        assert!(executor.resume_session(&codex_request).is_ok());
+        assert!(executor.resume_session(&claude_request).is_ok());
+
+        assert_eq!(codex_runner.calls().len(), 1);
+        assert_eq!(claude_runner.calls().len(), 1);
+        assert_eq!(codex_runner.calls()[0].0, "codex");
+        #[cfg(target_os = "windows")]
+        assert_eq!(claude_runner.calls()[0].0, "claude.cmd");
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(claude_runner.calls()[0].0, "claude");
     }
 }
