@@ -172,7 +172,7 @@ fn pty_probe_logs_resize_boundaries_and_trace_file_output() {
 
 #[test]
 fn pty_probe_covers_claude_tab_mouse_select_and_enter_resume() {
-    let transcript = run_probe(&[b"\t", b"\x1b[<0;3;3M", b"\x1b[13u", b"q"]);
+    let transcript = run_probe(&[b"\t", b"\x1b[<0;3;4M", b"\x1b[13u", b"q"]);
     assert!(
         transcript.contains(
             "step=1 event=key:Tab mods=KeyModifiers(0x0) action=LoadCatalog(engine=Claude,request_id=1)"
@@ -180,11 +180,11 @@ fn pty_probe_covers_claude_tab_mouse_select_and_enter_resume() {
         "unexpected transcript:\n{transcript}"
     );
     assert!(
-        transcript.contains("step=2 event=mouse:Down(Left)@2,2 action=LoadDetail(offset=0)"),
+        transcript.contains("step=2 event=mouse:Down(Left)@2,3 action=LoadDetail(offset=0)"),
         "unexpected transcript:\n{transcript}"
     );
     assert!(
-        transcript.contains("step=2 event=mouse:Down(Left)@2,2 action=LoadDetail(offset=0) split=Horizontal focus=List"),
+        transcript.contains("step=2 event=mouse:Down(Left)@2,3 action=LoadDetail(offset=0) split=Horizontal focus=List"),
         "unexpected transcript:\n{transcript}"
     );
     assert!(

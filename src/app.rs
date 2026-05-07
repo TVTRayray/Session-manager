@@ -4,6 +4,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use tui_tree_widget::TreeState;
 
 use crate::catalog::{
     CatalogLoad, EngineCatalogReader, FileHealth, SessionCatalogReader, SessionEngine,
@@ -39,6 +40,16 @@ pub enum DeleteModalFocus {
 pub struct DeleteModalState {
     pub target_session_id: String,
     pub focus: DeleteModalFocus,
+    pub scope: DeleteScope,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DeleteScope {
+    Single,
+    Group {
+        group_label: String,
+        session_count: usize,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,6 +69,39 @@ pub struct DeleteFailure {
 pub enum DeleteResult {
     Success(DeleteSuccess),
     Failure(DeleteFailure),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BulkDeleteRequest {
+    pub engine: SessionEngine,
+    pub group_identifier: String,
+    pub group_label: String,
+    pub targets: Vec<DeleteRequest>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BulkDeleteItemFailure {
+    pub target_path: PathBuf,
+    pub target_session_id: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BulkDeleteResult {
+    pub engine: SessionEngine,
+    pub group_identifier: String,
+    pub group_label: String,
+    pub requested_count: usize,
+    pub deleted: Vec<DeleteSuccess>,
+    pub failures: Vec<BulkDeleteItemFailure>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BulkDeleteResultSummary {
+    pub group_label: String,
+    pub requested_count: usize,
+    pub deleted_count: usize,
+    pub failed_count: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +131,7 @@ pub enum AppAction {
     LoadCatalog(CatalogRequest),
     LoadDetail(DetailRequest),
     Delete(DeleteRequest),
+    BulkDelete(BulkDeleteRequest),
     Resume(ResumeSessionRequest),
 }
 
@@ -113,6 +158,67 @@ pub enum SplitDirection {
 pub enum FocusedPanel {
     List,
     Detail,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GroupMode {
+    ByTime,
+    ByProject,
+}
+
+impl GroupMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::ByTime => "By Time",
+            Self::ByProject => "By Project",
+        }
+    }
+
+    pub fn toggle(&self) -> Self {
+        match self {
+            Self::ByTime => Self::ByProject,
+            Self::ByProject => Self::ByTime,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionLeafNode {
+    pub identifier: String,
+    pub session_index: usize,
+    pub session_id: String,
+    pub summary: String,
+    pub display_time: String,
+    pub cwd_tail: String,
+    pub file_health: FileHealth,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GroupHeaderNode {
+    pub identifier: String,
+    pub label: String,
+    pub children: Vec<SessionLeafNode>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TreeFocusNode {
+    GroupHeader(String),
+    SessionLeaf(usize),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RightPanelMode {
+    SessionDetail,
+    GroupSummary,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GroupSummaryCard {
+    pub group_identifier: String,
+    pub group_label: String,
+    pub total_sessions: usize,
+    pub last_active: String,
+    pub engine: SessionEngine,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -150,9 +256,12 @@ pub struct App {
     pub detail_state: SessionDetailState,
     pub status_message: String,
     pub should_quit: bool,
+    pub show_help_modal: bool,
     pub delete_modal_state: Option<DeleteModalState>,
     pub pending_delete_target: Option<DeleteRequest>,
+    pub pending_bulk_delete_target: Option<BulkDeleteRequest>,
     pub delete_result_message: Option<String>,
+    pub bulk_delete_result_summary: Option<BulkDeleteResultSummary>,
     pub file_health_map: HashMap<PathBuf, FileHealth>,
     pub path_hint_state: Option<PathHintState>,
     pub detail_viewport_state: DetailViewportState,
@@ -160,6 +269,11 @@ pub struct App {
     pub catalog_loading_state: CatalogLoadingState,
     pub split_direction: SplitDirection,
     pub focused_panel: FocusedPanel,
+    pub group_mode: GroupMode,
+    pub tree_state: TreeState<String>,
+    pub tree_focus_node: Option<TreeFocusNode>,
+    pub right_panel_mode: RightPanelMode,
+    pub group_summary_card: Option<GroupSummaryCard>,
     pub panel_main_size: Option<u16>,
     pub header_summary: String,
     pub layout_tree_version: u64,
@@ -195,9 +309,12 @@ impl App {
                     detail_state,
                     status_message: with_status_message(None, warnings.last().map(String::as_str)),
                     should_quit: false,
+                    show_help_modal: false,
                     delete_modal_state: None,
                     pending_delete_target: None,
+                    pending_bulk_delete_target: None,
                     delete_result_message: None,
+                    bulk_delete_result_summary: None,
                     file_health_map,
                     path_hint_state: None,
                     detail_viewport_state: DetailViewportState {
@@ -208,6 +325,11 @@ impl App {
                     catalog_loading_state: CatalogLoadingState::Idle,
                     split_direction: SplitDirection::Horizontal,
                     focused_panel: FocusedPanel::List,
+                    group_mode: GroupMode::ByTime,
+                    tree_state: TreeState::default(),
+                    tree_focus_node: None,
+                    right_panel_mode: RightPanelMode::SessionDetail,
+                    group_summary_card: None,
                     panel_main_size: None,
                     header_summary: String::new(),
                     layout_tree_version: 0,
@@ -223,6 +345,8 @@ impl App {
                     terminal_size: default_terminal_size(),
                     catalog_request_token: 0,
                 };
+                app.open_all_groups();
+                app.sync_tree_selection_from_selected_index();
                 app.refresh_header_summary();
                 app
             }
@@ -233,9 +357,12 @@ impl App {
                 detail_state: SessionDetailState::Error("No sessions found.".to_string()),
                 status_message: with_status_message(None, Some(err.as_str())),
                 should_quit: false,
+                show_help_modal: false,
                 delete_modal_state: None,
                 pending_delete_target: None,
+                pending_bulk_delete_target: None,
                 delete_result_message: None,
+                bulk_delete_result_summary: None,
                 file_health_map: HashMap::new(),
                 path_hint_state: None,
                 detail_viewport_state: DetailViewportState {
@@ -246,6 +373,11 @@ impl App {
                 catalog_loading_state: CatalogLoadingState::Idle,
                 split_direction: SplitDirection::Horizontal,
                 focused_panel: FocusedPanel::List,
+                group_mode: GroupMode::ByTime,
+                tree_state: TreeState::default(),
+                tree_focus_node: None,
+                right_panel_mode: RightPanelMode::SessionDetail,
+                group_summary_card: None,
                 panel_main_size: None,
                 header_summary: empty_header_summary(),
                 layout_tree_version: 0,
@@ -301,7 +433,12 @@ impl App {
         self.detail_state = SessionDetailState::Idle;
         self.detail_viewport_state.scroll_offset = 0;
         self.selected_index = None;
+        self.tree_state = TreeState::default();
+        self.tree_focus_node = None;
+        self.right_panel_mode = RightPanelMode::SessionDetail;
+        self.group_summary_card = None;
         self.parse_cancellation_token = self.parse_cancellation_token.saturating_add(1);
+        self.pending_bulk_delete_target = None;
 
         match result.result {
             Ok(load) => {
@@ -319,6 +456,7 @@ impl App {
             }
         }
 
+        self.open_all_groups();
         self.refresh_header_summary();
     }
 
@@ -327,11 +465,28 @@ impl App {
             return self.handle_delete_modal_key(event);
         }
 
+        if self.show_help_modal {
+            self.show_help_modal = false;
+            return None;
+        }
+        if event.code == KeyCode::Char('?') {
+            self.show_help_modal = true;
+            return None;
+        }
+
         if event.code == KeyCode::Tab {
             return Some(AppAction::LoadCatalog(self.switch_engine(true)));
         }
         if event.code == KeyCode::BackTab {
             return Some(AppAction::LoadCatalog(self.switch_engine(false)));
+        }
+        if event.code == KeyCode::Char('g') {
+            self.group_mode = self.group_mode.toggle();
+            self.tree_state = TreeState::default();
+            self.open_all_groups();
+            self.sync_tree_selection_from_selected_index();
+            self.pending_full_redraw = true;
+            return None;
         }
 
         if is_ctrl_alt_char(&event, 'h') {
@@ -372,9 +527,24 @@ impl App {
                 self.move_selection(-1);
                 self.begin_detail_request().map(AppAction::LoadDetail)
             }
+            KeyCode::Left if self.focused_panel == FocusedPanel::List => {
+                self.tree_state.key_left();
+                self.sync_tree_selection_from_tree();
+                None
+            }
+            KeyCode::Right if self.focused_panel == FocusedPanel::List => {
+                self.tree_state.key_right();
+                self.sync_tree_selection_from_tree();
+                None
+            }
+            KeyCode::Char(' ') if self.focused_panel == FocusedPanel::List => {
+                self.tree_state.toggle_selected();
+                self.sync_tree_selection_from_tree();
+                None
+            }
             KeyCode::PageDown => self.scroll_detail(8).map(AppAction::LoadDetail),
             KeyCode::PageUp => self.scroll_detail(-8).map(AppAction::LoadDetail),
-            KeyCode::Enter => self.begin_resume_request().map(AppAction::Resume),
+            KeyCode::Enter => self.handle_tree_enter(),
             KeyCode::Char('d') | KeyCode::Delete => {
                 self.begin_delete_confirmation();
                 None
@@ -414,15 +584,20 @@ impl App {
                         .row
                         .saturating_sub(layout.list_panel.y)
                         .saturating_sub(1) as usize;
-                    if let Some(item) = self.session_list.get(row) {
-                        let absolute_path = item.abs_path.display().to_string();
-                        self.selected_index = Some(row);
-                        self.refresh_header_summary();
-                        self.show_path_hint(absolute_path);
-                        return self.begin_detail_request().map(AppAction::LoadDetail);
-                    } else {
-                        self.clear_path_hint();
+                    if let Some(identifier) = self.visible_tree_identifiers().get(row).cloned() {
+                        let was_selected = self.tree_state.selected() == identifier.as_slice();
+                        if was_selected && identifier.len() == 1 {
+                            self.tree_state.toggle_selected();
+                        } else {
+                            self.tree_state.select(identifier);
+                        }
+                        self.sync_tree_selection_from_tree();
+                        if let Some(item) = self.selected_item() {
+                            self.show_path_hint(item.abs_path.display().to_string());
+                            return self.begin_detail_request().map(AppAction::LoadDetail);
+                        }
                     }
+                    self.clear_path_hint();
                     return None;
                 }
 
@@ -442,6 +617,11 @@ impl App {
                 None
             }
             MouseEventKind::ScrollDown => {
+                if contains(layout.list_panel, event.column, event.row) {
+                    self.focused_panel = FocusedPanel::List;
+                    self.tree_state.scroll_down(3);
+                    return None;
+                }
                 if contains(layout.detail_panel, event.column, event.row) {
                     self.focused_panel = FocusedPanel::Detail;
                     self.scroll_detail(3).map(AppAction::LoadDetail)
@@ -450,6 +630,11 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp => {
+                if contains(layout.list_panel, event.column, event.row) {
+                    self.focused_panel = FocusedPanel::List;
+                    self.tree_state.scroll_up(3);
+                    return None;
+                }
                 if contains(layout.detail_panel, event.column, event.row) {
                     self.focused_panel = FocusedPanel::Detail;
                     self.scroll_detail(-3).map(AppAction::LoadDetail)
@@ -488,6 +673,7 @@ impl App {
         self.invalidate_detail_requests();
         self.delete_modal_state = None;
         self.pending_delete_target = None;
+        self.pending_bulk_delete_target = None;
 
         match result {
             DeleteResult::Success(success) => {
@@ -500,6 +686,7 @@ impl App {
                     self.file_health_map.remove(&success.deleted_path);
                     self.selected_index =
                         restore_selection_after_delete(index, self.session_list.len());
+                    self.rebuild_tree_after_session_list_change();
                     self.refresh_header_summary();
                 }
 
@@ -520,6 +707,72 @@ impl App {
             DeleteResult::Failure(failure) => {
                 self.delete_result_message = Some(failure.message.clone());
                 self.status_message = with_status_message(None, Some(failure.message.as_str()));
+                None
+            }
+        }
+    }
+
+    pub fn apply_bulk_delete_result(&mut self, result: BulkDeleteResult) -> Option<DetailRequest> {
+        self.invalidate_detail_requests();
+        self.delete_modal_state = None;
+        self.pending_delete_target = None;
+        self.pending_bulk_delete_target = None;
+
+        for success in &result.deleted {
+            if let Some(index) = self
+                .session_list
+                .iter()
+                .position(|item| item.abs_path == success.deleted_path)
+            {
+                self.session_list.remove(index);
+                self.file_health_map.remove(&success.deleted_path);
+            }
+        }
+
+        let deleted_count = result.deleted.len();
+        let failed_count = result.failures.len();
+        let summary = BulkDeleteResultSummary {
+            group_label: result.group_label.clone(),
+            requested_count: result.requested_count,
+            deleted_count,
+            failed_count,
+        };
+        self.bulk_delete_result_summary = Some(summary.clone());
+
+        let message = format!(
+            "Deleted {deleted_count}/{} sessions in group {} (failed: {failed_count})",
+            result.requested_count, result.group_label
+        );
+        self.delete_result_message = Some(message.clone());
+        self.status_message = if failed_count == 0 {
+            with_status_message(Some(message.as_str()), None)
+        } else {
+            with_status_message(None, Some(message.as_str()))
+        };
+
+        self.selected_index = None;
+        self.tree_state = TreeState::default();
+        self.open_all_groups();
+        let group_exists = build_grouped_session_nodes(&self.session_list, &self.group_mode)
+            .into_iter()
+            .any(|group| group.identifier == result.group_identifier);
+        if group_exists {
+            self.tree_state.select(vec![result.group_identifier]);
+        } else if let Some(first_leaf) = self.first_leaf_identifier() {
+            self.tree_state.select(first_leaf);
+        } else {
+            self.tree_state.select(Vec::new());
+        }
+        self.sync_tree_selection_from_tree();
+
+        match self.selected_index {
+            Some(_) => self.begin_detail_request(),
+            None => {
+                if self.session_list.is_empty() {
+                    self.detail_state = SessionDetailState::Error("No sessions found.".to_string());
+                    self.right_panel_mode = RightPanelMode::SessionDetail;
+                    self.group_summary_card = None;
+                }
                 None
             }
         }
@@ -595,15 +848,13 @@ impl App {
                     self.cancel_delete_confirmation();
                     None
                 }
-                Some(DeleteModalFocus::Confirm) => {
-                    self.confirm_delete_request().map(AppAction::Delete)
-                }
+                Some(DeleteModalFocus::Confirm) => self.confirm_delete_action(),
             },
             KeyCode::Char('y') => {
                 if let Some(modal) = &mut self.delete_modal_state {
                     modal.focus = DeleteModalFocus::Confirm;
                 }
-                self.confirm_delete_request().map(AppAction::Delete)
+                self.confirm_delete_action()
             }
             KeyCode::Char('h') => {
                 if let Some(modal) = &mut self.delete_modal_state {
@@ -622,10 +873,28 @@ impl App {
     }
 
     fn begin_delete_confirmation(&mut self) {
+        if let Some(TreeFocusNode::GroupHeader(identifier)) = &self.tree_focus_node {
+            let Some(target) = self.bulk_delete_request_for_group(identifier) else {
+                return;
+            };
+            self.pending_delete_target = None;
+            self.pending_bulk_delete_target = Some(target.clone());
+            self.delete_modal_state = Some(DeleteModalState {
+                target_session_id: target.group_label.clone(),
+                focus: DeleteModalFocus::Cancel,
+                scope: DeleteScope::Group {
+                    group_label: target.group_label,
+                    session_count: target.targets.len(),
+                },
+            });
+            return;
+        }
+
         let Some(selected) = self.selected_item().cloned() else {
             return;
         };
 
+        self.pending_bulk_delete_target = None;
         self.pending_delete_target = Some(DeleteRequest {
             engine: self.active_engine,
             path: selected.abs_path,
@@ -634,19 +903,25 @@ impl App {
         self.delete_modal_state = Some(DeleteModalState {
             target_session_id: selected.session_id,
             focus: DeleteModalFocus::Cancel,
+            scope: DeleteScope::Single,
         });
     }
 
     fn cancel_delete_confirmation(&mut self) {
         self.delete_modal_state = None;
         self.pending_delete_target = None;
+        self.pending_bulk_delete_target = None;
         let message = "Cancelled session deletion";
         self.delete_result_message = Some(message.to_string());
         self.status_message = with_status_message(Some(message), None);
     }
 
-    fn confirm_delete_request(&self) -> Option<DeleteRequest> {
-        self.pending_delete_target.clone()
+    fn confirm_delete_action(&self) -> Option<AppAction> {
+        if let Some(request) = self.pending_bulk_delete_target.clone() {
+            Some(AppAction::BulkDelete(request))
+        } else {
+            self.pending_delete_target.clone().map(AppAction::Delete)
+        }
     }
 
     fn toggle_delete_focus(&mut self) {
@@ -658,27 +933,53 @@ impl App {
         }
     }
 
+    fn handle_tree_enter(&mut self) -> Option<AppAction> {
+        match &self.tree_focus_node {
+            Some(TreeFocusNode::GroupHeader(_)) => {
+                self.tree_state.toggle_selected();
+                self.sync_tree_selection_from_tree();
+                None
+            }
+            _ => self.begin_resume_request().map(AppAction::Resume),
+        }
+    }
+
     fn move_selection(&mut self, delta: isize) {
         self.clear_path_hint();
-        let Some(current_index) = self.selected_index else {
-            if self.session_list.is_empty() {
-                self.refresh_header_summary();
-                return;
-            }
-            self.selected_index = Some(if delta >= 0 {
-                0
-            } else {
-                self.session_list.len().saturating_sub(1)
-            });
-            self.refresh_header_summary();
+        let visible = self.visible_tree_identifiers();
+        if visible.is_empty() {
+            self.selected_index = None;
             self.refresh_header_summary();
             return;
+        }
+
+        let next_identifier = if self.tree_state.selected().is_empty() {
+            if delta >= 0 {
+                self.first_leaf_identifier()
+            } else {
+                self.last_leaf_identifier()
+            }
+        } else {
+            let current = self.tree_state.selected().to_vec();
+            let current_position = visible.iter().position(|identifier| *identifier == current);
+            let fallback = if delta >= 0 {
+                0
+            } else {
+                visible.len().saturating_sub(1)
+            };
+            let next_position = match current_position {
+                Some(position) => ((position as isize) + delta)
+                    .clamp(0, visible.len().saturating_sub(1) as isize)
+                    as usize,
+                None => fallback,
+            };
+            visible.get(next_position).cloned()
         };
 
-        let max_index = self.session_list.len().saturating_sub(1) as isize;
-        let next_index = ((current_index as isize) + delta).clamp(0, max_index) as usize;
-        self.selected_index = Some(next_index);
-        self.refresh_header_summary();
+        if let Some(identifier) = next_identifier {
+            self.tree_state.select(identifier);
+        }
+        self.sync_tree_selection_from_tree();
     }
 
     fn begin_detail_request(&mut self) -> Option<DetailRequest> {
@@ -688,12 +989,16 @@ impl App {
             let message = format!("Session {} is not loadable", selected.session_id);
             self.status_message = with_status_message(None, Some(message.as_str()));
             self.detail_state = SessionDetailState::Error(message);
+            self.right_panel_mode = RightPanelMode::SessionDetail;
+            self.group_summary_card = None;
             return None;
         }
 
         self.parse_cancellation_token = self.parse_cancellation_token.saturating_add(1);
         self.detail_state = SessionDetailState::Loading;
         self.detail_viewport_state.scroll_offset = 0;
+        self.right_panel_mode = RightPanelMode::SessionDetail;
+        self.group_summary_card = None;
 
         Some(DetailRequest {
             request_id: self.parse_cancellation_token,
@@ -750,10 +1055,15 @@ impl App {
         self.session_list.clear();
         self.file_health_map.clear();
         self.selected_index = None;
+        self.tree_state = TreeState::default();
+        self.tree_focus_node = None;
+        self.right_panel_mode = RightPanelMode::SessionDetail;
+        self.group_summary_card = None;
         self.detail_state = SessionDetailState::Idle;
         self.detail_viewport_state.scroll_offset = 0;
         self.delete_modal_state = None;
         self.pending_delete_target = None;
+        self.pending_bulk_delete_target = None;
         self.clear_path_hint();
         self.refresh_header_summary();
         self.status_message = format!(
@@ -836,6 +1146,234 @@ impl App {
             None => empty_header_summary(),
         };
     }
+
+    fn rebuild_tree_after_session_list_change(&mut self) {
+        self.tree_state = TreeState::default();
+        self.open_all_groups();
+        self.sync_tree_selection_from_selected_index();
+    }
+
+    fn sync_tree_selection_from_selected_index(&mut self) {
+        let identifier = self
+            .selected_index
+            .and_then(|index| self.session_list.get(index))
+            .map(|item| {
+                vec![
+                    group_identifier(group_label_for_item(item, &self.group_mode)),
+                    leaf_identifier(item),
+                ]
+            });
+        self.tree_state.select(identifier.unwrap_or_default());
+        self.tree_focus_node = self.current_tree_focus_node();
+        self.refresh_right_panel_mode();
+    }
+
+    fn sync_tree_selection_from_tree(&mut self) {
+        self.selected_index = self.tree_selected_index();
+        self.tree_focus_node = self.current_tree_focus_node();
+        self.refresh_right_panel_mode();
+        self.refresh_header_summary();
+    }
+
+    fn tree_selected_index(&self) -> Option<usize> {
+        let selected = self.tree_state.selected();
+        if selected.len() != 2 {
+            return None;
+        }
+        let selected_leaf = &selected[1];
+        self.session_list
+            .iter()
+            .position(|item| leaf_identifier(item) == *selected_leaf)
+    }
+
+    fn open_all_groups(&mut self) {
+        for group in build_grouped_session_nodes(&self.session_list, &self.group_mode) {
+            self.tree_state.open(vec![group.identifier]);
+        }
+    }
+
+    fn visible_tree_identifiers(&self) -> Vec<Vec<String>> {
+        let mut visible = Vec::new();
+        for group in build_grouped_session_nodes(&self.session_list, &self.group_mode) {
+            let group_id = vec![group.identifier.clone()];
+            visible.push(group_id.clone());
+            if self.tree_state.opened().contains(&group_id) {
+                for child in group.children {
+                    visible.push(vec![group.identifier.clone(), child.identifier]);
+                }
+            }
+        }
+        visible
+    }
+
+    fn first_leaf_identifier(&self) -> Option<Vec<String>> {
+        build_grouped_session_nodes(&self.session_list, &self.group_mode)
+            .into_iter()
+            .find_map(|group| {
+                group
+                    .children
+                    .first()
+                    .map(|child| vec![group.identifier.clone(), child.identifier.clone()])
+            })
+    }
+
+    fn last_leaf_identifier(&self) -> Option<Vec<String>> {
+        build_grouped_session_nodes(&self.session_list, &self.group_mode)
+            .into_iter()
+            .rev()
+            .find_map(|group| {
+                group
+                    .children
+                    .last()
+                    .map(|child| vec![group.identifier.clone(), child.identifier.clone()])
+            })
+    }
+
+    fn current_tree_focus_node(&self) -> Option<TreeFocusNode> {
+        let selected = self.tree_state.selected();
+        if selected.len() == 1 {
+            Some(TreeFocusNode::GroupHeader(selected[0].clone()))
+        } else if selected.len() == 2 {
+            self.tree_selected_index().map(TreeFocusNode::SessionLeaf)
+        } else {
+            None
+        }
+    }
+
+    fn bulk_delete_request_for_group(&self, identifier: &str) -> Option<BulkDeleteRequest> {
+        build_grouped_session_nodes(&self.session_list, &self.group_mode)
+            .into_iter()
+            .find(|group| group.identifier == identifier)
+            .map(|group| BulkDeleteRequest {
+                engine: self.active_engine,
+                group_identifier: group.identifier,
+                group_label: group.label,
+                targets: group
+                    .children
+                    .into_iter()
+                    .map(|child| {
+                        let item = &self.session_list[child.session_index];
+                        DeleteRequest {
+                            engine: self.active_engine,
+                            path: item.abs_path.clone(),
+                            session_id: item.session_id.clone(),
+                        }
+                    })
+                    .collect(),
+            })
+    }
+
+    fn refresh_right_panel_mode(&mut self) {
+        match &self.tree_focus_node {
+            Some(TreeFocusNode::GroupHeader(identifier)) => {
+                self.right_panel_mode = RightPanelMode::GroupSummary;
+                self.group_summary_card = self.group_summary_card_for(identifier);
+                self.invalidate_detail_requests();
+                self.detail_state = SessionDetailState::Idle;
+                self.detail_viewport_state.scroll_offset = 0;
+            }
+            Some(TreeFocusNode::SessionLeaf(_)) => {
+                self.right_panel_mode = RightPanelMode::SessionDetail;
+                self.group_summary_card = None;
+            }
+            None => {
+                self.right_panel_mode = RightPanelMode::SessionDetail;
+                self.group_summary_card = None;
+            }
+        }
+    }
+
+    fn group_summary_card_for(&self, identifier: &str) -> Option<GroupSummaryCard> {
+        build_grouped_session_nodes(&self.session_list, &self.group_mode)
+            .into_iter()
+            .find(|group| group.identifier == identifier)
+            .map(|group| GroupSummaryCard {
+                group_identifier: group.identifier,
+                group_label: group.label,
+                total_sessions: group.children.len(),
+                last_active: group
+                    .children
+                    .first()
+                    .map(|child| child.display_time.clone())
+                    .unwrap_or_else(|| "-".to_string()),
+                engine: self.active_engine,
+            })
+    }
+}
+
+pub fn build_grouped_session_nodes(
+    session_list: &[SessionListItem],
+    group_mode: &GroupMode,
+) -> Vec<GroupHeaderNode> {
+    let mut groups: Vec<GroupHeaderNode> = Vec::new();
+    for (index, item) in session_list.iter().enumerate() {
+        let label = group_label_for_item(item, group_mode);
+        let leaf = SessionLeafNode {
+            identifier: leaf_identifier(item),
+            session_index: index,
+            session_id: item.session_id.clone(),
+            summary: item.summary.clone(),
+            display_time: item.display_time.clone(),
+            cwd_tail: item.cwd_tail.clone(),
+            file_health: item.file_health.clone(),
+        };
+
+        if let Some(group) = groups.iter_mut().find(|group| group.label == label) {
+            group.children.push(leaf);
+        } else {
+            groups.push(GroupHeaderNode {
+                identifier: group_identifier(label.clone()),
+                label,
+                children: vec![leaf],
+            });
+        }
+    }
+    groups
+}
+
+pub fn grouped_session_indexes(
+    session_list: &[SessionListItem],
+    group_mode: &GroupMode,
+) -> Vec<(String, Vec<usize>)> {
+    build_grouped_session_nodes(session_list, group_mode)
+        .into_iter()
+        .map(|group| {
+            (
+                group.label,
+                group
+                    .children
+                    .into_iter()
+                    .map(|child| child.session_index)
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+pub fn group_label_for_item(item: &SessionListItem, group_mode: &GroupMode) -> String {
+    match group_mode {
+        GroupMode::ByTime => item
+            .display_time
+            .split(' ')
+            .next()
+            .unwrap_or(item.display_time.as_str())
+            .to_string(),
+        GroupMode::ByProject => {
+            if item.cwd_tail == "-" {
+                "unknown-project".to_string()
+            } else {
+                item.cwd_tail.clone()
+            }
+        }
+    }
+}
+
+pub fn group_identifier(label: String) -> String {
+    format!("group:{label}")
+}
+
+pub fn leaf_identifier(item: &SessionListItem) -> String {
+    item.abs_path.display().to_string()
 }
 
 pub fn spawn_detail_loader<L: SessionDetailLoader + Send + Sync + 'static>(
@@ -1152,6 +1690,7 @@ mod tests {
     fn item(name: &str) -> SessionListItem {
         SessionListItem {
             session_id: name.to_string(),
+            summary: format!("summary for {name}"),
             display_time: "2026-04-16 12:00".to_string(),
             cwd_tail: "demo".to_string(),
             cwd_path: format!("/workspace/{name}"),
@@ -1241,6 +1780,235 @@ mod tests {
     fn default_startup_enters_codex_tab() {
         let app = App::new(&stub_catalog(vec![item("one")]));
         assert_eq!(app.active_engine, SessionEngine::Codex);
+        assert_eq!(app.group_mode, GroupMode::ByTime);
+    }
+
+    #[test]
+    fn g_toggles_group_mode() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        assert_eq!(app.group_mode, GroupMode::ByTime);
+        assert!(!app.consume_full_redraw());
+
+        let action = app.handle_key(KeyEvent::from(KeyCode::Char('g')));
+        assert!(action.is_none());
+        assert_eq!(app.group_mode, GroupMode::ByProject);
+        assert!(app.consume_full_redraw());
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('g')));
+        assert_eq!(app.group_mode, GroupMode::ByTime);
+    }
+
+    #[test]
+    fn grouped_nodes_build_explicit_header_and_leaf_models() {
+        let nodes = build_grouped_session_nodes(&[item("one"), item("two")], &GroupMode::ByProject);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].label, "demo");
+        assert_eq!(nodes[0].identifier, "group:demo");
+        assert_eq!(nodes[0].children.len(), 2);
+        assert_eq!(nodes[0].children[0].identifier, "/tmp/one.jsonl");
+        assert_eq!(nodes[0].children[0].session_index, 0);
+        assert_eq!(nodes[0].children[0].summary, "summary for one");
+    }
+
+    #[test]
+    fn initial_tree_selection_targets_first_leaf() {
+        let app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        assert_eq!(app.selected_index, Some(0));
+        assert_eq!(app.tree_state.selected().len(), 2);
+        assert_eq!(app.tree_state.selected()[1], "/tmp/one.jsonl");
+        assert_eq!(app.tree_focus_node, Some(TreeFocusNode::SessionLeaf(0)));
+        assert_eq!(app.right_panel_mode, RightPanelMode::SessionDetail);
+        assert!(app.group_summary_card.is_none());
+    }
+
+    #[test]
+    fn left_on_leaf_moves_focus_to_group_header() {
+        let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        app.detail_state = SessionDetailState::Ready(ready_viewport());
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Left));
+
+        assert_eq!(app.selected_index, None);
+        assert_eq!(app.tree_state.selected().len(), 1);
+        assert_eq!(
+            app.tree_focus_node,
+            Some(TreeFocusNode::GroupHeader("group:2026-04-16".to_string()))
+        );
+        assert_eq!(app.right_panel_mode, RightPanelMode::GroupSummary);
+        assert_eq!(
+            app.group_summary_card.as_ref().map(|card| (
+                card.group_label.as_str(),
+                card.total_sessions,
+                card.last_active.as_str(),
+                card.engine,
+            )),
+            Some(("2026-04-16", 2, "2026-04-16 12:00", SessionEngine::Codex))
+        );
+        assert_eq!(app.detail_state, SessionDetailState::Idle);
+        assert_eq!(app.header_summary, empty_header_summary());
+    }
+
+    #[test]
+    fn space_toggles_selected_group_open_state() {
+        let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Left));
+        let group = app.tree_state.selected().to_vec();
+        assert!(app.tree_state.opened().contains(&group));
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(!app.tree_state.opened().contains(&group));
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(app.tree_state.opened().contains(&group));
+    }
+
+    #[test]
+    fn enter_on_group_header_toggles_without_resume_request() {
+        let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Left));
+        let group = app.tree_state.selected().to_vec();
+
+        let action = app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert!(action.is_none());
+        assert!(!app.tree_state.opened().contains(&group));
+        assert_eq!(app.resume_state, ResumeState::Idle);
+        assert_eq!(app.right_panel_mode, RightPanelMode::GroupSummary);
+    }
+
+    #[test]
+    fn moving_from_group_header_to_leaf_restores_session_detail_mode() {
+        let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Left));
+
+        let action = app.handle_key(KeyEvent::from(KeyCode::Down));
+
+        assert!(matches!(action, Some(AppAction::LoadDetail(_))));
+        assert_eq!(app.selected_index, Some(0));
+        assert_eq!(app.tree_focus_node, Some(TreeFocusNode::SessionLeaf(0)));
+        assert_eq!(app.right_panel_mode, RightPanelMode::SessionDetail);
+        assert!(app.group_summary_card.is_none());
+    }
+
+    #[test]
+    fn group_header_delete_opens_bulk_confirmation() {
+        let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Left));
+
+        let action = app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+
+        assert!(action.is_none());
+        assert!(app.pending_delete_target.is_none());
+        let target = app
+            .pending_bulk_delete_target
+            .as_ref()
+            .expect("bulk delete target");
+        assert_eq!(target.engine, SessionEngine::Codex);
+        assert_eq!(target.group_label, "2026-04-16");
+        assert_eq!(target.targets.len(), 2);
+        assert_eq!(
+            app.delete_modal_state.as_ref().map(|modal| &modal.scope),
+            Some(&DeleteScope::Group {
+                group_label: "2026-04-16".to_string(),
+                session_count: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn confirming_group_delete_returns_bulk_delete_action() {
+        let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Left));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('l')));
+
+        let action = app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        match action {
+            Some(AppAction::BulkDelete(request)) => {
+                assert_eq!(request.group_label, "2026-04-16");
+                assert_eq!(request.targets.len(), 2);
+            }
+            other => panic!("expected bulk delete action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bulk_delete_success_rebuilds_tree_and_clears_empty_group() {
+        let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Left));
+
+        let next_detail = app.apply_bulk_delete_result(BulkDeleteResult {
+            engine: SessionEngine::Codex,
+            group_identifier: "group:2026-04-16".to_string(),
+            group_label: "2026-04-16".to_string(),
+            requested_count: 2,
+            deleted: vec![
+                DeleteSuccess {
+                    deleted_path: PathBuf::from("/tmp/one.jsonl"),
+                    deleted_session_id: "one".to_string(),
+                },
+                DeleteSuccess {
+                    deleted_path: PathBuf::from("/tmp/two.jsonl"),
+                    deleted_session_id: "two".to_string(),
+                },
+            ],
+            failures: Vec::new(),
+        });
+
+        assert!(next_detail.is_none());
+        assert!(app.session_list.is_empty());
+        assert_eq!(
+            app.bulk_delete_result_summary,
+            Some(BulkDeleteResultSummary {
+                group_label: "2026-04-16".to_string(),
+                requested_count: 2,
+                deleted_count: 2,
+                failed_count: 0,
+            })
+        );
+        assert!(app.status_message.contains("Deleted 2/2 sessions"));
+        assert_eq!(
+            app.detail_state,
+            SessionDetailState::Error("No sessions found.".to_string())
+        );
+    }
+
+    #[test]
+    fn bulk_delete_partial_failure_keeps_remaining_group_nodes() {
+        let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Left));
+
+        let next_detail = app.apply_bulk_delete_result(BulkDeleteResult {
+            engine: SessionEngine::Codex,
+            group_identifier: "group:2026-04-16".to_string(),
+            group_label: "2026-04-16".to_string(),
+            requested_count: 2,
+            deleted: vec![DeleteSuccess {
+                deleted_path: PathBuf::from("/tmp/one.jsonl"),
+                deleted_session_id: "one".to_string(),
+            }],
+            failures: vec![BulkDeleteItemFailure {
+                target_path: PathBuf::from("/tmp/two.jsonl"),
+                target_session_id: "two".to_string(),
+                message: "still locked".to_string(),
+            }],
+        });
+
+        assert!(next_detail.is_none());
+        assert_eq!(app.session_list.len(), 1);
+        assert_eq!(app.session_list[0].session_id, "two");
+        assert_eq!(
+            app.tree_focus_node,
+            Some(TreeFocusNode::GroupHeader("group:2026-04-16".to_string()))
+        );
+        assert_eq!(app.right_panel_mode, RightPanelMode::GroupSummary);
+        assert_eq!(
+            app.group_summary_card
+                .as_ref()
+                .map(|card| (card.total_sessions, card.group_label.as_str())),
+            Some((1, "2026-04-16"))
+        );
+        assert!(app.status_message.contains("failed: 1"));
     }
 
     #[test]
@@ -1426,6 +2194,7 @@ mod tests {
 
         assert!(app.delete_modal_state.is_none());
         assert!(app.pending_delete_target.is_none());
+        assert!(app.pending_bulk_delete_target.is_none());
     }
 
     #[test]
@@ -1454,10 +2223,7 @@ mod tests {
         assert_eq!(app.selected_index, Some(0));
         assert!(app.delete_modal_state.is_none());
         assert!(app.pending_delete_target.is_none());
-        assert!(
-            app.status_message
-                .contains("Deleted session claude-one")
-        );
+        assert!(app.status_message.contains("Deleted session claude-one"));
         match next_detail {
             Some(DetailRequest { engine, path, .. }) => {
                 assert_eq!(engine, SessionEngine::Claude);
@@ -1633,7 +2399,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 2,
-                row: 2,
+                row: 3,
                 modifiers: KeyModifiers::NONE,
             },
             100,
@@ -1982,7 +2748,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 2,
-                row: 2,
+                row: 3,
                 modifiers: KeyModifiers::NONE,
             },
             100,

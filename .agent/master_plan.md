@@ -3,24 +3,24 @@
 ## 项目摘要
 
 - 项目名称：`Codex Sessions Manager`
-- 当前目标：在已完成 Codex 单引擎浏览、布局和恢复链路的基础上，推进阶段三的双平台会话管理能力，统一支持 Codex 与 Claude Code 两套本地会话工作流。
+- 当前目标：在阶段四树状会话列表与分组能力完成后，推进阶段五的视觉精调与帮助体验优化。
 - 当前负责人：`Master`
 - 开发语言：`Rust`
 - 推荐技术栈：`ratatui` + `crossterm`，按单一可执行二进制发布。
 
 ## 当前阶段
 
-- 阶段名称：`阶段三：Dual-Engine Session Hub`
-- 阶段目标：完成 Codex / Claude 双数据源切换、双模 transcript 解析，以及按当前引擎上下文执行差异化恢复命令的完整闭环。
-- 当前活跃 Spec：`none`
+- 阶段名称：`阶段五：Visual Polish & Help UX`
+- 阶段目标：完成树状节点视觉层级精调（图标、高亮、底色反转）和底部状态栏重构（精简文案 + 帮助浮层），提升小窗口可用性和视觉一致性。
+- 当前活跃 Spec：`none`（阶段五全部完成）
 
 ## Backlog
 
-- [ ] 暂无剩余 backlog。
+- 暂无剩余 backlog。
 
 ## In Progress
 
-- [ ] 暂无进行中 spec。
+- 暂无进行中 spec。
 
 ## Blocked
 
@@ -28,7 +28,7 @@
 
 ## QA Tracking
 
-- Spec：`08-engine-tab-and-source-switching`
+- Spec：`15-bottom-bar-refactor-and-help-modal`
 - Next Owner：`Master`
 - QA Status：`passed`
 - Blocking Issue：
@@ -53,6 +53,13 @@
 - [x] `08-engine-tab-and-source-switching`：QA 复验通过，双引擎 Tab、高亮、异步重载、晚到结果丢弃，以及 Codex / Claude 双根目录删除确认与结果回写已满足当前 slice 要求。
 - [x] `09-claude-transcript-adapter`：QA 复验通过，Claude transcript 适配、统一详情屏显语义、视口化读取、噪音过滤和晚到详情结果隔离已满足当前 slice 要求。
 - [x] `10-engine-aware-resume-handoff`：QA 复验通过，Claude Tab 鼠标选中后的 `Enter` 恢复链、双引擎固定命令模板、`cwd` 绑定、终端让渡/返场与请求级错误归属已满足当前 slice 要求。
+- [x] `11-grouped-session-tree-browser`：QA 复验通过，正式 `tui-tree-widget` 树渲染、`TreeState` 折叠状态、显式 Header/Leaf 节点模型、摘要展示、分组模式切换和双引擎兼容已满足当前 slice 要求。
+- [x] `12-group-header-preview-and-enter-semantics`：QA 复验通过，Header 焦点统计卡、Header/Leaf 右侧语义分流、Header `Enter` 不触发恢复、Leaf `Enter` 恢复链路和快速切换不串屏已满足当前 slice 要求。
+- [x] `13-group-bulk-delete-flow`：QA 复验通过，Header 批量删除确认、Header/Leaf 删除文案区分、逐条 engine-aware 删除、成功/部分失败结果回写、树重建与双引擎根目录边界已满足当前 slice 要求。
+- [x] `oxker_style_ui_plan`：外部引入的 oxker 风格视觉改造已完成，当前作为阶段四树状列表重构的既有 UI 基线，而不是待实施 backlog。
+- [x] 将 `docs/prd-6.md`（视觉体验与 UI 交互精调）拆解为 2 个 vertical slices，推进至阶段五。
+- [x] `14-tree-node-visual-polish`：QA 通过，Group 节点 Bold + 主题色 + 图标前缀（📂/🕒）、Session 节点 `·` 前缀、焦点行 `REVERSED` 底色反转、`highlight_symbol("")` 移除 `>>`，4 个自动化测试全部通过，已满足当前 slice 要求。
+- [x] `15-bottom-bar-refactor-and-help-modal`：QA 通过，常驻栏精简为 69 字符、`?` 键触发居中帮助浮层、浮层含全部高阶快捷键、任意键/Esc 关闭且阻止其他动作，6 个自动化测试全部通过，已满足当前 slice 要求。
 
 ## 决策记录
 
@@ -128,6 +135,30 @@
   - 决策：`10-engine-aware-resume-handoff` 因 Claude Tab 打开/恢复会话不生效而回退为返工状态。
   - 原因：阶段三的恢复链路必须以真实终端用户操作可用为准；若 Claude Tab 下 `Enter` 不能真正恢复会话，则 spec 10 的通过结论无效。
 
+- 日期：`2026-05-07`
+  - 决策：`docs/prd-5.md` 建模为新阶段 `阶段四：Grouped Session Tree UX`，而不是阶段三 backlog 的扩充。
+  - 原因：该需求引入了新的信息架构和新的危险交互域，包括树状分组浏览、Header/Leaf 差异化键位语义、右侧分组统计卡和 Header 级批量删除，已超出阶段三“双平台目录、解析和恢复”的职责边界。
+
+- 日期：`2026-05-07`
+  - 决策：现有 `.agent/specs/oxker_style_ui_plan.md` 视为已完成的外部 UI 基线，不再作为当前 backlog 或新阶段 spec 返工对象。
+  - 原因：用户已明确说明该外部引入 spec 已完成；`prd-5.md` 的重点是树状列表与分组交互，不是重新做一轮 oxker 视觉翻修。
+
+- 日期：`2026-05-07`
+  - 决策：阶段四的树状列表实现固定采用 `tui-tree-widget` 与 `TreeState` 托管折叠/展开状态，不允许业务层自管复杂树节点 UI 状态。
+  - 原因：`prd-5.md` 已明确给出依赖和状态托管约束，继续手写树形状态机会放大实现和 QA 复杂度。
+
+- 日期：`2026-05-07`
+  - 决策：阶段四拆为 3 个 vertical slices：树状分组浏览器、Header 焦点空窗统计卡与 Enter 语义、Header 级批量删除。
+  - 原因：这三块分别对应树状导航、右侧空窗内容与键位约束、以及高危批量删除流程，边界清晰，适合独立开发与验收。
+
+- 日期：`2026-05-07`
+  - 决策：`docs/prd-6.md`（视觉体验与 UI 交互精调）建模为新阶段 `阶段五：Visual Polish & Help UX`，而不是阶段四 backlog 的扩充。
+  - 原因：该需求引入了新的视觉规范和交互模式（帮助浮层），属于体验优化层，与阶段四的树状分组功能正交，适合独立阶段推进。
+
+- 日期：`2026-05-07`
+  - 决策：阶段五拆为 2 个 vertical slices：树状节点视觉精调、底部状态栏重构与帮助浮层。
+  - 原因：这两块分别对应左侧树状列表的视觉层级优化和底部状态栏的可用性提升，边界清晰，适合独立开发与验收。
+
 ## 风险记录
 
 - 风险：100MB+ 的 `.jsonl` 文件导致右侧详情加载和渲染阻塞主界面。
@@ -201,3 +232,23 @@
 - 风险：`10-engine-aware-resume-handoff` 当前文档已标记通过，但若 Claude Tab 下 `Enter` 实际不能打开/恢复会话，则双平台最核心的继续工作链路在真实使用中是不成立的。
   - 影响：用户会误以为 Claude 恢复能力已完成，实际操作却失败，直接破坏阶段三目标。
   - 缓解方案：将 `10-engine-aware-resume-handoff` 回退为返工状态，要求以真实手测链路复核 Claude `Enter` 请求构造、命令分流、终端让渡和返场结果，而不是只依据既有单元测试结论。
+
+- 风险：树状列表引入后，原有“平铺列表 + 单选中索引”的状态模型不再充分，若继续沿用旧模型，容易出现 Header/Leaf 焦点错位、展开态丢失或删除目标映射错误。
+  - 影响：左侧列表会在切换分组模式、展开折叠和删除后表现不稳定，直接破坏 PRD-5 的主功能。
+  - 缓解方案：将树状浏览器拆为独立 `11-grouped-session-tree-browser`，显式定义 `TreeState`、Header/Leaf 节点模型和分组模式切换状态。
+
+- 风险：PRD-5 在 Header 节点上新增了“右侧统计卡”和“Enter 仅展开/静默”的差异化语义；若复用旧叶子节点详情与恢复逻辑，容易出现 Header 焦点下仍展示上一条对话或触发错误恢复。
+  - 影响：用户会在分组节点看到误导性的旧详情，或在 Header 上按 `Enter` 触发错误动作。
+  - 缓解方案：将该语义独立拆为 `12-group-header-preview-and-enter-semantics`，强制固定 Header 焦点的右侧展示和 Enter 行为。
+
+- 风险：Header 级批量删除是新的高危操作，且同时作用于 Codex / Claude 两个根目录体系；若范围计算、确认文案和结果回写不严谨，误删风险显著高于单文件删除。
+  - 影响：可能造成整组历史会话被误删，并且在双平台下更难恢复。
+  - 缓解方案：将批量删除独立拆为 `13-group-bulk-delete-flow`，要求显式确认、删除范围预览、分组内逐项安全校验和失败回滚/部分失败反馈策略。
+
+- 风险：不同终端对 emoji 渲染宽度不一致（单宽 vs 双宽），可能导致树状节点图标前缀在某些终端下破坏对齐。
+  - 影响：视觉层级指示符在不同终端下表现不一致，影响可用性。
+  - 缓解方案：在 spec 14 中要求在常见终端（iTerm2、Alacritty、Windows Terminal）下验证对齐，并准备纯文本降级方案。
+
+- 风险：帮助浮层触发时，若底层列表或详情面板的刷新未暂停，浮层可能被覆盖或闪烁。
+  - 影响：帮助浮层的可用性受损，用户体验不佳。
+  - 缓解方案：在 spec 15 中明确浮层可见时暂停底层刷新，确保浮层稳定显示。

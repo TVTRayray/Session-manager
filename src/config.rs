@@ -78,7 +78,11 @@ impl Default for DisplaySection {
 }
 
 fn default_visible_blocks() -> Vec<String> {
-    vec!["user".to_string(), "assistant".to_string(), "thinking".to_string()]
+    vec![
+        "user".to_string(),
+        "assistant".to_string(),
+        "thinking".to_string(),
+    ]
 }
 
 fn parse_block_kind(name: &str) -> Option<BlockKind> {

@@ -7,9 +7,9 @@ use crossterm::event::{self, Event};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use sessions_manager::app::{
-    App, AppAction, CatalogLoadResult, CatalogRequest, DeleteFailure, DeleteResult, DeleteSuccess,
-    DetailLoadResult, DetailRequest, drain_catalog_results, drain_detail_results,
-    spawn_catalog_loader, spawn_detail_loader,
+    App, AppAction, BulkDeleteItemFailure, BulkDeleteResult, CatalogLoadResult, CatalogRequest,
+    DeleteFailure, DeleteResult, DeleteSuccess, DetailLoadResult, DetailRequest,
+    drain_catalog_results, drain_detail_results, spawn_catalog_loader, spawn_detail_loader,
 };
 use sessions_manager::catalog::{FilesystemMultiSessionCatalog, FilesystemSessionCatalog};
 use sessions_manager::config;
@@ -174,6 +174,37 @@ fn dispatch_action(
             };
 
             if let Some(request) = app.apply_delete_result(result) {
+                let _ = detail_request_tx.send(request);
+            }
+            Ok(())
+        }
+        AppAction::BulkDelete(request) => {
+            let requested_count = request.targets.len();
+            let mut deleted = Vec::new();
+            let mut failures = Vec::new();
+
+            for target in request.targets {
+                match delete_executor.delete_session(&target) {
+                    Ok(()) => deleted.push(DeleteSuccess {
+                        deleted_path: target.path,
+                        deleted_session_id: target.session_id,
+                    }),
+                    Err(err) => failures.push(BulkDeleteItemFailure {
+                        target_path: target.path,
+                        target_session_id: target.session_id,
+                        message: err.message().to_string(),
+                    }),
+                }
+            }
+
+            if let Some(request) = app.apply_bulk_delete_result(BulkDeleteResult {
+                engine: request.engine,
+                group_identifier: request.group_identifier,
+                group_label: request.group_label,
+                requested_count,
+                deleted,
+                failures,
+            }) {
                 let _ = detail_request_tx.send(request);
             }
             Ok(())

@@ -127,6 +127,7 @@ fn probe_item_for(engine: SessionEngine) -> SessionListItem {
     match engine {
         SessionEngine::Codex => SessionListItem {
             session_id: "probe".to_string(),
+            summary: "inspect current session layout".to_string(),
             display_time: "2026-04-17 12:00".to_string(),
             cwd_tail: "probe".to_string(),
             cwd_path: "/workspace/probe".to_string(),
@@ -137,6 +138,7 @@ fn probe_item_for(engine: SessionEngine) -> SessionListItem {
         },
         SessionEngine::Claude => SessionListItem {
             session_id: "probe-claude".to_string(),
+            summary: "resume claude conversation".to_string(),
             display_time: "2026-04-17 12:30".to_string(),
             cwd_tail: "probe-claude".to_string(),
             cwd_path: "/workspace/probe-claude".to_string(),
@@ -284,6 +286,11 @@ fn format_action(action: Option<&AppAction>) -> String {
         }
         Some(AppAction::LoadDetail(request)) => format!("LoadDetail(offset={})", request.offset),
         Some(AppAction::Delete(request)) => format!("Delete(session_id={})", request.session_id),
+        Some(AppAction::BulkDelete(request)) => format!(
+            "BulkDelete(group={},count={})",
+            request.group_label,
+            request.targets.len()
+        ),
         Some(AppAction::Resume(request)) => {
             format!(
                 "Resume(engine={:?},session_id={},cwd={})",

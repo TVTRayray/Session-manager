@@ -51,6 +51,7 @@ pub enum FileHealth {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionListItem {
     pub session_id: String,
+    pub summary: String,
     pub display_time: String,
     pub cwd_tail: String,
     pub cwd_path: String,
@@ -203,6 +204,7 @@ fn walk_session_dir(
                     file_health_map.insert(path.clone(), FileHealth::Unreadable);
                     items.push(SessionListItem {
                         session_id: fallback_session_id(&path),
+                        summary: fallback_summary(&path),
                         display_time: "metadata unavailable".to_string(),
                         cwd_tail: "-".to_string(),
                         cwd_path: "-".to_string(),
@@ -232,15 +234,24 @@ fn walk_session_dir(
         }
 
         let modified_at = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        let (session_id, cwd_tail, cwd_path, file_health, warning) =
+        let (session_id, summary, cwd_tail, cwd_path, file_health, warning) =
             match read_session_stub(&validated_path) {
                 StubRead::Success {
                     session_id,
+                    summary,
                     cwd_tail,
                     cwd_path,
-                } => (session_id, cwd_tail, cwd_path, FileHealth::Healthy, None),
+                } => (
+                    session_id,
+                    summary,
+                    cwd_tail,
+                    cwd_path,
+                    FileHealth::Healthy,
+                    None,
+                ),
                 StubRead::Warning(message) => (
                     fallback_session_id(&path),
+                    fallback_summary(&path),
                     "-".to_string(),
                     "-".to_string(),
                     FileHealth::Warning,
@@ -255,6 +266,7 @@ fn walk_session_dir(
         file_health_map.insert(validated_path.clone(), file_health.clone());
         items.push(SessionListItem {
             session_id,
+            summary,
             display_time: format_system_time(modified_at),
             cwd_tail,
             cwd_path,
@@ -269,6 +281,7 @@ fn walk_session_dir(
 enum StubRead {
     Success {
         session_id: String,
+        summary: String,
         cwd_tail: String,
         cwd_path: String,
     },
@@ -287,7 +300,11 @@ fn read_session_stub(path: &Path) -> StubRead {
     };
     let reader = BufReader::new(file);
 
-    for (index, line_result) in reader.lines().take(20).enumerate() {
+    let mut session_id = fallback_session_id(path);
+    let mut cwd_path = "-".to_string();
+    let mut summary: Option<String> = None;
+
+    for (index, line_result) in reader.lines().take(50).enumerate() {
         let line = match line_result {
             Ok(line) => line,
             Err(err) => {
@@ -303,53 +320,158 @@ fn read_session_stub(path: &Path) -> StubRead {
             Ok(value) => value,
             Err(_) => continue,
         };
-        
+
         let msg_type = value.get("type").and_then(Value::as_str);
 
         if msg_type == Some("session_meta") {
             let Some(payload) = value.get("payload") else {
                 continue;
             };
-            let session_id = payload
+            session_id = payload
                 .get("id")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned)
                 .unwrap_or_else(|| fallback_session_id(path));
-            let cwd_path = payload
+            cwd_path = payload
                 .get("cwd")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned)
                 .unwrap_or_else(|| "-".to_string());
-            let cwd_tail = last_path_segment(&cwd_path).unwrap_or_else(|| "-".to_string());
-            return StubRead::Success {
-                session_id,
-                cwd_tail,
-                cwd_path,
-            };
         } else if msg_type == Some("user") || msg_type == Some("assistant") {
-            let session_id = value
+            session_id = value
                 .get("sessionId")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned)
                 .unwrap_or_else(|| fallback_session_id(path));
-            let cwd_path = value
+            cwd_path = value
                 .get("cwd")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned)
                 .unwrap_or_else(|| "-".to_string());
-            let cwd_tail = last_path_segment(&cwd_path).unwrap_or_else(|| "-".to_string());
-            return StubRead::Success {
-                session_id,
-                cwd_tail,
-                cwd_path,
-            };
         }
+
+        if summary.is_none() {
+            summary = extract_user_summary(&value);
+        }
+
+        if msg_type == Some("session_meta") && summary.is_some() {
+            break;
+        }
+        if (msg_type == Some("user") || msg_type == Some("assistant")) && summary.is_some() {
+            break;
+        }
+    }
+
+    if cwd_path != "-" || summary.is_some() {
+        let cwd_tail = last_path_segment(&cwd_path).unwrap_or_else(|| "-".to_string());
+        return StubRead::Success {
+            session_id,
+            summary: summary.unwrap_or_else(|| fallback_summary(path)),
+            cwd_tail,
+            cwd_path,
+        };
     }
 
     StubRead::Warning(format!(
         "Session header metadata unavailable for {}",
         path.display()
     ))
+}
+
+fn extract_user_summary(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) == Some("user") {
+        return extract_text_content(value);
+    }
+
+    if value.get("type").and_then(Value::as_str) == Some("response_item")
+        && value
+            .get("payload")
+            .and_then(|payload| payload.get("role"))
+            .and_then(Value::as_str)
+            == Some("user")
+    {
+        return value
+            .get("payload")
+            .and_then(extract_text_content)
+            .or_else(|| extract_text_content(value));
+    }
+
+    if value
+        .get("message")
+        .and_then(|message| message.get("role"))
+        .and_then(Value::as_str)
+        == Some("user")
+    {
+        return value.get("message").and_then(extract_text_content);
+    }
+
+    None
+}
+
+fn extract_text_content(value: &Value) -> Option<String> {
+    if let Some(text) = value.get("text").and_then(Value::as_str) {
+        return normalize_summary(text);
+    }
+    if let Some(content) = value.get("content") {
+        match content {
+            Value::String(text) => return normalize_summary(text),
+            Value::Array(items) => {
+                for item in items {
+                    if let Some(text) = item.get("text").and_then(Value::as_str) {
+                        if let Some(summary) = normalize_summary(text) {
+                            return Some(summary);
+                        }
+                    }
+                    if let Some(summary) = extract_text_content(item) {
+                        return Some(summary);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(message) = value.get("message") {
+        return extract_text_content(message);
+    }
+    None
+}
+
+fn normalize_summary(input: &str) -> Option<String> {
+    let mut rest = input.trim_start();
+
+    loop {
+        if !rest.starts_with('<') || rest.starts_with("</") {
+            break;
+        }
+
+        let Some(tag_end) = rest.find('>') else {
+            break;
+        };
+        let tag_name = &rest[1..tag_end];
+        if tag_name.is_empty() || tag_name.contains(char::is_whitespace) {
+            break;
+        }
+
+        let closing_tag = format!("</{tag_name}>");
+        let Some(closing_index) = rest.find(&closing_tag) else {
+            break;
+        };
+
+        rest = &rest[closing_index + closing_tag.len()..];
+        rest = rest.trim_start();
+    }
+
+    let summary = rest.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!summary.is_empty()).then_some(summary)
+}
+
+fn fallback_summary(path: &Path) -> String {
+    let fallback = fallback_session_id(path).replace('-', " ");
+    if fallback.is_empty() {
+        "Session summary unavailable".to_string()
+    } else {
+        fallback
+    }
 }
 
 fn last_path_segment(input: &str) -> Option<String> {
@@ -488,6 +610,38 @@ mod tests {
         assert_eq!(codex.items[0].session_id, "codex");
         assert_eq!(claude.items.len(), 1);
         assert_eq!(claude.items[0].session_id, "claude");
+    }
+
+    #[test]
+    fn extracts_first_user_message_as_summary() {
+        let dir = must(tempdir());
+        must(fs::write(
+            dir.path().join("summary.jsonl"),
+            concat!(
+                r#"{"type":"session_meta","payload":{"id":"abc123","cwd":"/workspace/demo"}}"#,
+                "\n",
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"帮我 看看   当前  状态"}]}}"#,
+                "\n",
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"第二条不该被选中"}]}}"#
+            ),
+        ));
+
+        let load = must(scan_session_dir(dir.path()));
+        assert_eq!(load.items.len(), 1);
+        assert_eq!(load.items[0].summary, "帮我 看看 当前 状态");
+    }
+
+    #[test]
+    fn falls_back_to_safe_summary_when_user_message_missing() {
+        let dir = must(tempdir());
+        must(fs::write(
+            dir.path().join("fallback-session.jsonl"),
+            r#"{"type":"session_meta","payload":{"id":"abc123","cwd":"/workspace/demo"}}"#,
+        ));
+
+        let load = must(scan_session_dir(dir.path()));
+        assert_eq!(load.items.len(), 1);
+        assert!(load.items[0].summary.contains("fallback session"));
     }
 
     #[test]

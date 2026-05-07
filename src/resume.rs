@@ -353,7 +353,7 @@ mod tests {
 
         let result = executor.resume_session(&request);
         assert!(result.is_ok());
-        
+
         #[cfg(target_os = "windows")]
         let expected_program = "claude.cmd".to_string();
         #[cfg(not(target_os = "windows"))]
