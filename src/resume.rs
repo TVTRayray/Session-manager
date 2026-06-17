@@ -11,6 +11,12 @@ pub struct ResumeSessionRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewSessionRequest {
+    pub engine: SessionEngine,
+    pub cwd: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResumeCommandOutput {
     pub success: bool,
     pub code: Option<i32>,
@@ -62,6 +68,10 @@ pub trait ResumeSessionExecutor {
     fn resume_session(&self, request: &ResumeSessionRequest) -> Result<(), ResumeSessionError>;
 }
 
+pub trait NewSessionExecutor {
+    fn start_new_session(&self, request: &NewSessionRequest) -> Result<(), ResumeSessionError>;
+}
+
 #[derive(Clone, Debug)]
 pub struct CodexResumeExecutor<R = ProcessResumeCommandRunner> {
     runner: R,
@@ -72,6 +82,12 @@ impl CodexResumeExecutor<ProcessResumeCommandRunner> {
         Self {
             runner: ProcessResumeCommandRunner,
         }
+    }
+}
+
+impl Default for CodexResumeExecutor<ProcessResumeCommandRunner> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -94,6 +110,37 @@ impl<R: ResumeCommandRunner> ResumeSessionExecutor for CodexResumeExecutor<R> {
 }
 
 #[derive(Clone, Debug)]
+pub struct CodexNewSessionExecutor<R = ProcessResumeCommandRunner> {
+    runner: R,
+}
+
+impl CodexNewSessionExecutor<ProcessResumeCommandRunner> {
+    pub fn new() -> Self {
+        Self {
+            runner: ProcessResumeCommandRunner,
+        }
+    }
+}
+
+impl Default for CodexNewSessionExecutor<ProcessResumeCommandRunner> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<R> CodexNewSessionExecutor<R> {
+    pub fn with_runner(runner: R) -> Self {
+        Self { runner }
+    }
+}
+
+impl<R: ResumeCommandRunner> NewSessionExecutor for CodexNewSessionExecutor<R> {
+    fn start_new_session(&self, request: &NewSessionRequest) -> Result<(), ResumeSessionError> {
+        run_resume_command(&self.runner, "codex", &[], &request.cwd, "codex")
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct ClaudeResumeExecutor<R = ProcessResumeCommandRunner> {
     runner: R,
 }
@@ -103,6 +150,12 @@ impl ClaudeResumeExecutor<ProcessResumeCommandRunner> {
         Self {
             runner: ProcessResumeCommandRunner,
         }
+    }
+}
+
+impl Default for ClaudeResumeExecutor<ProcessResumeCommandRunner> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -130,6 +183,42 @@ impl<R: ResumeCommandRunner> ResumeSessionExecutor for ClaudeResumeExecutor<R> {
 }
 
 #[derive(Clone, Debug)]
+pub struct ClaudeNewSessionExecutor<R = ProcessResumeCommandRunner> {
+    runner: R,
+}
+
+impl ClaudeNewSessionExecutor<ProcessResumeCommandRunner> {
+    pub fn new() -> Self {
+        Self {
+            runner: ProcessResumeCommandRunner,
+        }
+    }
+}
+
+impl Default for ClaudeNewSessionExecutor<ProcessResumeCommandRunner> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<R> ClaudeNewSessionExecutor<R> {
+    pub fn with_runner(runner: R) -> Self {
+        Self { runner }
+    }
+}
+
+impl<R: ResumeCommandRunner> NewSessionExecutor for ClaudeNewSessionExecutor<R> {
+    fn start_new_session(&self, request: &NewSessionRequest) -> Result<(), ResumeSessionError> {
+        #[cfg(target_os = "windows")]
+        let program = "claude.cmd";
+        #[cfg(not(target_os = "windows"))]
+        let program = "claude";
+
+        run_resume_command(&self.runner, program, &[], &request.cwd, "claude")
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct EngineAwareResumeExecutor<
     RCodex = ProcessResumeCommandRunner,
     RClaude = ProcessResumeCommandRunner,
@@ -144,6 +233,12 @@ impl EngineAwareResumeExecutor<ProcessResumeCommandRunner, ProcessResumeCommandR
             codex: CodexResumeExecutor::new(),
             claude: ClaudeResumeExecutor::new(),
         }
+    }
+}
+
+impl Default for EngineAwareResumeExecutor<ProcessResumeCommandRunner, ProcessResumeCommandRunner> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -163,6 +258,52 @@ impl<RCodex: ResumeCommandRunner, RClaude: ResumeCommandRunner> ResumeSessionExe
         match request.engine {
             SessionEngine::Codex => self.codex.resume_session(request),
             SessionEngine::Claude => self.claude.resume_session(request),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct EngineAwareNewSessionExecutor<
+    RCodex = ProcessResumeCommandRunner,
+    RClaude = ProcessResumeCommandRunner,
+> {
+    codex: CodexNewSessionExecutor<RCodex>,
+    claude: ClaudeNewSessionExecutor<RClaude>,
+}
+
+impl EngineAwareNewSessionExecutor<ProcessResumeCommandRunner, ProcessResumeCommandRunner> {
+    pub fn new() -> Self {
+        Self {
+            codex: CodexNewSessionExecutor::new(),
+            claude: ClaudeNewSessionExecutor::new(),
+        }
+    }
+}
+
+impl Default
+    for EngineAwareNewSessionExecutor<ProcessResumeCommandRunner, ProcessResumeCommandRunner>
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<RCodex, RClaude> EngineAwareNewSessionExecutor<RCodex, RClaude> {
+    pub fn with_executors(
+        codex: CodexNewSessionExecutor<RCodex>,
+        claude: ClaudeNewSessionExecutor<RClaude>,
+    ) -> Self {
+        Self { codex, claude }
+    }
+}
+
+impl<RCodex: ResumeCommandRunner, RClaude: ResumeCommandRunner> NewSessionExecutor
+    for EngineAwareNewSessionExecutor<RCodex, RClaude>
+{
+    fn start_new_session(&self, request: &NewSessionRequest) -> Result<(), ResumeSessionError> {
+        match request.engine {
+            SessionEngine::Codex => self.codex.start_new_session(request),
+            SessionEngine::Claude => self.claude.start_new_session(request),
         }
     }
 }
@@ -438,6 +579,59 @@ mod tests {
 
         assert_eq!(codex_runner.calls().len(), 1);
         assert_eq!(claude_runner.calls().len(), 1);
+        assert_eq!(codex_runner.calls()[0].0, "codex");
+        #[cfg(target_os = "windows")]
+        assert_eq!(claude_runner.calls()[0].0, "claude.cmd");
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(claude_runner.calls()[0].0, "claude");
+    }
+
+    #[test]
+    fn new_session_executor_uses_bare_codex_command_and_request_cwd() {
+        let temp = tempdir().unwrap_or_else(|err| panic!("tempdir failed: {err}"));
+        let runner = RecordingRunner::default();
+        let executor = CodexNewSessionExecutor::with_runner(runner.clone());
+        let request = NewSessionRequest {
+            engine: SessionEngine::Codex,
+            cwd: temp.path().to_path_buf(),
+        };
+
+        let result = executor.start_new_session(&request);
+
+        assert!(result.is_ok());
+        assert_eq!(
+            runner.calls(),
+            vec![("codex".to_string(), Vec::new(), temp.path().to_path_buf())]
+        );
+    }
+
+    #[test]
+    fn engine_aware_new_session_executor_dispatches_by_request_engine() {
+        let temp = tempdir().unwrap_or_else(|err| panic!("tempdir failed: {err}"));
+        let codex_runner = RecordingRunner::default();
+        let claude_runner = RecordingRunner::default();
+        let executor = EngineAwareNewSessionExecutor::with_executors(
+            CodexNewSessionExecutor::with_runner(codex_runner.clone()),
+            ClaudeNewSessionExecutor::with_runner(claude_runner.clone()),
+        );
+
+        assert!(
+            executor
+                .start_new_session(&NewSessionRequest {
+                    engine: SessionEngine::Codex,
+                    cwd: temp.path().to_path_buf(),
+                })
+                .is_ok()
+        );
+        assert!(
+            executor
+                .start_new_session(&NewSessionRequest {
+                    engine: SessionEngine::Claude,
+                    cwd: temp.path().to_path_buf(),
+                })
+                .is_ok()
+        );
+
         assert_eq!(codex_runner.calls()[0].0, "codex");
         #[cfg(target_os = "windows")]
         assert_eq!(claude_runner.calls()[0].0, "claude.cmd");

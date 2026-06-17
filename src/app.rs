@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -12,7 +12,7 @@ use crate::catalog::{
 };
 use crate::delete::DeleteRequest;
 use crate::detail::{DetailViewport, SessionDetailLoader};
-use crate::resume::ResumeSessionRequest;
+use crate::resume::{NewSessionRequest, ResumeSessionRequest};
 
 const DEFAULT_VIEWPORT_HEIGHT: usize = 16;
 const PATH_HINT_TTL_TICKS: u64 = 20;
@@ -133,6 +133,7 @@ pub enum AppAction {
     Delete(DeleteRequest),
     BulkDelete(BulkDeleteRequest),
     Resume(ResumeSessionRequest),
+    NewSession(NewSessionRequest),
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -407,6 +408,10 @@ impl App {
         }
     }
 
+    pub fn tick_count(&self) -> u64 {
+        self.tick_count
+    }
+
     pub fn set_detail_viewport_height(&mut self, height: usize) {
         self.detail_viewport_state.viewport_height = height.max(1);
     }
@@ -545,6 +550,7 @@ impl App {
             KeyCode::PageDown => self.scroll_detail(8).map(AppAction::LoadDetail),
             KeyCode::PageUp => self.scroll_detail(-8).map(AppAction::LoadDetail),
             KeyCode::Enter => self.handle_tree_enter(),
+            KeyCode::Char('n') => self.begin_new_session_request().map(AppAction::NewSession),
             KeyCode::Char('d') | KeyCode::Delete => {
                 self.begin_delete_confirmation();
                 None
@@ -1039,6 +1045,73 @@ impl App {
         })
     }
 
+    fn begin_new_session_request(&mut self) -> Option<NewSessionRequest> {
+        let engine = self.active_engine;
+        let engine_label = engine.label();
+        let cwd = match &self.tree_focus_node {
+            Some(TreeFocusNode::GroupHeader(identifier)) => {
+                if self.group_mode != GroupMode::ByProject {
+                    let message = "Select a project or session before starting a new session";
+                    self.resume_state = ResumeState::Error;
+                    self.resume_engine = Some(engine);
+                    self.resume_result_message = Some(message.to_string());
+                    self.status_message = with_status_message(None, Some(message));
+                    return None;
+                }
+                self.first_group_child_cwd(identifier)
+            }
+            _ => self.selected_item().map(|item| item.cwd_path.clone()),
+        };
+
+        let cwd = cwd?;
+        let cwd = cwd.trim();
+        if cwd.is_empty() || cwd == "-" {
+            let message = format!("{engine_label} new session is missing cwd metadata");
+            self.resume_state = ResumeState::Error;
+            self.resume_engine = Some(engine);
+            self.resume_result_message = Some(message.clone());
+            self.status_message = with_status_message(None, Some(message.as_str()));
+            return None;
+        }
+
+        self.resume_state = ResumeState::Preparing;
+        self.resume_engine = Some(engine);
+        let message = format!("Starting new {engine_label} session in {cwd}");
+        self.resume_result_message = Some(message.clone());
+        self.status_message = with_status_message(Some(message.as_str()), None);
+
+        Some(NewSessionRequest {
+            engine,
+            cwd: PathBuf::from(cwd),
+        })
+    }
+
+    pub fn apply_new_session_result(
+        &mut self,
+        result: Result<(), String>,
+    ) -> Option<CatalogRequest> {
+        let engine = self.resume_engine.unwrap_or(self.active_engine);
+        let engine_label = engine.label();
+        match result {
+            Ok(()) => {
+                let message = format!("Returned from new {engine_label} session");
+                self.resume_state = ResumeState::Idle;
+                self.resume_result_message = Some(message.clone());
+                self.status_message = with_status_message(Some(message.as_str()), None);
+                self.resume_engine = None;
+                Some(self.reload_active_catalog())
+            }
+            Err(err) => {
+                let message = format!("{engine_label} new session failed: {err}");
+                self.resume_state = ResumeState::Error;
+                self.resume_result_message = Some(message.clone());
+                self.status_message = with_status_message(None, Some(message.as_str()));
+                self.resume_engine = None;
+                None
+            }
+        }
+    }
+
     fn invalidate_detail_requests(&mut self) {
         self.parse_cancellation_token = self.parse_cancellation_token.saturating_add(1);
     }
@@ -1071,6 +1144,16 @@ impl App {
             default_status_message(),
             self.active_engine.label()
         );
+        CatalogRequest {
+            request_id: self.catalog_request_token,
+            engine: self.active_engine,
+        }
+    }
+
+    fn reload_active_catalog(&mut self) -> CatalogRequest {
+        self.catalog_request_token = self.catalog_request_token.saturating_add(1);
+        self.catalog_loading_state = CatalogLoadingState::Loading(self.active_engine);
+        self.invalidate_detail_requests();
         CatalogRequest {
             request_id: self.catalog_request_token,
             engine: self.active_engine,
@@ -1263,6 +1346,18 @@ impl App {
             })
     }
 
+    fn first_group_child_cwd(&self, identifier: &str) -> Option<String> {
+        build_grouped_session_nodes(&self.session_list, &self.group_mode)
+            .into_iter()
+            .find(|group| group.identifier == identifier)
+            .and_then(|group| {
+                group
+                    .children
+                    .first()
+                    .map(|child| self.session_list[child.session_index].cwd_path.clone())
+            })
+    }
+
     fn refresh_right_panel_mode(&mut self) {
         match &self.tree_focus_node {
             Some(TreeFocusNode::GroupHeader(identifier)) => {
@@ -1359,10 +1454,10 @@ pub fn group_label_for_item(item: &SessionListItem, group_mode: &GroupMode) -> S
             .unwrap_or(item.display_time.as_str())
             .to_string(),
         GroupMode::ByProject => {
-            if item.cwd_tail == "-" {
+            if item.cwd_group_label == "-" {
                 "unknown-project".to_string()
             } else {
-                item.cwd_tail.clone()
+                item.cwd_group_label.clone()
             }
         }
     }
@@ -1432,20 +1527,14 @@ pub fn spawn_catalog_loader<L: EngineCatalogReader + Send + Sync + 'static>(
 }
 
 pub fn drain_detail_results(app: &mut App, receiver: &Receiver<DetailLoadResult>) {
-    loop {
-        match receiver.try_recv() {
-            Ok(result) => app.apply_detail_result(result),
-            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-        }
+    while let Ok(result) = receiver.try_recv() {
+        app.apply_detail_result(result);
     }
 }
 
 pub fn drain_catalog_results(app: &mut App, receiver: &Receiver<CatalogLoadResult>) {
-    loop {
-        match receiver.try_recv() {
-            Ok(result) => app.apply_catalog_result(result),
-            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-        }
+    while let Ok(result) = receiver.try_recv() {
+        app.apply_catalog_result(result);
     }
 }
 
@@ -1693,6 +1782,7 @@ mod tests {
             summary: format!("summary for {name}"),
             display_time: "2026-04-16 12:00".to_string(),
             cwd_tail: "demo".to_string(),
+            cwd_group_label: "workspace/demo".to_string(),
             cwd_path: format!("/workspace/{name}"),
             abs_path: PathBuf::from(format!("/tmp/{name}.jsonl")),
             is_loadable: true,
@@ -1704,7 +1794,16 @@ mod tests {
     fn ready_viewport() -> DetailViewport {
         DetailViewport {
             session_meta: Default::default(),
-            rendered_lines: vec!["Session: demo".to_string(), "Assistant".to_string()],
+            rendered_lines: vec![
+                crate::detail::RenderedLine::new(
+                    crate::detail::RenderedLineKind::Header,
+                    "Session: demo",
+                ),
+                crate::detail::RenderedLine::new(
+                    crate::detail::RenderedLineKind::Assistant,
+                    "Assistant",
+                ),
+            ],
             requested_offset: 0,
             requested_height: 16,
             has_more_before: false,
@@ -1802,12 +1901,32 @@ mod tests {
     fn grouped_nodes_build_explicit_header_and_leaf_models() {
         let nodes = build_grouped_session_nodes(&[item("one"), item("two")], &GroupMode::ByProject);
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].label, "demo");
-        assert_eq!(nodes[0].identifier, "group:demo");
+        assert_eq!(nodes[0].label, "workspace/demo");
+        assert_eq!(nodes[0].identifier, "group:workspace/demo");
         assert_eq!(nodes[0].children.len(), 2);
         assert_eq!(nodes[0].children[0].identifier, "/tmp/one.jsonl");
         assert_eq!(nodes[0].children[0].session_index, 0);
         assert_eq!(nodes[0].children[0].summary, "summary for one");
+    }
+
+    #[test]
+    fn project_grouping_uses_two_segment_label_to_avoid_tail_collisions() {
+        let mut left = item("left");
+        left.cwd_tail = "api".to_string();
+        left.cwd_group_label = "workspace/api".to_string();
+        let mut right = item("right");
+        right.cwd_tail = "api".to_string();
+        right.cwd_group_label = "other/api".to_string();
+
+        let groups = grouped_session_indexes(&[left, right], &GroupMode::ByProject);
+
+        assert_eq!(
+            groups
+                .iter()
+                .map(|(label, indexes)| (label.as_str(), indexes.as_slice()))
+                .collect::<Vec<_>>(),
+            vec![("workspace/api", &[0][..]), ("other/api", &[1][..])]
+        );
     }
 
     #[test]
@@ -2448,6 +2567,60 @@ mod tests {
         assert_eq!(app.resume_state, ResumeState::Error);
         assert!(app.status_message.contains("missing cwd metadata"));
         assert!(app.status_message.contains("Codex session broken"));
+    }
+
+    #[test]
+    fn n_on_session_leaf_creates_new_session_request_from_selected_cwd() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+
+        let action = app.handle_key(KeyEvent::from(KeyCode::Char('n')));
+
+        match action {
+            Some(AppAction::NewSession(request)) => {
+                assert_eq!(request.engine, SessionEngine::Codex);
+                assert_eq!(request.cwd, PathBuf::from("/workspace/one"));
+            }
+            other => panic!("expected new session request, got {other:?}"),
+        }
+        assert_eq!(app.resume_state, ResumeState::Preparing);
+        assert!(app.status_message.contains("Starting new Codex session"));
+    }
+
+    #[test]
+    fn n_on_project_group_header_uses_first_child_cwd() {
+        let mut first = item("api-one");
+        first.cwd_path = "/workspace/api".to_string();
+        first.cwd_tail = "api".to_string();
+        first.cwd_group_label = "workspace/api".to_string();
+        let mut second = item("api-two");
+        second.cwd_path = "/other/api".to_string();
+        second.cwd_tail = "api".to_string();
+        second.cwd_group_label = "workspace/api".to_string();
+        let mut app = App::new(&stub_catalog(vec![first, second]));
+        app.group_mode = GroupMode::ByProject;
+        app.rebuild_tree_after_session_list_change();
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Left));
+
+        let action = app.handle_key(KeyEvent::from(KeyCode::Char('n')));
+
+        match action {
+            Some(AppAction::NewSession(request)) => {
+                assert_eq!(request.engine, SessionEngine::Codex);
+                assert_eq!(request.cwd, PathBuf::from("/workspace/api"));
+            }
+            other => panic!("expected project header new session request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn n_on_time_group_header_reports_unsupported_context() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Left));
+
+        let action = app.handle_key(KeyEvent::from(KeyCode::Char('n')));
+
+        assert!(action.is_none());
+        assert!(app.status_message.contains("Select a project or session"));
     }
 
     #[test]

@@ -54,6 +54,7 @@ pub struct SessionListItem {
     pub summary: String,
     pub display_time: String,
     pub cwd_tail: String,
+    pub cwd_group_label: String,
     pub cwd_path: String,
     pub abs_path: PathBuf,
     pub is_loadable: bool,
@@ -207,6 +208,7 @@ fn walk_session_dir(
                         summary: fallback_summary(&path),
                         display_time: "metadata unavailable".to_string(),
                         cwd_tail: "-".to_string(),
+                        cwd_group_label: "unknown-project".to_string(),
                         cwd_path: "-".to_string(),
                         abs_path: path,
                         is_loadable: false,
@@ -234,17 +236,19 @@ fn walk_session_dir(
         }
 
         let modified_at = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        let (session_id, summary, cwd_tail, cwd_path, file_health, warning) =
+        let (session_id, summary, cwd_tail, cwd_group_label, cwd_path, file_health, warning) =
             match read_session_stub(&validated_path) {
                 StubRead::Success {
                     session_id,
                     summary,
                     cwd_tail,
+                    cwd_group_label,
                     cwd_path,
                 } => (
                     session_id,
                     summary,
                     cwd_tail,
+                    cwd_group_label,
                     cwd_path,
                     FileHealth::Healthy,
                     None,
@@ -253,6 +257,7 @@ fn walk_session_dir(
                     fallback_session_id(&path),
                     fallback_summary(&path),
                     "-".to_string(),
+                    "unknown-project".to_string(),
                     "-".to_string(),
                     FileHealth::Warning,
                     Some(message),
@@ -269,6 +274,7 @@ fn walk_session_dir(
             summary,
             display_time: format_system_time(modified_at),
             cwd_tail,
+            cwd_group_label,
             cwd_path,
             abs_path: validated_path,
             is_loadable: file_health != FileHealth::Unreadable,
@@ -283,6 +289,7 @@ enum StubRead {
         session_id: String,
         summary: String,
         cwd_tail: String,
+        cwd_group_label: String,
         cwd_path: String,
     },
     Warning(String),
@@ -364,10 +371,13 @@ fn read_session_stub(path: &Path) -> StubRead {
 
     if cwd_path != "-" || summary.is_some() {
         let cwd_tail = last_path_segment(&cwd_path).unwrap_or_else(|| "-".to_string());
+        let cwd_group_label =
+            last_two_path_segments(&cwd_path).unwrap_or_else(|| "unknown-project".to_string());
         return StubRead::Success {
             session_id,
             summary: summary.unwrap_or_else(|| fallback_summary(path)),
             cwd_tail,
+            cwd_group_label,
             cwd_path,
         };
     }
@@ -410,17 +420,21 @@ fn extract_user_summary(value: &Value) -> Option<String> {
 
 fn extract_text_content(value: &Value) -> Option<String> {
     if let Some(text) = value.get("text").and_then(Value::as_str) {
-        return normalize_summary(text);
+        return normalize_summary(text).filter(|summary| !is_codex_system_injection(summary));
     }
     if let Some(content) = value.get("content") {
         match content {
-            Value::String(text) => return normalize_summary(text),
+            Value::String(text) => {
+                return normalize_summary(text)
+                    .filter(|summary| !is_codex_system_injection(summary));
+            }
             Value::Array(items) => {
                 for item in items {
-                    if let Some(text) = item.get("text").and_then(Value::as_str) {
-                        if let Some(summary) = normalize_summary(text) {
-                            return Some(summary);
-                        }
+                    if let Some(text) = item.get("text").and_then(Value::as_str)
+                        && let Some(summary) = normalize_summary(text)
+                            .filter(|summary| !is_codex_system_injection(summary))
+                    {
+                        return Some(summary);
                     }
                     if let Some(summary) = extract_text_content(item) {
                         return Some(summary);
@@ -465,6 +479,18 @@ fn normalize_summary(input: &str) -> Option<String> {
     (!summary.is_empty()).then_some(summary)
 }
 
+pub(crate) fn is_codex_system_injection(input: &str) -> bool {
+    let trimmed = input.trim_start();
+    trimmed.starts_with("# AGENTS.md instructions")
+        || trimmed.starts_with("<permissions")
+        || trimmed.starts_with("<environment_context>")
+        || trimmed.starts_with("<collaboration_mode>")
+        || trimmed.starts_with("<skills_instructions>")
+        || trimmed.starts_with("<plugins_instructions>")
+        || trimmed.starts_with("<developer")
+        || trimmed.starts_with("<system")
+}
+
 fn fallback_summary(path: &Path) -> String {
     let fallback = fallback_session_id(path).replace('-', " ");
     if fallback.is_empty() {
@@ -479,6 +505,19 @@ fn last_path_segment(input: &str) -> Option<String> {
         .file_name()
         .and_then(OsStr::to_str)
         .map(ToOwned::to_owned)
+}
+
+fn last_two_path_segments(input: &str) -> Option<String> {
+    let mut segments = Path::new(input)
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .filter(|segment| !segment.is_empty() && *segment != "/" && *segment != "\\")
+        .collect::<Vec<_>>();
+    let tail = segments.pop()?;
+    let Some(parent) = segments.pop() else {
+        return Some(tail.to_string());
+    };
+    Some(format!("{parent}/{tail}"))
 }
 
 fn fallback_session_id(path: &Path) -> String {
@@ -629,6 +668,33 @@ mod tests {
         let load = must(scan_session_dir(dir.path()));
         assert_eq!(load.items.len(), 1);
         assert_eq!(load.items[0].summary, "帮我 看看 当前 状态");
+    }
+
+    #[test]
+    fn codex_summary_skips_system_injected_user_messages() {
+        let dir = must(tempdir());
+        must(fs::write(
+            dir.path().join("codex-injected.jsonl"),
+            concat!(
+                r#"{"type":"session_meta","payload":{"id":"codex-1","cwd":"/workspace/demo"}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions>system</permissions>"}]}}"#,
+                "\n",
+                r##"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /workspace/demo\n\nDo not show this as summary."}]}}"##,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context><cwd>/workspace/demo</cwd></environment_context>"}]}}"#,
+                "\n",
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"参考 entrust-common/.../质量统计需求说明-v2.md，帮我制定计划"}]}}"#
+            ),
+        ));
+
+        let load = must(scan_session_dir(dir.path()));
+
+        assert_eq!(load.items.len(), 1);
+        assert_eq!(
+            load.items[0].summary,
+            "参考 entrust-common/.../质量统计需求说明-v2.md，帮我制定计划"
+        );
     }
 
     #[test]
