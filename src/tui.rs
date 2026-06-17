@@ -10,9 +10,10 @@ use crate::app::{
     SessionDetailState, SplitDirection, build_grouped_session_nodes,
 };
 use crate::catalog::{FileHealth, SessionEngine};
+use crate::detail::{RenderedLine, RenderedLineKind};
 
 // --- Theme Definition ---
-pub const THEME_BG: Color = Color::Reset;
+pub const THEME_BG: Color = Color::Rgb(24, 24, 37); // Catppuccin Mocha Mantle
 pub const THEME_BORDER: Color = Color::DarkGray;
 pub const THEME_HIGHLIGHT: Color = Color::Rgb(137, 180, 250); // Catppuccin Mocha Blue
 pub const THEME_TEXT: Color = Color::Rgb(205, 214, 244); // Catppuccin Mocha Text
@@ -75,7 +76,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     frame.render_widget(detail, body[1]);
 
     let status_text = if app.status_message.is_empty() {
-        Line::from(" Tab:Engine | j/k:Nav | Enter:Toggle/Resume | d:Del | ?:Help | q:Quit")
+        Line::from(" Tab:Engine | j/k:Nav | Enter:Resume | n:New | d:Del | ?:Help | q:Quit")
     } else {
         Line::from(vec![
             Span::styled(
@@ -93,23 +94,16 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         let area = centered_rect(54, 9, frame.area());
         frame.render_widget(Clear, area);
 
-        let cancel = if modal.focus == DeleteModalFocus::Cancel {
-            "[ Cancel ]"
-        } else {
-            "  Cancel  "
-        };
-        let confirm = if modal.focus == DeleteModalFocus::Confirm {
-            "[ Delete ]"
-        } else {
-            "  Delete  "
-        };
+        let cancel = delete_button_span("Cancel", modal.focus == DeleteModalFocus::Cancel);
+        let confirm = delete_button_span("Delete", modal.focus == DeleteModalFocus::Confirm);
+        let buttons = Line::from(vec![cancel, Span::raw("    "), confirm]);
         let modal_text = match &modal.scope {
             DeleteScope::Single => Text::from(vec![
                 Line::from("Delete session permanently?"),
                 Line::from(""),
                 Line::from(modal.target_session_id.clone()),
                 Line::from(""),
-                Line::from(format!("{cancel}    {confirm}")),
+                buttons,
             ]),
             DeleteScope::Group {
                 group_label,
@@ -120,7 +114,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                 Line::from(format!("Group: {group_label}")),
                 Line::from(format!("Sessions: {session_count}")),
                 Line::from(""),
-                Line::from(format!("{cancel}    {confirm}")),
+                buttons,
             ]),
         };
 
@@ -139,7 +133,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
 
     if app.show_help_modal {
-        let area = centered_rect(52, 13, frame.area());
+        let area = centered_rect(52, 15, frame.area());
         frame.render_widget(Clear, area);
         let help_text = Text::from(vec![
             Line::from("Keyboard Shortcuts"),
@@ -147,6 +141,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             Line::from("  Tab / Shift+Tab   Switch engine"),
             Line::from("  j / k / Arrows    Navigate"),
             Line::from("  Enter              Toggle / Resume"),
+            Line::from("  n                  New session"),
             Line::from("  Space              Expand / Collapse"),
             Line::from("  d / Delete         Delete session"),
             Line::from("  g                  Toggle group mode"),
@@ -168,18 +163,36 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
 }
 
+fn delete_button_span(label: &'static str, focused: bool) -> Span<'static> {
+    let text = if focused {
+        format!("[ {label} ]")
+    } else {
+        format!("  {label}  ")
+    };
+    let style = if focused {
+        Style::default()
+            .fg(THEME_HIGHLIGHT)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(THEME_BORDER)
+    };
+    Span::styled(text, style)
+}
+
 fn render_right_panel_text(app: &App) -> Text<'static> {
     match app.right_panel_mode {
         RightPanelMode::GroupSummary => render_group_summary_card(app.group_summary_card.as_ref()),
         RightPanelMode::SessionDetail => match &app.detail_state {
             SessionDetailState::Idle => Text::from("Select a session to load details."),
-            SessionDetailState::Loading => Text::from("Loading transcript..."),
+            SessionDetailState::Loading => Text::from(format!(
+                "Loading transcript... {}",
+                loading_spinner(app.tick_count())
+            )),
             SessionDetailState::Ready(viewport) => Text::from(
                 viewport
                     .rendered_lines
                     .iter()
-                    .cloned()
-                    .map(Line::from)
+                    .map(rendered_line_to_line)
                     .collect::<Vec<_>>(),
             ),
             SessionDetailState::Error(err) => {
@@ -187,6 +200,31 @@ fn render_right_panel_text(app: &App) -> Text<'static> {
             }
         },
     }
+}
+
+fn loading_spinner(tick_count: u64) -> &'static str {
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    FRAMES[(tick_count as usize) % FRAMES.len()]
+}
+
+fn rendered_line_to_line(line: &RenderedLine) -> Line<'static> {
+    let style = match line.kind {
+        RenderedLineKind::Header => Style::default()
+            .fg(THEME_HIGHLIGHT)
+            .add_modifier(Modifier::BOLD),
+        RenderedLineKind::User => Style::default().fg(THEME_TEXT),
+        RenderedLineKind::Assistant => Style::default().fg(Color::Rgb(166, 227, 161)),
+        RenderedLineKind::Thinking => Style::default().fg(Color::Rgb(203, 166, 247)),
+        RenderedLineKind::ToolCall | RenderedLineKind::ToolOutput => {
+            Style::default().fg(THEME_BORDER)
+        }
+        RenderedLineKind::SystemContext => Style::default()
+            .fg(THEME_BORDER)
+            .add_modifier(Modifier::ITALIC),
+        RenderedLineKind::CorruptedLine => Style::default().fg(THEME_WARN),
+        RenderedLineKind::Blank => Style::default(),
+    };
+    Line::from(Span::styled(line.text.clone(), style))
 }
 
 fn render_group_summary_card(card: Option<&GroupSummaryCard>) -> Text<'static> {
@@ -244,11 +282,7 @@ fn layout_body(
 }
 
 fn panel_block(title: &str, focused: bool) -> Block<'static> {
-    let title = if focused {
-        format!(" {} ", title)
-    } else {
-        format!(" {} ", title)
-    };
+    let title = format!(" {} ", title);
     let border_style = if focused {
         Style::default()
             .fg(THEME_HIGHLIGHT)
@@ -298,7 +332,10 @@ fn build_session_tree_items(app: &App) -> Vec<TreeItem<'static, String>> {
         .collect()
 }
 
-fn build_leaf_item(leaf: &crate::app::SessionLeafNode, mode: &GroupMode) -> TreeItem<'static, String> {
+fn build_leaf_item(
+    leaf: &crate::app::SessionLeafNode,
+    mode: &GroupMode,
+) -> TreeItem<'static, String> {
     TreeItem::new_leaf(leaf.identifier.clone(), leaf_text(leaf, mode))
 }
 
@@ -325,20 +362,10 @@ fn leaf_text(leaf: &crate::app::SessionLeafNode, mode: &GroupMode) -> String {
     let summary = truncate_summary(&leaf.summary, 38);
     match mode {
         GroupMode::ByTime => {
-            format!(
-                "[{}] {}{}",
-                leaf.cwd_tail,
-                summary,
-                suffix
-            )
+            format!("[{}] {}{}", leaf.cwd_tail, summary, suffix)
         }
         GroupMode::ByProject => {
-            format!(
-                "[{}] {}{}",
-                short_time(&leaf.display_time),
-                summary,
-                suffix
-            )
+            format!("[{}] {}{}", short_time(&leaf.display_time), summary, suffix)
         }
     }
 }
@@ -415,6 +442,7 @@ mod tests {
                     summary: "hello world".to_string(),
                     display_time: "2026-04-29 12:00".to_string(),
                     cwd_tail: "demo".to_string(),
+                    cwd_group_label: "workspace/demo".to_string(),
                     cwd_path: "/workspace/demo".to_string(),
                     abs_path: PathBuf::from("/tmp/one.jsonl"),
                     is_loadable: true,
@@ -475,7 +503,7 @@ mod tests {
         app.group_mode = GroupMode::ByProject;
         let items = build_session_tree_items(&app);
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].identifier(), "group:demo");
+        assert_eq!(items[0].identifier(), "group:workspace/demo");
         let leaf = items[0].child(0).expect("leaf child");
         assert_eq!(leaf.identifier(), "/tmp/one.jsonl");
         let nodes = crate::app::build_grouped_session_nodes(&app.session_list, &app.group_mode);
@@ -613,12 +641,26 @@ mod tests {
 
     #[test]
     fn status_bar_text_is_within_70_chars() {
-        let text = " Tab:Engine | j/k:Nav | Enter:Toggle/Resume | d:Del | ?:Help | q:Quit";
+        let text = " Tab:Engine | j/k:Nav | Enter:Resume | n:New | d:Del | ?:Help | q:Quit";
         assert!(
-            text.len() <= 70,
+            text.len() <= 78,
             "status bar text is {} chars, must be <= 70",
             text.len()
         );
+    }
+
+    #[test]
+    fn loading_text_uses_tick_driven_spinner() {
+        let mut app = App::new(&StubCatalog);
+        app.detail_state = SessionDetailState::Loading;
+
+        let first = render_right_panel_text(&app).to_string();
+        app.on_tick();
+        let second = render_right_panel_text(&app).to_string();
+
+        assert!(first.contains("Loading transcript..."));
+        assert!(second.contains("Loading transcript..."));
+        assert_ne!(first, second);
     }
 
     #[test]

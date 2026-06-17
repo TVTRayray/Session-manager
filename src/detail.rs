@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::catalog::{SessionEngine, validate_session_path};
+use crate::catalog::{SessionEngine, is_codex_system_injection, validate_session_path};
 use crate::config::{BlockKind, DisplayConfig};
 
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
@@ -34,11 +34,71 @@ pub struct SessionDetail {
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct DetailViewport {
     pub session_meta: SessionMeta,
-    pub rendered_lines: Vec<String>,
+    pub rendered_lines: Vec<RenderedLine>,
     pub requested_offset: usize,
     pub requested_height: usize,
     pub has_more_before: bool,
     pub has_more_after: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RenderedLineKind {
+    Header,
+    User,
+    Assistant,
+    Thinking,
+    ToolCall,
+    ToolOutput,
+    SystemContext,
+    CorruptedLine,
+    Blank,
+}
+
+#[derive(Clone, Debug, Eq)]
+pub struct RenderedLine {
+    pub kind: RenderedLineKind,
+    pub text: String,
+}
+
+impl RenderedLine {
+    pub fn new(kind: RenderedLineKind, text: impl Into<String>) -> Self {
+        Self {
+            kind,
+            text: text.into(),
+        }
+    }
+}
+
+impl std::borrow::Borrow<str> for RenderedLine {
+    fn borrow(&self) -> &str {
+        &self.text
+    }
+}
+
+impl std::ops::Deref for RenderedLine {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.text
+    }
+}
+
+impl std::fmt::Display for RenderedLine {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.text.fmt(formatter)
+    }
+}
+
+impl PartialEq for RenderedLine {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.text == other.text
+    }
+}
+
+impl PartialEq<String> for RenderedLine {
+    fn eq(&self, other: &String) -> bool {
+        &self.text == other
+    }
 }
 
 pub trait SessionDetailLoader {
@@ -156,7 +216,7 @@ pub struct ViewportCollector {
     requested_offset: usize,
     requested_height: usize,
     rendered_index: usize,
-    rendered_lines: Vec<String>,
+    rendered_lines: Vec<RenderedLine>,
     header_emitted: bool,
     has_more_after: bool,
     display_config: DisplayConfig,
@@ -213,7 +273,7 @@ impl ViewportCollector {
                     return Ok(());
                 }
             }
-            self.push_rendered_line(String::new());
+            self.push_rendered_line(RenderedLine::new(RenderedLineKind::Blank, String::new()));
             if self.has_more_after {
                 return Ok(());
             }
@@ -254,12 +314,17 @@ impl ViewportCollector {
         }
 
         for line in header_lines {
-            self.push_rendered_line(line);
+            let kind = if line.is_empty() {
+                RenderedLineKind::Blank
+            } else {
+                RenderedLineKind::Header
+            };
+            self.push_rendered_line(RenderedLine::new(kind, line));
         }
         self.header_emitted = true;
     }
 
-    fn push_rendered_line(&mut self, line: String) {
+    fn push_rendered_line(&mut self, line: RenderedLine) {
         let window_end = self.requested_offset + self.requested_height;
         if self.rendered_index >= self.requested_offset && self.rendered_index < window_end {
             self.rendered_lines.push(line);
@@ -500,20 +565,20 @@ fn process_message(payload: &Value) -> Vec<TranscriptBlock> {
 }
 
 fn update_session_meta_from_claude_message(session_meta: &mut SessionMeta, value: &Value) {
-    if session_meta.id.is_empty() {
-        if let Some(id) = value.get("sessionId").and_then(Value::as_str) {
-            session_meta.id = id.to_string();
-        }
+    if session_meta.id.is_empty()
+        && let Some(id) = value.get("sessionId").and_then(Value::as_str)
+    {
+        session_meta.id = id.to_string();
     }
-    if session_meta.timestamp.is_empty() {
-        if let Some(timestamp) = value.get("timestamp").and_then(Value::as_str) {
-            session_meta.timestamp = timestamp.to_string();
-        }
+    if session_meta.timestamp.is_empty()
+        && let Some(timestamp) = value.get("timestamp").and_then(Value::as_str)
+    {
+        session_meta.timestamp = timestamp.to_string();
     }
-    if session_meta.cwd.is_empty() {
-        if let Some(cwd) = value.get("cwd").and_then(Value::as_str) {
-            session_meta.cwd = cwd.to_string();
-        }
+    if session_meta.cwd.is_empty()
+        && let Some(cwd) = value.get("cwd").and_then(Value::as_str)
+    {
+        session_meta.cwd = cwd.to_string();
     }
 }
 
@@ -697,10 +762,10 @@ fn split_user_message(text: &str) -> Vec<TranscriptBlock> {
         return Vec::new();
     }
 
-    let remainder = strip_leading_context_blocks(trimmed);
+    let (remainder, folded_label) = strip_leading_context_blocks(trimmed);
     if remainder.len() != trimmed.len() {
         let mut blocks = vec![TranscriptBlock::SystemContextFolded(
-            "[system context hidden]".to_string(),
+            folded_label.to_string(),
         )];
         let rest = remainder.trim();
         if !rest.is_empty() {
@@ -712,8 +777,19 @@ fn split_user_message(text: &str) -> Vec<TranscriptBlock> {
     }
 }
 
-fn strip_leading_context_blocks(input: &str) -> &str {
+fn strip_leading_context_blocks(input: &str) -> (&str, &'static str) {
     let mut rest = input.trim_start();
+    let mut folded_label = "[system context hidden]";
+
+    if is_codex_system_injection(rest) {
+        folded_label = "[AGENTS.md context hidden]";
+        if let Some(index) = rest.find("</INSTRUCTIONS>") {
+            rest = &rest[index + "</INSTRUCTIONS>".len()..];
+            rest = rest.trim_start();
+        } else {
+            rest = "";
+        }
+    }
 
     loop {
         if !rest.starts_with('<') || rest.starts_with("</") {
@@ -737,7 +813,7 @@ fn strip_leading_context_blocks(input: &str) -> &str {
         rest = rest.trim_start();
     }
 
-    rest
+    (rest, folded_label)
 }
 
 fn summarize_tool_call(payload: &Value) -> String {
@@ -806,27 +882,51 @@ fn block_kind(block: &TranscriptBlock) -> BlockKind {
     }
 }
 
-fn render_block_lines(block: &TranscriptBlock) -> Vec<String> {
+fn render_block_lines(block: &TranscriptBlock) -> Vec<RenderedLine> {
     match block {
         TranscriptBlock::UserText(text) => {
-            let mut lines = vec!["🧑 User".to_string()];
-            lines.extend(text.lines().map(ToOwned::to_owned));
+            let mut lines = vec![RenderedLine::new(RenderedLineKind::User, "🧑 User")];
+            lines.extend(
+                text.lines()
+                    .map(|line| RenderedLine::new(RenderedLineKind::User, line)),
+            );
             lines
         }
         TranscriptBlock::AssistantMarkdown(text) => {
-            let mut lines = vec!["🤖 Assistant".to_string()];
-            lines.extend(text.lines().map(ToOwned::to_owned));
+            let mut lines = vec![RenderedLine::new(
+                RenderedLineKind::Assistant,
+                "🤖 Assistant",
+            )];
+            lines.extend(
+                text.lines()
+                    .map(|line| RenderedLine::new(RenderedLineKind::Assistant, line)),
+            );
             lines
         }
         TranscriptBlock::Thinking(text) => {
-            let mut lines = vec!["🤔 Thinking".to_string()];
-            lines.extend(text.lines().map(|line| format!("  {line}")));
+            let mut lines = vec![RenderedLine::new(RenderedLineKind::Thinking, "🤔 Thinking")];
+            lines
+                .extend(text.lines().map(|line| {
+                    RenderedLine::new(RenderedLineKind::Thinking, format!("  {line}"))
+                }));
             lines
         }
-        TranscriptBlock::ToolCallSummary(text) => vec![format!("[tool] {text}")],
-        TranscriptBlock::ToolOutputSummary(text) => vec![format!("[tool-output] {text}")],
-        TranscriptBlock::SystemContextFolded(text) => vec![format!("[system] {text}")],
-        TranscriptBlock::CorruptedLineNotice(text) => vec![format!("[corrupted] {text}")],
+        TranscriptBlock::ToolCallSummary(text) => vec![RenderedLine::new(
+            RenderedLineKind::ToolCall,
+            format!("[tool] {text}"),
+        )],
+        TranscriptBlock::ToolOutputSummary(text) => vec![RenderedLine::new(
+            RenderedLineKind::ToolOutput,
+            format!("[tool-output] {text}"),
+        )],
+        TranscriptBlock::SystemContextFolded(text) => vec![RenderedLine::new(
+            RenderedLineKind::SystemContext,
+            format!("[system] {text}"),
+        )],
+        TranscriptBlock::CorruptedLineNotice(text) => vec![RenderedLine::new(
+            RenderedLineKind::CorruptedLine,
+            format!("[corrupted] {text}"),
+        )],
     }
 }
 
@@ -1080,6 +1180,58 @@ mod tests {
         assert!(
             !joined.contains("[tool-output]"),
             "tool_output should be filtered out"
+        );
+    }
+
+    #[test]
+    fn codex_user_agents_md_injection_is_folded_before_real_prompt() {
+        let viewport = must(parse_viewport_reader(
+            Cursor::new(fixture(&[
+                r#"{"type":"session_meta","payload":{"id":"s1","timestamp":"2026-04-16T00:00:00Z","cwd":"/tmp"}}"#,
+                r##"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /tmp/demo\n\n<INSTRUCTIONS>\nRepository rules that should be hidden.\n</INSTRUCTIONS>\n\n真正的用户输入"}]}}"##,
+            ])),
+            0,
+            50,
+            &DisplayConfig::show_all(),
+        ));
+
+        let joined = viewport.rendered_lines.join("\n");
+        assert!(joined.contains("[system] [AGENTS.md context hidden]"));
+        assert!(joined.contains("真正的用户输入"));
+        assert!(!joined.contains("Repository rules that should be hidden"));
+    }
+
+    #[test]
+    fn viewport_lines_retain_render_kinds_for_tui_styling() {
+        let viewport = must(parse_viewport_reader(
+            Cursor::new(fixture(&[
+                r#"{"type":"session_meta","payload":{"id":"s1","timestamp":"2026-04-16T00:00:00Z","cwd":"/tmp"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"function_call","name":"exec","arguments":"{}"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"world"}]}}"#,
+            ])),
+            0,
+            50,
+            &DisplayConfig::show_all(),
+        ));
+
+        assert!(
+            viewport
+                .rendered_lines
+                .iter()
+                .any(|line| line.kind == RenderedLineKind::User)
+        );
+        assert!(
+            viewport
+                .rendered_lines
+                .iter()
+                .any(|line| line.kind == RenderedLineKind::ToolCall)
+        );
+        assert!(
+            viewport
+                .rendered_lines
+                .iter()
+                .any(|line| line.kind == RenderedLineKind::Assistant)
         );
     }
 

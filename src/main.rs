@@ -16,7 +16,8 @@ use sessions_manager::config;
 use sessions_manager::delete::{EngineAwareSessionDeleteExecutor, SessionDeleteExecutor};
 use sessions_manager::detail::JsonlDetailLoader;
 use sessions_manager::resume::{
-    EngineAwareResumeExecutor, ResumeSessionExecutor, ResumeSessionRequest,
+    EngineAwareNewSessionExecutor, EngineAwareResumeExecutor, NewSessionExecutor,
+    NewSessionRequest, ResumeSessionExecutor, ResumeSessionRequest,
 };
 use sessions_manager::terminal::{CrosstermTerminalOps, TerminalModeGuard};
 use sessions_manager::tui;
@@ -33,6 +34,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .to_path_buf();
     let delete_executor = EngineAwareSessionDeleteExecutor::from_home_dir(home_dir.clone());
     let resume_executor = EngineAwareResumeExecutor::new();
+    let new_session_executor = EngineAwareNewSessionExecutor::new();
     let display_config = config::load_config();
     let (catalog_request_tx, catalog_result_rx) = spawn_catalog_loader(catalog_loader);
     let (detail_request_tx, detail_result_rx) =
@@ -55,6 +57,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         detail_result_rx,
         &delete_executor,
         &resume_executor,
+        &new_session_executor,
     );
     if let Some(mut terminal) = terminal.take() {
         terminal.show_cursor()?;
@@ -65,6 +68,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     run_result.map_err(|err| err.into())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_app(
     terminal: &mut Option<AppTerminal>,
     terminal_mode: &mut TerminalModeGuard<CrosstermTerminalOps>,
@@ -75,6 +79,7 @@ fn run_app(
     detail_result_rx: Receiver<DetailLoadResult>,
     delete_executor: &impl SessionDeleteExecutor,
     resume_executor: &impl ResumeSessionExecutor,
+    new_session_executor: &impl NewSessionExecutor,
 ) -> io::Result<()> {
     loop {
         let Some(size) = next_loop_size(terminal, app)? else {
@@ -93,19 +98,20 @@ fn run_app(
         if event::poll(Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key_event) => {
-                    if key_event.kind == event::KeyEventKind::Press {
-                        if let Some(action) = app.handle_key(key_event) {
-                            dispatch_action(
-                                terminal,
-                                terminal_mode,
-                                app,
-                                action,
-                                &catalog_request_tx,
-                                &detail_request_tx,
-                                delete_executor,
-                                resume_executor,
-                            )?;
-                        }
+                    if key_event.kind == event::KeyEventKind::Press
+                        && let Some(action) = app.handle_key(key_event)
+                    {
+                        dispatch_action(
+                            terminal,
+                            terminal_mode,
+                            app,
+                            action,
+                            &catalog_request_tx,
+                            &detail_request_tx,
+                            delete_executor,
+                            resume_executor,
+                            new_session_executor,
+                        )?;
                     }
                 }
                 Event::Mouse(mouse_event) => {
@@ -119,6 +125,7 @@ fn run_app(
                             &detail_request_tx,
                             delete_executor,
                             resume_executor,
+                            new_session_executor,
                         )?;
                     }
                 }
@@ -141,6 +148,7 @@ fn next_loop_size(
     Ok(Some(active_terminal(terminal)?.size()?))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_action(
     terminal: &mut Option<AppTerminal>,
     terminal_mode: &mut TerminalModeGuard<CrosstermTerminalOps>,
@@ -150,6 +158,7 @@ fn dispatch_action(
     detail_request_tx: &Sender<DetailRequest>,
     delete_executor: &impl SessionDeleteExecutor,
     resume_executor: &impl ResumeSessionExecutor,
+    new_session_executor: &impl NewSessionExecutor,
 ) -> io::Result<()> {
     match action {
         AppAction::LoadCatalog(request) => {
@@ -212,6 +221,14 @@ fn dispatch_action(
         AppAction::Resume(request) => {
             run_resume_handoff(terminal, terminal_mode, app, request, resume_executor)
         }
+        AppAction::NewSession(request) => run_new_session_handoff(
+            terminal,
+            terminal_mode,
+            app,
+            request,
+            catalog_request_tx,
+            new_session_executor,
+        ),
     }
 }
 
@@ -254,6 +271,57 @@ fn run_resume_handoff(
         }
         Err(err) => {
             app.apply_resume_result(Err(err));
+            app.should_quit = true;
+        }
+    }
+
+    Ok(())
+}
+
+fn run_new_session_handoff(
+    terminal: &mut Option<AppTerminal>,
+    terminal_mode: &mut TerminalModeGuard<CrosstermTerminalOps>,
+    app: &mut App,
+    request: NewSessionRequest,
+    catalog_request_tx: &Sender<CatalogRequest>,
+    new_session_executor: &impl NewSessionExecutor,
+) -> io::Result<()> {
+    if let Some(mut current) = terminal.take() {
+        current.show_cursor()?;
+        drop(current);
+    }
+
+    app.mark_resume_suspended();
+    if let Err(err) = terminal_mode.restore() {
+        let _ = app.apply_new_session_result(Err(format!(
+            "Failed to suspend terminal for new session: {err}"
+        )));
+        *terminal_mode = TerminalModeGuard::activate(CrosstermTerminalOps)?;
+        *terminal = Some(create_terminal()?);
+        active_terminal(terminal)?.clear()?;
+        return Ok(());
+    }
+
+    let new_session_result = new_session_executor
+        .start_new_session(&request)
+        .map_err(|err| err.message().to_string());
+
+    app.mark_resume_restoring();
+    match rebuild_terminal_after_resume(
+        || TerminalModeGuard::activate(CrosstermTerminalOps),
+        create_terminal,
+        |terminal| terminal.clear(),
+        |guard| guard.restore(),
+    ) {
+        Ok((next_terminal_mode, next_terminal)) => {
+            *terminal_mode = next_terminal_mode;
+            *terminal = Some(next_terminal);
+            if let Some(request) = app.apply_new_session_result(new_session_result) {
+                let _ = catalog_request_tx.send(request);
+            }
+        }
+        Err(err) => {
+            let _ = app.apply_new_session_result(Err(err));
             app.should_quit = true;
         }
     }

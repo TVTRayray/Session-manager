@@ -50,7 +50,7 @@ fn main() -> io::Result<()> {
 }
 
 fn run_probe() -> io::Result<()> {
-    let mut app = App::new(&StubCatalog::default());
+    let mut app = App::new(&StubCatalog);
     app.set_terminal_size(PROBE_TERMINAL_WIDTH, PROBE_TERMINAL_HEIGHT);
     app.focused_panel = FocusedPanel::List;
     app.detail_state = SessionDetailState::Idle;
@@ -130,6 +130,7 @@ fn probe_item_for(engine: SessionEngine) -> SessionListItem {
             summary: "inspect current session layout".to_string(),
             display_time: "2026-04-17 12:00".to_string(),
             cwd_tail: "probe".to_string(),
+            cwd_group_label: "workspace/probe".to_string(),
             cwd_path: "/workspace/probe".to_string(),
             abs_path: PathBuf::from("/tmp/probe.jsonl"),
             is_loadable: true,
@@ -141,6 +142,7 @@ fn probe_item_for(engine: SessionEngine) -> SessionListItem {
             summary: "resume claude conversation".to_string(),
             display_time: "2026-04-17 12:30".to_string(),
             cwd_tail: "probe-claude".to_string(),
+            cwd_group_label: "workspace/probe-claude".to_string(),
             cwd_path: "/workspace/probe-claude".to_string(),
             abs_path: PathBuf::from("/tmp/probe-claude.jsonl"),
             is_loadable: true,
@@ -296,6 +298,13 @@ fn format_action(action: Option<&AppAction>) -> String {
                 "Resume(engine={:?},session_id={},cwd={})",
                 request.engine,
                 request.session_id,
+                request.cwd.display()
+            )
+        }
+        Some(AppAction::NewSession(request)) => {
+            format!(
+                "NewSession(engine={:?},cwd={})",
+                request.engine,
                 request.cwd.display()
             )
         }

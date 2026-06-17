@@ -101,19 +101,19 @@ impl<O: TerminalOps> TerminalModeGuard<O> {
         }
 
         if self.alternate_screen_enabled {
-            if let Err(err) = self.ops.leave_alternate_screen() {
-                if first_error.is_none() {
-                    first_error = Some(err);
-                }
+            if let Err(err) = self.ops.leave_alternate_screen()
+                && first_error.is_none()
+            {
+                first_error = Some(err);
             }
             self.alternate_screen_enabled = false;
         }
 
         if self.raw_mode_enabled {
-            if let Err(err) = self.ops.disable_raw_mode() {
-                if first_error.is_none() {
-                    first_error = Some(err);
-                }
+            if let Err(err) = self.ops.disable_raw_mode()
+                && first_error.is_none()
+            {
+                first_error = Some(err);
             }
             self.raw_mode_enabled = false;
         }

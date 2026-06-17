@@ -40,12 +40,11 @@ fn main() -> io::Result<()> {
                 );
                 io::stdout().flush()?;
 
-                if key_event.kind == event::KeyEventKind::Press {
-                    if matches!(key_event.code, event::KeyCode::Char('q'))
-                        && key_event.modifiers.is_empty()
-                    {
-                        break;
-                    }
+                if key_event.kind == event::KeyEventKind::Press
+                    && matches!(key_event.code, event::KeyCode::Char('q'))
+                    && key_event.modifiers.is_empty()
+                {
+                    break;
                 }
             }
             other => {
