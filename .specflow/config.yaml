@@ -1,0 +1,78 @@
+version: 1
+
+workflow:
+  initial_state: draft
+  change_mode: delta_spec
+  require_human_approval:
+    - awaiting_plan_approval
+    - awaiting_archive_approval
+    - decision_required
+
+artifacts:
+  required_before_implementation:
+    - proposal
+    - delta_spec
+    - tasks
+  required_before_archive:
+    - qa_report
+    - test_report
+  design: optional
+
+execution:
+  sequential_specs: true
+  max_active_changes: 1
+  max_parallel_workers: 2
+  auto_start_next_ready_spec: true
+  lease_minutes: 45
+  runtime_mode: managed # managed | operator (human runs the runtime checklist)
+
+quality:
+  qa_required: true
+  auto_repair:
+    enabled: true
+    max_attempts: 2
+    only_for:
+      - implementation_defect
+      - missing_test
+      - regression
+    escalate_for:
+      - ambiguous_requirement
+      - architecture_decision
+      - security_risk
+      - data_migration
+      - permission_insufficient
+      - requirements_conflict
+      - repeated_failure
+
+agents:
+  planner: { adapter: manual }
+  implementer: { adapter: manual }
+  reviewer: { adapter: manual }
+
+# Set an agent adapter to `herdr` to launch it in a sibling Herdr pane when
+# HERDR_ENV=1; outside Herdr SpecFlow falls back to the manual handoff.
+herdr:
+  kind:
+    planner: codex
+    implementer: codex
+    reviewer: codex
+  direction: right
+  start_timeout_ms: 30000
+
+routing:
+  planner: planner
+  implementer: implementer
+  reviewer: reviewer
+  overrides: [] # entries may set role, label, route; first matching rule wins
+
+subagents:
+  default: orchestrator_only
+  allowed_callers: [orchestrator]
+  max_depth: 1
+  max_concurrency: 2
+  max_runtime_minutes: 10
+  allowed_roles: [codebase_researcher, test_auditor, independent_reviewer]
+  adapter: manual
+  writable_paths: [] # no project-file writes; adapter/runtime records the returned result
+  require_bounded_task: true
+  can_spawn_subagents: false # applies to every spawned subagent

@@ -1,0 +1,6 @@
+runtime_mode: managed # managed | operator
+active_changes: []
+recent_events: []
+
+# This is a derived project index. The authoritative state of a change lives in
+# .specflow/changes/<change-id>/state.yaml.
