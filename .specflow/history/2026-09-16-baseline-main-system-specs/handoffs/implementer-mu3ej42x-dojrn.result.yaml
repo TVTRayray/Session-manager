@@ -1,0 +1,22 @@
+task_id: implementer-mu3ej42x-dojrn
+lease_id: lease-mu3ej42x-71ixg
+outcome: completed
+summary: >-
+  Compared the tui-interaction delta with main@eaee62d behavior in src/app.rs,
+  src/tui.rs, and tests/pty_shortcuts.rs. The spec contains only implemented
+  user-visible behavior, so no spec change was needed.
+evidence:
+  changed_files:
+    - .specflow/changes/baseline-main-system-specs/handoffs/implementer-mu3ej42x-dojrn.result.yaml
+  test_results:
+    - command: cargo test app::tests
+      result: passed
+      details: 57 passed; 0 failed
+    - command: cargo test tui::tests
+      result: passed
+      details: 20 passed; 0 failed
+    - command: cargo test --test pty_shortcuts
+      result: passed
+      details: 5 passed; 0 failed
+unresolved_issues: []
+requested_transition: reviewing

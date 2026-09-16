@@ -1,0 +1,22 @@
+task_id: reviewer-mu3egfkq-6w1mv
+lease_id: lease-mu3egfkq-4pre5
+outcome: completed
+verdict: pass
+summary: >-
+  The revised session-detail spec matches the config and detail behavior in
+  main@eaee62d20f930c55ae5892602f1cf75a8fd7c322, including the distinct defaults
+  for missing/unreadable/invalid configuration versus valid TOML that omits
+  display fields. No unsupported contract or unresolved issue remains.
+evidence:
+  changed_files:
+    - .specflow/changes/baseline-main-system-specs/reviews/reviewer-mu3egfkq-6w1mv.md
+    - .specflow/changes/baseline-main-system-specs/handoffs/reviewer-mu3egfkq-6w1mv.result.yaml
+  test_results:
+    - command: cargo test detail::tests
+      result: passed
+      details: 20 passed, 0 failed; exit code 0
+    - command: cargo test config::tests
+      result: passed
+      details: 9 passed, 0 failed; exit code 0
+unresolved_issues: []
+requested_transition: ready

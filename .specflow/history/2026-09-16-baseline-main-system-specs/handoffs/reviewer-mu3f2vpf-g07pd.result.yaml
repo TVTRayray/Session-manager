@@ -1,0 +1,48 @@
+task_id: reviewer-mu3f2vpf-g07pd
+lease_id: lease-mu3f2vpf-n4j6u
+outcome: completed
+verdict: repair
+category: implementation_defect
+summary: >-
+  Fixed engine commands, cwd validation, fresh-session launch, failure reporting,
+  and terminal restoration match main@eaee62d. The spec overstates context
+  preservation: successful new-session completion reloads the catalog, and the
+  accepted result clears selection and detail context.
+evidence:
+  changed_files:
+    - .specflow/changes/baseline-main-system-specs/reviews/reviewer-mu3f2vpf-g07pd.md
+    - .specflow/changes/baseline-main-system-specs/handoffs/reviewer-mu3f2vpf-g07pd.result.yaml
+  baseline:
+    ref: main@eaee62d20f930c55ae5892602f1cf75a8fd7c322
+    reviewed_files:
+      - src/resume.rs
+      - src/app.rs
+      - src/main.rs
+      - tests/pty_shortcuts.rs
+    result: all reviewed working-tree files are byte-identical to the baseline
+  findings:
+    - category: implementation_defect
+      severity: medium
+      requirement: Report external command failures and preserve context
+      expected: Existing engine, selection, and detail context remains available after an external command returns or fails.
+      actual: Successful new-session completion reloads the catalog; applying that result clears selection and detail context.
+      locations:
+        - src/app.rs:1096-1103
+        - src/app.rs:431-466
+      required_repair: >-
+        Narrow the baseline spec to document the successful-new-session catalog
+        refresh and context reset, or change implementation and add a regression
+        test if preservation is intended.
+  test_results:
+    - command: cargo test resume::tests
+      result: passed
+      details: 10 passed, 0 failed; exit code 0
+    - command: cargo test --bin sessions-manager
+      result: passed
+      details: 3 passed, 0 failed; exit code 0
+    - command: cargo test --test pty_shortcuts
+      result: passed
+      details: 5 passed, 0 failed; exit code 0
+unresolved_issues:
+  - Successful new-session catalog reload contradicts the spec's unconditional context-preservation statement.
+requested_transition: repair

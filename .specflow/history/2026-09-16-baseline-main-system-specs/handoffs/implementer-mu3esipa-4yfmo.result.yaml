@@ -1,0 +1,20 @@
+task_id: implementer-mu3esipa-4yfmo
+lease_id: lease-mu3esipa-3u1n1
+outcome: completed
+summary: >-
+  Corrected the tui-interaction modal requirement and scenario to document that
+  Tab and Shift+Tab switch engine context, dismiss deletion state, and request
+  that engine's catalog while the deletion confirmation modal is open.
+evidence:
+  changed_files:
+    - .specflow/changes/baseline-main-system-specs/specs/tui-interaction/spec.md
+    - .specflow/changes/baseline-main-system-specs/handoffs/implementer-mu3esipa-4yfmo.result.yaml
+  test_results:
+    - command: cargo test app::tests
+      result: passed
+      details: 57 passed; 0 failed
+    - command: cargo test tui::tests
+      result: passed
+      details: 20 passed; 0 failed
+unresolved_issues: []
+requested_transition: reviewing

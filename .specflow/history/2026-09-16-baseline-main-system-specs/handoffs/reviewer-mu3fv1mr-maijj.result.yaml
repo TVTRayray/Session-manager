@@ -1,0 +1,39 @@
+task_id: reviewer-mu3fv1mr-maijj
+lease_id: lease-mu3fv1mr-35vko
+outcome: completed
+verdict: pass
+summary: >-
+  The terminal-lifecycle spec matches main@eaee62d20f930c55ae5892602f1cf75a8fd7c322
+  for ordered activation, partial-activation rollback, complete best-effort cleanup,
+  external-command suspension and rebuild, and quit-before-terminal-access behavior.
+  All three requested test commands pass.
+evidence:
+  changed_files:
+    - .specflow/changes/baseline-main-system-specs/reviews/reviewer-mu3fv1mr-maijj.md
+    - .specflow/changes/baseline-main-system-specs/handoffs/reviewer-mu3fv1mr-maijj.result.yaml
+  source_review:
+    pinned_revision: main@eaee62d20f930c55ae5892602f1cf75a8fd7c322
+    relevant_files_byte_identical_to_pinned_revision:
+      - src/terminal.rs
+      - src/main.rs
+      - tests/pty_shortcuts.rs
+    supported_behaviors:
+      - ordered raw-mode, alternate-screen/mouse, and enhanced-keyboard activation
+      - rollback of modes already enabled when later activation fails
+      - all-step cleanup with first-error retention and best-effort Drop cleanup
+      - terminal suspension and reconstruction around resume and new-session commands
+      - explicit rebuild errors with restoration of newly activated guards
+      - quit check before terminal-size access
+      - tested modified-key, keyboard, and mouse PTY sequences
+  test_results:
+    - command: cargo test terminal::tests
+      result: passed
+      details: 3 passed, 0 failed; exit code 0
+    - command: cargo test --bin sessions-manager
+      result: passed
+      details: 3 passed, 0 failed; exit code 0
+    - command: cargo test --test pty_shortcuts
+      result: passed
+      details: 5 passed, 0 failed; exit code 0
+unresolved_issues: []
+requested_transition: ready

@@ -1,0 +1,19 @@
+task_id: planner-mu2hgjg3-nq6ji
+lease_id: lease-mu2hgjg3-netjx
+outcome: completed
+summary: Completed the documentation-only main behavior baseline for proposal, six System Specs, and review/verification tasks.
+evidence:
+  changed_files:
+    - .specflow/changes/baseline-main-system-specs/proposal.md
+    - .specflow/changes/baseline-main-system-specs/specs/session-catalog/spec.md
+    - .specflow/changes/baseline-main-system-specs/specs/session-detail/spec.md
+    - .specflow/changes/baseline-main-system-specs/specs/tui-interaction/spec.md
+    - .specflow/changes/baseline-main-system-specs/specs/session-launch/spec.md
+    - .specflow/changes/baseline-main-system-specs/specs/session-deletion/spec.md
+    - .specflow/changes/baseline-main-system-specs/specs/terminal-lifecycle/spec.md
+    - .specflow/changes/baseline-main-system-specs/tasks.md
+    - .specflow/changes/baseline-main-system-specs/handoffs/planner-mu2hgjg3-nq6ji.result.yaml
+  test_results:
+    - "Planner documentation-only task; tests deferred to implementation/review"
+unresolved_issues: []
+requested_transition: ready

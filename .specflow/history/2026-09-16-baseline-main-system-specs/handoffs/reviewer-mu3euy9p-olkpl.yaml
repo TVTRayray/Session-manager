@@ -1,0 +1,18 @@
+task_id: reviewer-mu3euy9p-olkpl
+change_id: baseline-main-system-specs
+role: reviewer
+target_spec: tui-interaction
+adapter: manual
+lease_id: lease-mu3euy9p-ptxhv
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/tui-interaction.md
+allowed_paths:
+  - .specflow/changes/baseline-main-system-specs/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

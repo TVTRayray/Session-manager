@@ -1,0 +1,19 @@
+task_id: implementer-mu3ezevo-pk541
+change_id: baseline-main-system-specs
+role: implementer
+target_spec: session-launch
+adapter: manual
+lease_id: lease-mu3ezevo-lf01f
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/session-launch.md
+allowed_paths:
+  - src/**
+  - tests/**
+  - .specflow/changes/baseline-main-system-specs/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden
