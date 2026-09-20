@@ -40,9 +40,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (detail_request_tx, detail_result_rx) =
         spawn_detail_loader(JsonlDetailLoader::from_home_path(home_dir, display_config));
 
-    if let Some(request) = app.initial_detail_request() {
-        let _ = detail_request_tx.send(request);
-    }
+    let _ = catalog_request_tx.send(app.initial_catalog_request());
 
     let mut terminal_mode = TerminalModeGuard::activate(CrosstermTerminalOps)?;
     let mut terminal = Some(create_terminal()?);

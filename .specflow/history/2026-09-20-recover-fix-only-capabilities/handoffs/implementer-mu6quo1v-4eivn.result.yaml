@@ -1,0 +1,49 @@
+task_id: implementer-mu6quo1v-4eivn
+lease_id: lease-mu6quo1v-lp5p0
+outcome: completed
+summary: >-
+  完成 canonical tui-interaction：默认 Pi 与 Pi → OpenCode → Codex → Claude 引擎循环、
+  engine/request stale 隔离、递归 Main/Agent 树与 detached fallback、递归组删除目标、
+  实时不区分大小写搜索及 n/N/刷新/祖先展开、普通/当前命中高亮和窄终端光标边界、
+  递归 Group Summary，以及 README 最小同步；保留 modal/focus/mouse/layout 与既有
+  Codex/Claude/launch/delete/detail/catalog 行为。
+evidence:
+  changed_files:
+    - README.md
+    - src/app.rs
+    - src/main.rs
+    - src/tui.rs
+    - src/bin/shortcut_probe.rs
+    - tests/pty_shortcuts.rs
+    - .specflow/changes/recover-fix-only-capabilities/reviews/implementer-mu6quo1v-4eivn-ux-evidence.md
+    - .specflow/changes/recover-fix-only-capabilities/reviews/implementer-mu6quo1v-4eivn-ux/layout-interaction.log
+    - .specflow/changes/recover-fix-only-capabilities/handoffs/implementer-mu6quo1v-4eivn.result.yaml
+  test_results:
+    - command: cargo fmt --check
+      result: passed
+    - command: cargo check --all-targets
+      result: passed
+    - command: cargo test --lib catalog::tests --no-fail-fast
+      result: passed (19 passed, 0 failed)
+    - command: cargo test --lib app::tests --no-fail-fast
+      result: passed (81 passed, 0 failed)
+    - command: cargo test --lib tui::tests --no-fail-fast
+      result: passed (23 passed, 0 failed)
+    - command: cargo test --test pty_shortcuts --no-fail-fast
+      result: passed (7 passed, 0 failed)
+    - command: cargo test --no-fail-fast
+      result: passed
+    - command: cargo test -q
+      result: passed (184 library + 3 main + 7 PTY tests; 0 failed)
+    - command: git diff --check
+      result: passed
+  security_checks:
+    - No dependency was added and Cargo.toml/Cargo.lock were not changed by this task.
+    - Existing canonical-root deletion and detail boundaries were not relaxed.
+    - OpenCode remains read-only at the SQLite boundary; no database write path was introduced.
+    - Engine switches clear prior selection/detail/delete/search state and reject stale catalog/detail results.
+  ux_evidence:
+    - .specflow/changes/recover-fix-only-capabilities/reviews/implementer-mu6quo1v-4eivn-ux-evidence.md
+    - .specflow/changes/recover-fix-only-capabilities/reviews/implementer-mu6quo1v-4eivn-ux/layout-interaction.log
+unresolved_issues: []
+requested_transition: reviewing

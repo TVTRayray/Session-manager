@@ -1,0 +1,19 @@
+task_id: implementer-mu6nl15a-28glg
+change_id: recover-fix-only-capabilities
+role: implementer
+target_spec: session-launch
+adapter: manual
+lease_id: lease-mu6nl15a-f1662
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/session-launch.md
+allowed_paths:
+  - src/**
+  - tests/**
+  - .specflow/changes/recover-fix-only-capabilities/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden

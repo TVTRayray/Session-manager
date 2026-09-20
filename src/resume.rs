@@ -219,91 +219,311 @@ impl<R: ResumeCommandRunner> NewSessionExecutor for ClaudeNewSessionExecutor<R> 
 }
 
 #[derive(Clone, Debug)]
-pub struct EngineAwareResumeExecutor<
-    RCodex = ProcessResumeCommandRunner,
-    RClaude = ProcessResumeCommandRunner,
-> {
-    codex: CodexResumeExecutor<RCodex>,
-    claude: ClaudeResumeExecutor<RClaude>,
+pub struct OpenCodeResumeExecutor<R = ProcessResumeCommandRunner> {
+    runner: R,
 }
 
-impl EngineAwareResumeExecutor<ProcessResumeCommandRunner, ProcessResumeCommandRunner> {
+impl OpenCodeResumeExecutor<ProcessResumeCommandRunner> {
     pub fn new() -> Self {
         Self {
-            codex: CodexResumeExecutor::new(),
-            claude: ClaudeResumeExecutor::new(),
+            runner: ProcessResumeCommandRunner,
         }
     }
 }
 
-impl Default for EngineAwareResumeExecutor<ProcessResumeCommandRunner, ProcessResumeCommandRunner> {
+impl Default for OpenCodeResumeExecutor<ProcessResumeCommandRunner> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<RCodex, RClaude> EngineAwareResumeExecutor<RCodex, RClaude> {
-    pub fn with_executors(
-        codex: CodexResumeExecutor<RCodex>,
-        claude: ClaudeResumeExecutor<RClaude>,
-    ) -> Self {
-        Self { codex, claude }
+impl<R> OpenCodeResumeExecutor<R> {
+    pub fn with_runner(runner: R) -> Self {
+        Self { runner }
     }
 }
 
-impl<RCodex: ResumeCommandRunner, RClaude: ResumeCommandRunner> ResumeSessionExecutor
-    for EngineAwareResumeExecutor<RCodex, RClaude>
+impl<R: ResumeCommandRunner> ResumeSessionExecutor for OpenCodeResumeExecutor<R> {
+    fn resume_session(&self, request: &ResumeSessionRequest) -> Result<(), ResumeSessionError> {
+        #[cfg(target_os = "windows")]
+        let program = "opencode.cmd";
+        #[cfg(not(target_os = "windows"))]
+        let program = "opencode";
+
+        let cwd = request.cwd.to_string_lossy();
+        run_resume_command(
+            &self.runner,
+            program,
+            &[cwd.as_ref(), "--session", request.session_id.as_str()],
+            &request.cwd,
+            "opencode --session",
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct OpenCodeNewSessionExecutor<R = ProcessResumeCommandRunner> {
+    runner: R,
+}
+
+impl OpenCodeNewSessionExecutor<ProcessResumeCommandRunner> {
+    pub fn new() -> Self {
+        Self {
+            runner: ProcessResumeCommandRunner,
+        }
+    }
+}
+
+impl Default for OpenCodeNewSessionExecutor<ProcessResumeCommandRunner> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<R> OpenCodeNewSessionExecutor<R> {
+    pub fn with_runner(runner: R) -> Self {
+        Self { runner }
+    }
+}
+
+impl<R: ResumeCommandRunner> NewSessionExecutor for OpenCodeNewSessionExecutor<R> {
+    fn start_new_session(&self, request: &NewSessionRequest) -> Result<(), ResumeSessionError> {
+        #[cfg(target_os = "windows")]
+        let program = "opencode.cmd";
+        #[cfg(not(target_os = "windows"))]
+        let program = "opencode";
+
+        let cwd = request.cwd.to_string_lossy();
+        run_resume_command(
+            &self.runner,
+            program,
+            &[cwd.as_ref()],
+            &request.cwd,
+            "opencode",
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PiResumeExecutor<R = ProcessResumeCommandRunner> {
+    runner: R,
+}
+
+impl PiResumeExecutor<ProcessResumeCommandRunner> {
+    pub fn new() -> Self {
+        Self {
+            runner: ProcessResumeCommandRunner,
+        }
+    }
+}
+
+impl Default for PiResumeExecutor<ProcessResumeCommandRunner> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<R> PiResumeExecutor<R> {
+    pub fn with_runner(runner: R) -> Self {
+        Self { runner }
+    }
+}
+
+impl<R: ResumeCommandRunner> ResumeSessionExecutor for PiResumeExecutor<R> {
+    fn resume_session(&self, request: &ResumeSessionRequest) -> Result<(), ResumeSessionError> {
+        run_resume_command(
+            &self.runner,
+            "pi",
+            &["--session", request.session_id.as_str()],
+            &request.cwd,
+            "pi --session",
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PiNewSessionExecutor<R = ProcessResumeCommandRunner> {
+    runner: R,
+}
+
+impl PiNewSessionExecutor<ProcessResumeCommandRunner> {
+    pub fn new() -> Self {
+        Self {
+            runner: ProcessResumeCommandRunner,
+        }
+    }
+}
+
+impl Default for PiNewSessionExecutor<ProcessResumeCommandRunner> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<R> PiNewSessionExecutor<R> {
+    pub fn with_runner(runner: R) -> Self {
+        Self { runner }
+    }
+}
+
+impl<R: ResumeCommandRunner> NewSessionExecutor for PiNewSessionExecutor<R> {
+    fn start_new_session(&self, request: &NewSessionRequest) -> Result<(), ResumeSessionError> {
+        run_resume_command(&self.runner, "pi", &[], &request.cwd, "pi")
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct EngineAwareResumeExecutor<
+    RPi = ProcessResumeCommandRunner,
+    RCodex = ProcessResumeCommandRunner,
+    RClaude = ProcessResumeCommandRunner,
+    ROpenCode = ProcessResumeCommandRunner,
+> {
+    pi: PiResumeExecutor<RPi>,
+    codex: CodexResumeExecutor<RCodex>,
+    claude: ClaudeResumeExecutor<RClaude>,
+    opencode: OpenCodeResumeExecutor<ROpenCode>,
+}
+
+impl
+    EngineAwareResumeExecutor<
+        ProcessResumeCommandRunner,
+        ProcessResumeCommandRunner,
+        ProcessResumeCommandRunner,
+        ProcessResumeCommandRunner,
+    >
+{
+    pub fn new() -> Self {
+        Self {
+            pi: PiResumeExecutor::new(),
+            codex: CodexResumeExecutor::new(),
+            claude: ClaudeResumeExecutor::new(),
+            opencode: OpenCodeResumeExecutor::new(),
+        }
+    }
+}
+
+impl Default
+    for EngineAwareResumeExecutor<
+        ProcessResumeCommandRunner,
+        ProcessResumeCommandRunner,
+        ProcessResumeCommandRunner,
+        ProcessResumeCommandRunner,
+    >
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<RPi, RCodex, RClaude, ROpenCode> EngineAwareResumeExecutor<RPi, RCodex, RClaude, ROpenCode> {
+    pub fn with_executors(
+        pi: PiResumeExecutor<RPi>,
+        codex: CodexResumeExecutor<RCodex>,
+        claude: ClaudeResumeExecutor<RClaude>,
+        opencode: OpenCodeResumeExecutor<ROpenCode>,
+    ) -> Self {
+        Self {
+            pi,
+            codex,
+            claude,
+            opencode,
+        }
+    }
+}
+
+impl<
+    RPi: ResumeCommandRunner,
+    RCodex: ResumeCommandRunner,
+    RClaude: ResumeCommandRunner,
+    ROpenCode: ResumeCommandRunner,
+> ResumeSessionExecutor for EngineAwareResumeExecutor<RPi, RCodex, RClaude, ROpenCode>
 {
     fn resume_session(&self, request: &ResumeSessionRequest) -> Result<(), ResumeSessionError> {
         match request.engine {
+            SessionEngine::Pi => self.pi.resume_session(request),
             SessionEngine::Codex => self.codex.resume_session(request),
             SessionEngine::Claude => self.claude.resume_session(request),
+            SessionEngine::OpenCode => self.opencode.resume_session(request),
         }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct EngineAwareNewSessionExecutor<
+    RPi = ProcessResumeCommandRunner,
     RCodex = ProcessResumeCommandRunner,
     RClaude = ProcessResumeCommandRunner,
+    ROpenCode = ProcessResumeCommandRunner,
 > {
+    pi: PiNewSessionExecutor<RPi>,
     codex: CodexNewSessionExecutor<RCodex>,
     claude: ClaudeNewSessionExecutor<RClaude>,
+    opencode: OpenCodeNewSessionExecutor<ROpenCode>,
 }
 
-impl EngineAwareNewSessionExecutor<ProcessResumeCommandRunner, ProcessResumeCommandRunner> {
+impl
+    EngineAwareNewSessionExecutor<
+        ProcessResumeCommandRunner,
+        ProcessResumeCommandRunner,
+        ProcessResumeCommandRunner,
+        ProcessResumeCommandRunner,
+    >
+{
     pub fn new() -> Self {
         Self {
+            pi: PiNewSessionExecutor::new(),
             codex: CodexNewSessionExecutor::new(),
             claude: ClaudeNewSessionExecutor::new(),
+            opencode: OpenCodeNewSessionExecutor::new(),
         }
     }
 }
 
 impl Default
-    for EngineAwareNewSessionExecutor<ProcessResumeCommandRunner, ProcessResumeCommandRunner>
+    for EngineAwareNewSessionExecutor<
+        ProcessResumeCommandRunner,
+        ProcessResumeCommandRunner,
+        ProcessResumeCommandRunner,
+        ProcessResumeCommandRunner,
+    >
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<RCodex, RClaude> EngineAwareNewSessionExecutor<RCodex, RClaude> {
+impl<RPi, RCodex, RClaude, ROpenCode>
+    EngineAwareNewSessionExecutor<RPi, RCodex, RClaude, ROpenCode>
+{
     pub fn with_executors(
+        pi: PiNewSessionExecutor<RPi>,
         codex: CodexNewSessionExecutor<RCodex>,
         claude: ClaudeNewSessionExecutor<RClaude>,
+        opencode: OpenCodeNewSessionExecutor<ROpenCode>,
     ) -> Self {
-        Self { codex, claude }
+        Self {
+            pi,
+            codex,
+            claude,
+            opencode,
+        }
     }
 }
 
-impl<RCodex: ResumeCommandRunner, RClaude: ResumeCommandRunner> NewSessionExecutor
-    for EngineAwareNewSessionExecutor<RCodex, RClaude>
+impl<
+    RPi: ResumeCommandRunner,
+    RCodex: ResumeCommandRunner,
+    RClaude: ResumeCommandRunner,
+    ROpenCode: ResumeCommandRunner,
+> NewSessionExecutor for EngineAwareNewSessionExecutor<RPi, RCodex, RClaude, ROpenCode>
 {
     fn start_new_session(&self, request: &NewSessionRequest) -> Result<(), ResumeSessionError> {
         match request.engine {
+            SessionEngine::Pi => self.pi.start_new_session(request),
             SessionEngine::Codex => self.codex.start_new_session(request),
             SessionEngine::Claude => self.claude.start_new_session(request),
+            SessionEngine::OpenCode => self.opencode.start_new_session(request),
         }
     }
 }
@@ -427,17 +647,26 @@ mod tests {
     }
 
     #[test]
-    fn resume_executor_rejects_missing_or_invalid_cwd_before_spawn() {
+    fn resume_executor_rejects_empty_missing_or_non_directory_cwd_before_spawn() {
+        let temp = tempdir().unwrap_or_else(|err| panic!("tempdir failed: {err}"));
+        let file = temp.path().join("not-a-directory");
+        std::fs::write(&file, "not a directory")
+            .unwrap_or_else(|err| panic!("fixture write failed: {err}"));
         let runner = RecordingRunner::default();
         let executor = CodexResumeExecutor::with_runner(runner.clone());
-        let request = ResumeSessionRequest {
-            engine: SessionEngine::Codex,
-            session_id: "session-123".to_string(),
-            cwd: PathBuf::from("/definitely/missing/cwd"),
-        };
 
-        let result = executor.resume_session(&request);
-        assert!(result.is_err());
+        for cwd in [
+            PathBuf::new(),
+            PathBuf::from("/definitely/missing/cwd"),
+            file,
+        ] {
+            let result = executor.resume_session(&ResumeSessionRequest {
+                engine: SessionEngine::Codex,
+                session_id: "session-123".to_string(),
+                cwd,
+            });
+            assert!(result.is_err());
+        }
         assert!(runner.calls().is_empty());
     }
 
@@ -554,36 +783,127 @@ mod tests {
     }
 
     #[test]
-    fn engine_aware_executor_dispatches_by_request_engine() {
+    fn pi_resume_executor_preserves_argv_boundaries_and_request_cwd() {
         let temp = tempdir().unwrap_or_else(|err| panic!("tempdir failed: {err}"));
+        let runner = RecordingRunner::default();
+        let executor = PiResumeExecutor::with_runner(runner.clone());
+        let request = ResumeSessionRequest {
+            engine: SessionEngine::Pi,
+            session_id: "session with spaces;not-shell-code".to_string(),
+            cwd: temp.path().to_path_buf(),
+        };
+
+        assert!(executor.resume_session(&request).is_ok());
+        assert_eq!(
+            runner.calls(),
+            vec![(
+                "pi".to_string(),
+                vec![
+                    "--session".to_string(),
+                    "session with spaces;not-shell-code".to_string()
+                ],
+                temp.path().to_path_buf()
+            )]
+        );
+    }
+
+    #[test]
+    fn opencode_resume_executor_uses_platform_command_session_arg_and_request_cwd() {
+        let temp = tempdir().unwrap_or_else(|err| panic!("tempdir failed: {err}"));
+        let runner = RecordingRunner::default();
+        let executor = OpenCodeResumeExecutor::with_runner(runner.clone());
+        let request = ResumeSessionRequest {
+            engine: SessionEngine::OpenCode,
+            session_id: "opencode-session".to_string(),
+            cwd: temp.path().to_path_buf(),
+        };
+
+        assert!(executor.resume_session(&request).is_ok());
+
+        #[cfg(target_os = "windows")]
+        let expected_program = "opencode.cmd";
+        #[cfg(not(target_os = "windows"))]
+        let expected_program = "opencode";
+        assert_eq!(
+            runner.calls(),
+            vec![(
+                expected_program.to_string(),
+                vec![
+                    temp.path().to_string_lossy().into_owned(),
+                    "--session".to_string(),
+                    "opencode-session".to_string(),
+                ],
+                temp.path().to_path_buf(),
+            )]
+        );
+    }
+
+    #[test]
+    fn resume_executor_reports_termination_without_exit_status() {
+        let temp = tempdir().unwrap_or_else(|err| panic!("tempdir failed: {err}"));
+        let runner = RecordingRunner::with_output(Ok(ResumeCommandOutput {
+            success: false,
+            code: None,
+        }));
+        let executor = PiResumeExecutor::with_runner(runner);
+        let request = ResumeSessionRequest {
+            engine: SessionEngine::Pi,
+            session_id: "session-123".to_string(),
+            cwd: temp.path().to_path_buf(),
+        };
+
+        let result = executor.resume_session(&request);
+        match result {
+            Ok(()) => panic!("expected missing exit status to fail"),
+            Err(err) => assert!(err.message().contains("terminated without an exit status")),
+        }
+    }
+
+    #[test]
+    fn engine_aware_executor_dispatches_all_engines_without_substitution() {
+        let temp = tempdir().unwrap_or_else(|err| panic!("tempdir failed: {err}"));
+        let pi_runner = RecordingRunner::default();
         let codex_runner = RecordingRunner::default();
         let claude_runner = RecordingRunner::default();
+        let opencode_runner = RecordingRunner::default();
         let executor = EngineAwareResumeExecutor::with_executors(
+            PiResumeExecutor::with_runner(pi_runner.clone()),
             CodexResumeExecutor::with_runner(codex_runner.clone()),
             ClaudeResumeExecutor::with_runner(claude_runner.clone()),
+            OpenCodeResumeExecutor::with_runner(opencode_runner.clone()),
         );
 
-        let codex_request = ResumeSessionRequest {
-            engine: SessionEngine::Codex,
-            session_id: "codex-session".to_string(),
-            cwd: temp.path().to_path_buf(),
-        };
-        let claude_request = ResumeSessionRequest {
-            engine: SessionEngine::Claude,
-            session_id: "claude-session".to_string(),
-            cwd: temp.path().to_path_buf(),
-        };
+        for (engine, session_id) in [
+            (SessionEngine::Pi, "pi-session"),
+            (SessionEngine::Codex, "codex-session"),
+            (SessionEngine::Claude, "claude-session"),
+            (SessionEngine::OpenCode, "opencode-session"),
+        ] {
+            assert!(
+                executor
+                    .resume_session(&ResumeSessionRequest {
+                        engine,
+                        session_id: session_id.to_string(),
+                        cwd: temp.path().to_path_buf(),
+                    })
+                    .is_ok()
+            );
+        }
 
-        assert!(executor.resume_session(&codex_request).is_ok());
-        assert!(executor.resume_session(&claude_request).is_ok());
-
+        assert_eq!(pi_runner.calls().len(), 1);
         assert_eq!(codex_runner.calls().len(), 1);
         assert_eq!(claude_runner.calls().len(), 1);
+        assert_eq!(opencode_runner.calls().len(), 1);
+        assert_eq!(pi_runner.calls()[0].0, "pi");
         assert_eq!(codex_runner.calls()[0].0, "codex");
         #[cfg(target_os = "windows")]
         assert_eq!(claude_runner.calls()[0].0, "claude.cmd");
         #[cfg(not(target_os = "windows"))]
         assert_eq!(claude_runner.calls()[0].0, "claude");
+        #[cfg(target_os = "windows")]
+        assert_eq!(opencode_runner.calls()[0].0, "opencode.cmd");
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(opencode_runner.calls()[0].0, "opencode");
     }
 
     #[test]
@@ -606,36 +926,89 @@ mod tests {
     }
 
     #[test]
-    fn engine_aware_new_session_executor_dispatches_by_request_engine() {
+    fn pi_and_opencode_new_session_executors_use_bare_commands_and_request_cwd() {
         let temp = tempdir().unwrap_or_else(|err| panic!("tempdir failed: {err}"));
+        let pi_runner = RecordingRunner::default();
+        let opencode_runner = RecordingRunner::default();
+
+        assert!(
+            PiNewSessionExecutor::with_runner(pi_runner.clone())
+                .start_new_session(&NewSessionRequest {
+                    engine: SessionEngine::Pi,
+                    cwd: temp.path().to_path_buf(),
+                })
+                .is_ok()
+        );
+        assert!(
+            OpenCodeNewSessionExecutor::with_runner(opencode_runner.clone())
+                .start_new_session(&NewSessionRequest {
+                    engine: SessionEngine::OpenCode,
+                    cwd: temp.path().to_path_buf(),
+                })
+                .is_ok()
+        );
+
+        assert_eq!(
+            pi_runner.calls(),
+            vec![("pi".to_string(), Vec::new(), temp.path().to_path_buf())]
+        );
+        #[cfg(target_os = "windows")]
+        let expected_program = "opencode.cmd";
+        #[cfg(not(target_os = "windows"))]
+        let expected_program = "opencode";
+        assert_eq!(
+            opencode_runner.calls(),
+            vec![(
+                expected_program.to_string(),
+                vec![temp.path().to_string_lossy().into_owned()],
+                temp.path().to_path_buf(),
+            )]
+        );
+    }
+
+    #[test]
+    fn engine_aware_new_session_executor_dispatches_all_engines_without_substitution() {
+        let temp = tempdir().unwrap_or_else(|err| panic!("tempdir failed: {err}"));
+        let pi_runner = RecordingRunner::default();
         let codex_runner = RecordingRunner::default();
         let claude_runner = RecordingRunner::default();
+        let opencode_runner = RecordingRunner::default();
         let executor = EngineAwareNewSessionExecutor::with_executors(
+            PiNewSessionExecutor::with_runner(pi_runner.clone()),
             CodexNewSessionExecutor::with_runner(codex_runner.clone()),
             ClaudeNewSessionExecutor::with_runner(claude_runner.clone()),
+            OpenCodeNewSessionExecutor::with_runner(opencode_runner.clone()),
         );
 
-        assert!(
-            executor
-                .start_new_session(&NewSessionRequest {
-                    engine: SessionEngine::Codex,
-                    cwd: temp.path().to_path_buf(),
-                })
-                .is_ok()
-        );
-        assert!(
-            executor
-                .start_new_session(&NewSessionRequest {
-                    engine: SessionEngine::Claude,
-                    cwd: temp.path().to_path_buf(),
-                })
-                .is_ok()
-        );
+        for engine in [
+            SessionEngine::Pi,
+            SessionEngine::Codex,
+            SessionEngine::Claude,
+            SessionEngine::OpenCode,
+        ] {
+            assert!(
+                executor
+                    .start_new_session(&NewSessionRequest {
+                        engine,
+                        cwd: temp.path().to_path_buf(),
+                    })
+                    .is_ok()
+            );
+        }
 
+        assert_eq!(pi_runner.calls().len(), 1);
+        assert_eq!(codex_runner.calls().len(), 1);
+        assert_eq!(claude_runner.calls().len(), 1);
+        assert_eq!(opencode_runner.calls().len(), 1);
+        assert_eq!(pi_runner.calls()[0].0, "pi");
         assert_eq!(codex_runner.calls()[0].0, "codex");
         #[cfg(target_os = "windows")]
         assert_eq!(claude_runner.calls()[0].0, "claude.cmd");
         #[cfg(not(target_os = "windows"))]
         assert_eq!(claude_runner.calls()[0].0, "claude");
+        #[cfg(target_os = "windows")]
+        assert_eq!(opencode_runner.calls()[0].0, "opencode.cmd");
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(opencode_runner.calls()[0].0, "opencode");
     }
 }

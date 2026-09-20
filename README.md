@@ -13,12 +13,13 @@
 
 ## ✨ 核心特性
 
-- 🚀 **极致性能**: 采用 Rust 编写，支持秒级扫描与索引大规模会话目录（默认路径 `~/.codex/sessions`）。
+- 🚀 **四引擎会话**: 支持 Pi、OpenCode、Codex、Claude，默认进入 Pi；`Tab` 按 Pi → OpenCode → Codex → Claude 循环切换。
 - 🖥️ **交互式双面板**: 基于 `ratatui` 构建，左侧列表快速筛选，右侧详情实时预览。
 - 🎨 **智能内容过滤**: 支持通过配置文件自定义隐藏 `[tool]`、`[tool-output]` 等噪音，聚焦核心对话逻辑。
 - 📏 **动态布局引擎**: 支持横向/纵向分栏一键切换，面板比例可自由调节，完美适配各种终端窗口。
 - ⌨️ **跨平台快捷键**: 针对 Windows Terminal 进行了深度适配，完美解决 `Ctrl+Alt` 修饰符冲突问题。
-- 🔄 **无缝会话恢复**: 集成 `codex resume` 指令，一键回到历史对话场景。
+- 🔄 **无缝会话恢复**: 一键回到历史对话场景。
+- 🔎 **树与搜索**: `/` 实时搜索会话，`n` / `N` 循环命中；Group Summary 区分 Main sessions 与 Subagents。
 - 🗑️ **安全删除**: 支持带确认机制的会话清理。
 
 ---
@@ -68,6 +69,8 @@ visible_blocks = ["user", "assistant", "tool_call"]
 | 分类 | 操作 | 快捷键 |
 | :--- | :--- | :--- |
 | **导航** | 上下选择会话 | `Up` / `Down` 或 `k` / `j` |
+| | 切换引擎（Pi → OpenCode → Codex → Claude） | `Tab` / `Shift + Tab` |
+| | 搜索 / 下一项 / 上一项 | `/` / `n` / `N` |
 | | 详情翻页 | `PageUp` / `PageDown` |
 | | 切换焦点面板 | `Ctrl + Alt + Arrows` (左/右 或 上/下) |
 | **动作** | 恢复 (Resume) 会话 | `Enter` |

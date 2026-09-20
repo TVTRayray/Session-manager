@@ -1,0 +1,19 @@
+task_id: implementer-mu6psqwb-rgpe2
+change_id: recover-fix-only-capabilities
+role: implementer
+target_spec: session-deletion
+adapter: manual
+lease_id: lease-mu6psqwb-18lso
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/session-deletion.md
+allowed_paths:
+  - src/**
+  - tests/**
+  - .specflow/changes/recover-fix-only-capabilities/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden

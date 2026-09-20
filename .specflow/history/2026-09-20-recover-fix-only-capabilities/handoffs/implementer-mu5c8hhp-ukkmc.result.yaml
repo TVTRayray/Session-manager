@@ -1,0 +1,34 @@
+task_id: implementer-mu5c8hhp-ukkmc
+lease_id: lease-mu5c8hhp-9yyd6
+outcome: completed
+summary: >-
+  session-catalog 校验完成。Pi/OpenCode catalog、四引擎 stale-result isolation、Codex/Claude
+  regression 与路径边界均通过；Cargo.toml 仅使用 rusqlite bundled，Cargo.lock 实际锁定
+  rusqlite 0.32.1。shortcut_probe 仅做 compile compatibility（cargo check），未增加 probe
+  能力；Pi/OpenCode detail/resume 仍保持未实现/明确不可用。
+evidence:
+  changed_files:
+    - Cargo.toml
+    - Cargo.lock
+    - src/catalog.rs
+    - src/app.rs
+    - src/detail.rs
+    - src/resume.rs
+    - src/tui.rs
+    - src/bin/shortcut_probe.rs
+    - .specflow/changes/recover-fix-only-capabilities/handoffs/implementer-mu5c8hhp-ukkmc.result.yaml
+  test_results:
+    - "cargo fmt: passed"
+    - "cargo fmt --check: passed"
+    - "cargo test --lib catalog::tests: 19 passed, 0 failed"
+    - "for filter in tab_ catalog_ stale_; do cargo test --lib app::tests::${filter}; done: 6 passed, 0 failed (2+2+2)"
+    - "cargo check --bin shortcut_probe: passed; compile compatibility only"
+    - "cargo test: 144 library + 3 binary + 5 integration/PTY tests passed; 0 failed; doctests 0"
+    - "git diff --check: passed"
+  security_checks:
+    - "OpenCode SQLite uses SQLITE_OPEN_READ_ONLY"
+    - "OpenCode query uses fixed SQL and only hard-coded schema-column branches; no external values are interpolated"
+    - "Session path canonicalization rejects out-of-root symlinks; existing Codex/Claude safety tests passed"
+    - "No later Pi/OpenCode detail, resume, launch, deletion, or design capability was added"
+unresolved_issues: []
+requested_transition: reviewing

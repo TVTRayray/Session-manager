@@ -13,8 +13,8 @@ use crossterm::event::{
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use sessions_manager::app::{
-    App, AppAction, CatalogLoadResult, CatalogRequest, FocusedPanel, SessionDetailState,
-    SplitDirection, compute_layout,
+    App, AppAction, CatalogLoadResult, CatalogRequest, FocusedPanel, SearchPhase,
+    SessionDetailState, SplitDirection, compute_layout,
 };
 use sessions_manager::catalog::{
     CatalogLoad, FileHealth, SessionCatalogReader, SessionEngine, SessionListItem,
@@ -125,9 +125,12 @@ fn probe_catalog_result(request: CatalogRequest) -> CatalogLoadResult {
 
 fn probe_item_for(engine: SessionEngine) -> SessionListItem {
     match engine {
-        SessionEngine::Codex => SessionListItem {
+        SessionEngine::Codex | SessionEngine::Pi | SessionEngine::OpenCode => SessionListItem {
             session_id: "probe".to_string(),
+            name: "inspect current session layout".to_string(),
             summary: "inspect current session layout".to_string(),
+            parent_session_id: None,
+            agent_name: None,
             display_time: "2026-04-17 12:00".to_string(),
             cwd_tail: "probe".to_string(),
             cwd_group_label: "workspace/probe".to_string(),
@@ -139,7 +142,10 @@ fn probe_item_for(engine: SessionEngine) -> SessionListItem {
         },
         SessionEngine::Claude => SessionListItem {
             session_id: "probe-claude".to_string(),
+            name: "resume claude conversation".to_string(),
             summary: "resume claude conversation".to_string(),
+            parent_session_id: None,
+            agent_name: None,
             display_time: "2026-04-17 12:30".to_string(),
             cwd_tail: "probe-claude".to_string(),
             cwd_group_label: "workspace/probe-claude".to_string(),
@@ -157,7 +163,7 @@ struct StubCatalog;
 
 impl SessionCatalogReader for StubCatalog {
     fn load_sessions(&self) -> Result<CatalogLoad, String> {
-        let item = probe_item_for(SessionEngine::Codex);
+        let item = probe_item_for(SessionEngine::Pi);
         Ok(CatalogLoad {
             items: vec![item.clone()],
             warnings: Vec::new(),
@@ -204,6 +210,10 @@ struct ProbeState {
     list_rect: sessions_manager::app::RectLike,
     detail_rect: sessions_manager::app::RectLike,
     delete_modal_open: bool,
+    search_phase: SearchPhase,
+    search_input: String,
+    search_matches: usize,
+    status_error: bool,
     should_quit: bool,
 }
 
@@ -224,6 +234,11 @@ impl ProbeState {
             list_rect: layout.list_panel,
             detail_rect: layout.detail_panel,
             delete_modal_open: app.delete_modal_state.is_some(),
+            search_phase: app.search_state.phase,
+            search_input: app.search_state.input.clone(),
+            search_matches: app.search_state.matches.len(),
+            status_error: app.status_message.contains("E35:")
+                || app.status_message.contains("E486:"),
             should_quit: app.should_quit,
         }
     }
@@ -245,7 +260,7 @@ fn format_trace_line(
 ) -> String {
     format!(
         "step={step} event={} action={} split={:?} focus={:?} primary_size={:?} \
-layout_version={} redraw={} resize={} list_rect={} detail_rect={} delete_modal={} quit={}",
+layout_version={} redraw={} resize={} list_rect={} detail_rect={} delete_modal={} search={:?} search_input={:?} search_matches={} status_error={} quit={}",
         format_event(event),
         format_action(action),
         after.split_direction,
@@ -257,6 +272,10 @@ layout_version={} redraw={} resize={} list_rect={} detail_rect={} delete_modal={
         format_rect(after.list_rect),
         format_rect(after.detail_rect),
         after.delete_modal_open,
+        after.search_phase,
+        after.search_input,
+        after.search_matches,
+        after.status_error,
         after.should_quit
     )
 }

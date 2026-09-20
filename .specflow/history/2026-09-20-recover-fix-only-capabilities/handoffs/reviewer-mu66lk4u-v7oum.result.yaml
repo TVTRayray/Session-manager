@@ -1,0 +1,33 @@
+task_id: reviewer-mu66lk4u-v7oum
+lease_id: lease-mu66lk4u-xrbg1
+outcome: completed
+verdict: pass
+summary: >-
+  Independent QA passes for the three session-catalog MODIFIED Requirements:
+  Pi recursive/name/verified parent-Agent metadata with ambiguity safety and
+  canonical-root rejection; OpenCode read-only SQLite discovery with
+  unarchived filtering, ordering, and optional columns; and four-engine
+  isolation with stale-result protection. Pi/OpenCode detail, resume, TUI,
+  shortcut, and later capabilities remain intentionally unimplemented.
+category: null
+evidence:
+  changed_files:
+    - Cargo.toml
+    - Cargo.lock
+    - src/catalog.rs
+    - src/app.rs
+    - src/detail.rs
+    - src/resume.rs
+    - src/tui.rs
+    - src/bin/shortcut_probe.rs
+  test_results:
+    - command: cargo test
+      result: pass
+      detail: 144 library tests and 5 integration tests passed; 0 failures; doc-tests passed with 0 tests.
+    - command: cargo fmt -- --check
+      result: pass
+    - command: git diff --check
+      result: pass
+    - detail: Focused Pi/OpenCode catalog, four-engine app isolation/stale-result, and shortcut-probe coverage passed within the full test run.
+unresolved_issues: []
+requested_transition: ready

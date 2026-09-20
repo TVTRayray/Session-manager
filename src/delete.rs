@@ -1,6 +1,7 @@
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus};
 
 use crate::catalog::SessionEngine;
 use crate::catalog::validate_session_path;
@@ -66,8 +67,40 @@ impl EngineAwareSessionDeleteExecutor {
 
 impl SessionDeleteExecutor for EngineAwareSessionDeleteExecutor {
     fn delete_session(&self, request: &DeleteRequest) -> Result<(), DeleteError> {
+        if request.engine == SessionEngine::OpenCode {
+            return delete_opencode_session(&request.session_id);
+        }
         let root_dir = request.engine.root_dir(&self.home_dir);
         delete_session_file(&root_dir, &request.path)
+    }
+}
+
+fn delete_opencode_session(session_id: &str) -> Result<(), DeleteError> {
+    delete_opencode_session_with(session_id, Command::status)
+}
+
+fn delete_opencode_session_with(
+    session_id: &str,
+    run: impl FnOnce(&mut Command) -> std::io::Result<ExitStatus>,
+) -> Result<(), DeleteError> {
+    #[cfg(target_os = "windows")]
+    let program = "opencode.cmd";
+    #[cfg(not(target_os = "windows"))]
+    let program = "opencode";
+
+    let mut command = Command::new(program);
+    command.args(["session", "delete", session_id]);
+    let status = run(&mut command).map_err(|err| {
+        DeleteError::Io(format!("Failed to launch opencode session delete: {err}"))
+    })?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(DeleteError::Io(match status.code() {
+            Some(code) => format!("opencode session delete exited with status {code}"),
+            None => "opencode session delete terminated without an exit status".to_string(),
+        }))
     }
 }
 
@@ -134,6 +167,149 @@ mod tests {
             }
             Err(other) => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn engine_aware_executor_uses_pi_root() {
+        let home = must(tempdir());
+        let pi_root = home.path().join(".pi").join("agent").join("sessions");
+        must(fs::create_dir_all(&pi_root));
+        let pi_session = pi_root.join("pi.jsonl");
+        must(fs::write(&pi_session, "{}\n"));
+
+        let executor = EngineAwareSessionDeleteExecutor::from_home_dir(home.path().to_path_buf());
+        let request = DeleteRequest {
+            engine: SessionEngine::Pi,
+            path: pi_session.clone(),
+            session_id: "pi".to_string(),
+        };
+
+        must(executor.delete_session(&request));
+        assert!(!pi_session.exists());
+    }
+
+    #[test]
+    fn engine_aware_executor_rejects_pi_delete_outside_pi_root() {
+        let home = must(tempdir());
+        let pi_root = home.path().join(".pi").join("agent").join("sessions");
+        must(fs::create_dir_all(&pi_root));
+        let outside = home.path().join("outside.jsonl");
+        must(fs::write(&outside, "{}\n"));
+
+        let executor = EngineAwareSessionDeleteExecutor::from_home_dir(home.path().to_path_buf());
+        let request = DeleteRequest {
+            engine: SessionEngine::Pi,
+            path: outside,
+            session_id: "outside".to_string(),
+        };
+
+        assert!(matches!(
+            executor.delete_session(&request),
+            Err(DeleteError::RejectedPath(message))
+                if message.contains("Rejected out-of-root session file")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn engine_aware_executor_rejects_pi_symlink_outside_pi_root() {
+        use std::os::unix::fs::symlink;
+
+        let home = must(tempdir());
+        let pi_root = home.path().join(".pi").join("agent").join("sessions");
+        must(fs::create_dir_all(&pi_root));
+        let outside = home.path().join("outside.jsonl");
+        must(fs::write(&outside, "{}\n"));
+        let linked = pi_root.join("linked.jsonl");
+        must(symlink(&outside, &linked));
+
+        let executor = EngineAwareSessionDeleteExecutor::from_home_dir(home.path().to_path_buf());
+        let request = DeleteRequest {
+            engine: SessionEngine::Pi,
+            path: linked,
+            session_id: "linked".to_string(),
+        };
+
+        assert!(matches!(
+            executor.delete_session(&request),
+            Err(DeleteError::RejectedPath(message))
+                if message.contains("Rejected out-of-root session file")
+        ));
+        assert!(outside.exists());
+    }
+
+    #[test]
+    fn opencode_delete_uses_exact_argv_and_accepts_success() {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt;
+
+        let session_id = "../../not-a-path; still-one-arg";
+        must(delete_opencode_session_with(session_id, |command| {
+            #[cfg(target_os = "windows")]
+            assert_eq!(command.get_program(), "opencode.cmd");
+            #[cfg(not(target_os = "windows"))]
+            assert_eq!(command.get_program(), "opencode");
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                ["session", "delete", session_id]
+            );
+            Ok(ExitStatus::from_raw(0))
+        }));
+    }
+
+    #[test]
+    fn opencode_delete_reports_spawn_failure() {
+        let error = delete_opencode_session_with("session-id", |_| {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))
+        })
+        .expect_err("spawn should fail");
+
+        assert!(
+            error
+                .message()
+                .contains("Failed to launch opencode session delete")
+        );
+        assert!(error.message().contains("missing"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opencode_delete_reports_nonzero_and_missing_exit_status() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let nonzero =
+            delete_opencode_session_with("session-id", |_| Ok(ExitStatus::from_raw(7 << 8)))
+                .expect_err("nonzero exit should fail");
+        assert!(nonzero.message().contains("exited with status 7"));
+
+        let signaled = delete_opencode_session_with("session-id", |_| Ok(ExitStatus::from_raw(9)))
+            .expect_err("signal exit should fail");
+        assert!(
+            signaled
+                .message()
+                .contains("terminated without an exit status")
+        );
+    }
+
+    #[test]
+    fn engine_aware_executor_uses_codex_root() {
+        let home = must(tempdir());
+        let codex_root = home.path().join(".codex").join("sessions");
+        must(fs::create_dir_all(&codex_root));
+        let codex_session = codex_root.join("codex.jsonl");
+        must(fs::write(&codex_session, "{}\n"));
+
+        let executor = EngineAwareSessionDeleteExecutor::from_home_dir(home.path().to_path_buf());
+        let request = DeleteRequest {
+            engine: SessionEngine::Codex,
+            path: codex_session.clone(),
+            session_id: "codex".to_string(),
+        };
+
+        must(executor.delete_session(&request));
+        assert!(!codex_session.exists());
     }
 
     #[test]

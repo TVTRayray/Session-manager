@@ -1,0 +1,47 @@
+task_id: implementer-mu9538p3-8sqix
+lease_id: lease-mu9538p3-aqjdl
+outcome: completed
+summary: 完成 canonical tui-interaction 全部能力并验证通过
+evidence:
+  changed_files:
+    - README.md
+    - src/app.rs
+    - src/main.rs
+    - src/tui.rs
+    - src/bin/shortcut_probe.rs
+    - tests/pty_shortcuts.rs
+    - .specflow/changes/recover-fix-only-capabilities/reviews/implementer-mu6quo1v-4eivn-ux-evidence.md
+    - .specflow/changes/recover-fix-only-capabilities/reviews/implementer-mu6quo1v-4eivn-ux/layout-interaction.log
+    - .specflow/changes/recover-fix-only-capabilities/handoffs/implementer-mu9538p3-8sqix.result.yaml
+  test_results:
+    - command: cargo fmt --check
+      status: passed
+    - command: cargo check --all-targets
+      status: passed
+    - command: cargo test --lib catalog::tests --no-fail-fast
+      status: passed
+      tests_passed: 19
+    - command: cargo test --lib app::tests --no-fail-fast
+      status: passed
+      tests_passed: 81
+    - command: cargo test --lib tui::tests --no-fail-fast
+      status: passed
+      tests_passed: 23
+    - command: cargo test --test pty_shortcuts --no-fail-fast
+      status: passed
+      tests_passed: 7
+    - command: cargo test --no-fail-fast
+      status: passed
+      tests_passed: 191
+    - command: git diff --check
+      status: passed
+  security_checks:
+    - No dependency was added and Cargo.toml/Cargo.lock were not changed by this task.
+    - Existing canonical-root deletion and detail boundaries were not relaxed.
+    - OpenCode remains read-only at the SQLite boundary; no database write path was introduced.
+    - Engine switches clear prior selection/detail/delete/search state and reject stale catalog/detail results.
+  ux_evidence:
+    - .specflow/changes/recover-fix-only-capabilities/reviews/implementer-mu6quo1v-4eivn-ux-evidence.md
+    - .specflow/changes/recover-fix-only-capabilities/reviews/implementer-mu6quo1v-4eivn-ux/layout-interaction.log
+unresolved_issues: []
+requested_transition: reviewing

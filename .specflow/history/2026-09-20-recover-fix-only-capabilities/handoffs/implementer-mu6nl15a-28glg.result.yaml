@@ -1,0 +1,23 @@
+task_id: implementer-mu6nl15a-28glg
+lease_id: lease-mu6nl15a-f1662
+outcome: completed
+summary: >-
+  session-launch 已完成：Pi/OpenCode resume 与新会话命令、引擎分派、cwd 校验、错误传播及上下文保持均已实现并通过测试。
+evidence:
+  changed_files:
+    - src/resume.rs
+    - src/app.rs
+    - .specflow/changes/recover-fix-only-capabilities/handoffs/implementer-mu6nl15a-28glg.result.yaml
+  test_results:
+    - "cargo test --lib resume::tests: 14 passed, 0 failed"
+    - "cargo test --lib app::tests: 62 passed, 0 failed"
+    - "cargo test: 155 library + 3 binary + 5 integration tests passed; 0 failed; doctests 0"
+    - "cargo fmt --check: passed"
+    - "git diff --check: passed"
+  security_checks:
+    - "argv: session IDs remain individual command arguments without shell interpolation"
+    - "cwd: empty, missing, and non-directory cwd values are rejected before spawn"
+    - "error: launch, non-zero, and missing exit status are surfaced"
+    - "terminal: existing suspend/rebuild flow preserves context after failure"
+unresolved_issues: []
+requested_transition: reviewing

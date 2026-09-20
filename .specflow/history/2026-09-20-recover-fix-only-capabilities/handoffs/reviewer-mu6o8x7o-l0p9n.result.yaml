@@ -1,0 +1,18 @@
+task_id: reviewer-mu6o8x7o-l0p9n
+lease_id: lease-mu6o8x7o-qbknd
+outcome: completed
+verdict: pass
+summary: Independent QA passed for session-launch; Pi/OpenCode and Codex/Claude launch behavior, argv/cwd safety, error propagation, and terminal lifecycle all passed.
+evidence:
+  changed_files:
+    - /home/ray/Projects/CodeRepo/Sessions-Manager/.specflow/changes/recover-fix-only-capabilities/reviews/reviewer-mu6o8x7o-l0p9n.md
+    - /home/ray/Projects/CodeRepo/Sessions-Manager/.specflow/changes/recover-fix-only-capabilities/handoffs/reviewer-mu6o8x7o-l0p9n.result.yaml
+  test_results:
+    - cargo fmt --check pass
+    - resume 14
+    - app 62
+    - bin 3
+    - cargo test 155+3+5
+    - git diff --check pass
+unresolved_issues: []
+requested_transition: ready

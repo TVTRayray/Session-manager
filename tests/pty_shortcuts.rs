@@ -107,7 +107,7 @@ fn pty_probe_covers_text_input_enter_and_mouse_focus() {
     );
     assert!(
         transcript.contains(
-            "step=2 event=key:Enter mods=KeyModifiers(0x0) action=Resume(engine=Codex,session_id=probe,cwd=/workspace/probe)"
+            "step=2 event=key:Enter mods=KeyModifiers(0x0) action=Resume(engine=Pi,session_id=probe,cwd=/workspace/probe)"
         ),
         "unexpected transcript:\n{transcript}"
     );
@@ -171,26 +171,53 @@ fn pty_probe_logs_resize_boundaries_and_trace_file_output() {
 }
 
 #[test]
-fn pty_probe_covers_claude_tab_mouse_select_and_enter_resume() {
-    let transcript = run_probe(&[b"\t", b"\x1b[<0;3;4M", b"\x1b[13u", b"q"]);
+fn pty_probe_covers_four_engine_cycle_and_claude_resume() {
+    let transcript = run_probe(&[b"\t", b"\t", b"\t", b"\x1b[<0;3;4M", b"\x1b[13u", b"q"]);
+    for (step, engine) in [(1, "OpenCode"), (2, "Codex"), (3, "Claude")] {
+        assert!(
+            transcript.contains(&format!(
+                "step={step} event=key:Tab mods=KeyModifiers(0x0) action=LoadCatalog(engine={engine},request_id={step})"
+            )),
+            "unexpected transcript:\n{transcript}"
+        );
+    }
     assert!(
-        transcript.contains(
-            "step=1 event=key:Tab mods=KeyModifiers(0x0) action=LoadCatalog(engine=Claude,request_id=1)"
-        ),
-        "unexpected transcript:\n{transcript}"
-    );
-    assert!(
-        transcript.contains("step=2 event=mouse:Down(Left)@2,3 action=LoadDetail(offset=0)"),
-        "unexpected transcript:\n{transcript}"
-    );
-    assert!(
-        transcript.contains("step=2 event=mouse:Down(Left)@2,3 action=LoadDetail(offset=0) split=Horizontal focus=List"),
+        transcript.contains("step=4 event=mouse:Down(Left)@2,3 action=LoadDetail(offset=0) split=Horizontal focus=List"),
         "unexpected transcript:\n{transcript}"
     );
     assert!(
         transcript.contains(
-            "step=3 event=key:Enter mods=KeyModifiers(0x0) action=Resume(engine=Claude,session_id=probe-claude,cwd=/workspace/probe-claude)"
+            "step=5 event=key:Enter mods=KeyModifiers(0x0) action=Resume(engine=Claude,session_id=probe-claude,cwd=/workspace/probe-claude)"
         ),
         "unexpected transcript:\n{transcript}"
     );
+}
+
+#[test]
+fn pty_probe_covers_live_search_commit_and_match_navigation() {
+    let transcript = run_probe(&[b"/", b"inspect", b"\x1b[13u", b"n", b"N", b"q"]);
+    assert!(transcript.contains("step=1 event=key:char(/) mods=KeyModifiers(0x0) action=None"));
+    assert!(transcript.contains("search=Input search_input=\"\""));
+    assert!(transcript.contains("search=Input search_input=\"inspect\" search_matches=1"));
+    assert!(
+        transcript.contains("event=key:Enter mods=KeyModifiers(0x0) action=LoadDetail(offset=0)")
+    );
+    assert!(
+        transcript.contains("event=key:char(n) mods=KeyModifiers(0x0) action=LoadDetail(offset=0)")
+    );
+    assert!(
+        transcript
+            .contains("event=key:char(N) mods=KeyModifiers(SHIFT) action=LoadDetail(offset=0)")
+    );
+}
+
+#[test]
+fn pty_probe_reports_search_without_history() {
+    let transcript = run_probe(&[b"n", b"q"]);
+    let first = transcript
+        .lines()
+        .find(|line| line.contains("step=1 "))
+        .expect("step 1");
+    assert!(first.contains("search=Idle"));
+    assert!(first.contains("status_error=true"));
 }

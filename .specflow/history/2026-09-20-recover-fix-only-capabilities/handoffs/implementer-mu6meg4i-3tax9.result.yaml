@@ -1,0 +1,27 @@
+task_id: implementer-mu6meg4i-3tax9
+lease_id: lease-mu6meg4i-ofmee
+outcome: completed
+summary: >-
+  session-detail 已完成并验证：Pi JSONL user/assistant 详情与分页、OpenCode 只读
+  SQLite 参数化详情查询、viewport/filtering、未知及恶意 session ID、Pi canonical
+  root 边界，以及 engine/request stale-result isolation 均通过。未扩展到其他 spec，
+  未引入 Cargo 变化或新依赖。
+evidence:
+  changed_files:
+    - src/detail.rs
+    - .specflow/changes/recover-fix-only-capabilities/handoffs/implementer-mu6meg4i-3tax9.result.yaml
+  test_results:
+    - "cargo fmt: passed"
+    - "cargo fmt -- --check: passed"
+    - "cargo test --lib detail::tests: 24 passed, 0 failed"
+    - "cargo test --lib app::tests: 59 passed, 0 failed"
+    - "cargo test: 148 library tests + 3 binary tests + 5 integration tests passed; 0 failed; doc-tests 0"
+    - "git diff --check: passed"
+  security_checks:
+    - "OpenCode opens the configured database with SQLITE_OPEN_READ_ONLY."
+    - "OpenCode session IDs are bound as SQLite parameters; no filesystem-path interpretation or SQL interpolation is used."
+    - "Pi file-backed detail canonicalizes the configured Pi root and rejects out-of-root targets, including symlink escapes."
+    - "Detail results are tagged with request ID and engine; stale prior-engine results are ignored, and current errors replace detail state rather than retaining stale content."
+    - "No launch, delete, search, hierarchy, summary, design, docs/prd-7.md, SpecFlow CLI, subagent, commit, or push work was added."
+unresolved_issues: []
+requested_transition: reviewing

@@ -149,6 +149,29 @@ pub struct PathHintState {
     pub hide_after_tick: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SearchPhase {
+    #[default]
+    Idle,
+    Input,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+pub struct SearchState {
+    pub phase: SearchPhase,
+    pub input: String,
+    pub last_pattern: Option<String>,
+    pub matches: Vec<usize>,
+    pub current_match: Option<usize>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchNotice {
+    pub message: String,
+    pub restore_status_message: String,
+    pub hide_after_tick: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SplitDirection {
     Horizontal,
@@ -184,21 +207,26 @@ impl GroupMode {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SessionLeafNode {
+pub struct SessionTreeNode {
     pub identifier: String,
     pub session_index: usize,
     pub session_id: String,
-    pub summary: String,
+    pub name: String,
     pub display_time: String,
     pub cwd_tail: String,
+    pub agent_name: Option<String>,
+    pub is_detached: bool,
     pub file_health: FileHealth,
+    pub children: Vec<SessionTreeNode>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GroupHeaderNode {
     pub identifier: String,
     pub label: String,
-    pub children: Vec<SessionLeafNode>,
+    pub root_session_count: usize,
+    pub subagent_count: usize,
+    pub children: Vec<SessionTreeNode>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -218,6 +246,8 @@ pub struct GroupSummaryCard {
     pub group_identifier: String,
     pub group_label: String,
     pub total_sessions: usize,
+    pub root_sessions: usize,
+    pub subagent_sessions: usize,
     pub last_active: String,
     pub engine: SessionEngine,
 }
@@ -282,6 +312,8 @@ pub struct App {
     pub resume_engine: Option<SessionEngine>,
     pub resume_result_message: Option<String>,
     pub engine_status_messages: HashMap<SessionEngine, String>,
+    pub search_state: SearchState,
+    pub search_notice: Option<SearchNotice>,
     tick_count: u64,
     pending_full_redraw: bool,
     terminal_size: TerminalSizeState,
@@ -304,7 +336,7 @@ impl App {
                 };
 
                 let mut app = Self {
-                    active_engine: SessionEngine::Codex,
+                    active_engine: SessionEngine::Pi,
                     session_list,
                     selected_index,
                     detail_state,
@@ -338,9 +370,11 @@ impl App {
                     resume_engine: None,
                     resume_result_message: None,
                     engine_status_messages: HashMap::from([(
-                        SessionEngine::Codex,
+                        SessionEngine::Pi,
                         with_status_message(None, warnings.last().map(String::as_str)),
                     )]),
+                    search_state: SearchState::default(),
+                    search_notice: None,
                     tick_count: 0,
                     pending_full_redraw: false,
                     terminal_size: default_terminal_size(),
@@ -352,7 +386,7 @@ impl App {
                 app
             }
             Err(err) => Self {
-                active_engine: SessionEngine::Codex,
+                active_engine: SessionEngine::Pi,
                 session_list: Vec::new(),
                 selected_index: None,
                 detail_state: SessionDetailState::Error("No sessions found.".to_string()),
@@ -386,9 +420,11 @@ impl App {
                 resume_engine: None,
                 resume_result_message: None,
                 engine_status_messages: HashMap::from([(
-                    SessionEngine::Codex,
+                    SessionEngine::Pi,
                     with_status_message(None, Some(err.as_str())),
                 )]),
+                search_state: SearchState::default(),
+                search_notice: None,
                 tick_count: 0,
                 pending_full_redraw: false,
                 terminal_size: default_terminal_size(),
@@ -406,6 +442,13 @@ impl App {
         {
             self.clear_path_hint();
         }
+        if self
+            .search_notice
+            .as_ref()
+            .is_some_and(|notice| self.tick_count >= notice.hide_after_tick)
+        {
+            self.clear_search_notice();
+        }
     }
 
     pub fn tick_count(&self) -> u64 {
@@ -422,6 +465,10 @@ impl App {
 
     pub fn consume_full_redraw(&mut self) -> bool {
         std::mem::take(&mut self.pending_full_redraw)
+    }
+
+    pub fn initial_catalog_request(&mut self) -> CatalogRequest {
+        self.begin_catalog_request()
     }
 
     pub fn initial_detail_request(&mut self) -> Option<DetailRequest> {
@@ -462,6 +509,21 @@ impl App {
         }
 
         self.open_all_groups();
+        if let Some(pattern) = self.search_state.last_pattern.clone() {
+            self.search_state.matches = self.find_matching_indexes(&pattern);
+            self.search_state.current_match = if self.search_state.matches.is_empty() {
+                None
+            } else {
+                Some(
+                    self.search_state
+                        .current_match
+                        .unwrap_or(0)
+                        .min(self.search_state.matches.len() - 1),
+                )
+            };
+            self.selected_index = self.current_match_index();
+            self.sync_tree_selection_from_selected_index();
+        }
         self.refresh_header_summary();
     }
 
@@ -474,8 +536,15 @@ impl App {
             self.show_help_modal = false;
             return None;
         }
+        if self.search_state.phase == SearchPhase::Input {
+            return self.handle_search_input_key(event);
+        }
         if event.code == KeyCode::Char('?') {
             self.show_help_modal = true;
+            return None;
+        }
+        if event.code == KeyCode::Char('/') {
+            self.begin_search_input();
             return None;
         }
 
@@ -550,7 +619,11 @@ impl App {
             KeyCode::PageDown => self.scroll_detail(8).map(AppAction::LoadDetail),
             KeyCode::PageUp => self.scroll_detail(-8).map(AppAction::LoadDetail),
             KeyCode::Enter => self.handle_tree_enter(),
-            KeyCode::Char('n') => self.begin_new_session_request().map(AppAction::NewSession),
+            KeyCode::Char('n') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.begin_new_session_request().map(AppAction::NewSession)
+            }
+            KeyCode::Char('n') => self.jump_to_next_match(),
+            KeyCode::Char('N') => self.jump_to_previous_match(),
             KeyCode::Char('d') | KeyCode::Delete => {
                 self.begin_delete_confirmation();
                 None
@@ -565,7 +638,7 @@ impl App {
         terminal_width: u16,
         terminal_height: u16,
     ) -> Option<AppAction> {
-        if self.delete_modal_state.is_some() {
+        if self.delete_modal_state.is_some() || self.show_help_modal {
             return None;
         }
 
@@ -831,6 +904,232 @@ impl App {
             hide_after_tick: self.tick_count.saturating_add(PATH_HINT_TTL_TICKS),
         });
         self.status_message = format!("{} | Path: {absolute_path}", default_status_message());
+    }
+
+    // --- Vim-style list search ---
+
+    pub fn begin_search_input(&mut self) {
+        self.search_state.phase = SearchPhase::Input;
+        self.search_state.input.clear();
+        self.search_state.matches.clear();
+        self.search_state.current_match = None;
+    }
+
+    fn handle_search_input_key(&mut self, event: KeyEvent) -> Option<AppAction> {
+        let is_ctrl_left_bracket =
+            event.code == KeyCode::Char('[') && event.modifiers.contains(KeyModifiers::CONTROL);
+        match event.code {
+            KeyCode::Esc => {
+                self.cancel_search_input();
+                None
+            }
+            KeyCode::Char('[') if is_ctrl_left_bracket => {
+                self.cancel_search_input();
+                None
+            }
+            KeyCode::Enter => self.commit_search(),
+            KeyCode::Backspace => {
+                self.search_state.input.pop();
+                self.refresh_search_matches();
+                None
+            }
+            KeyCode::Char(ch) => {
+                self.search_state.input.push(ch);
+                self.refresh_search_matches();
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn cancel_search_input(&mut self) {
+        self.search_state.phase = SearchPhase::Idle;
+        self.search_state.input.clear();
+        self.search_state.matches = self
+            .search_state
+            .last_pattern
+            .as_deref()
+            .map(|pattern| self.find_matching_indexes(pattern))
+            .unwrap_or_default();
+        self.search_state.current_match = self.selected_index.and_then(|selected| {
+            self.search_state
+                .matches
+                .iter()
+                .position(|index| *index == selected)
+        });
+    }
+
+    fn commit_search(&mut self) -> Option<AppAction> {
+        let pattern = if self.search_state.input.is_empty() {
+            match self.search_state.last_pattern.clone() {
+                Some(last) => last,
+                None => {
+                    self.status_message =
+                        with_status_message(None, Some("E35: No previous search pattern"));
+                    return None;
+                }
+            }
+        } else {
+            self.search_state.input.clone()
+        };
+
+        let is_new_pattern = self.search_state.last_pattern.as_deref() != Some(pattern.as_str());
+        if is_new_pattern {
+            let matches = self.find_matching_indexes(&pattern);
+            if matches.is_empty() {
+                let message = format!("E486: Pattern not found: {pattern}");
+                self.status_message = with_status_message(None, Some(message.as_str()));
+                return None;
+            }
+            self.search_state.last_pattern = Some(pattern.clone());
+            self.search_state.matches = matches;
+        }
+
+        self.search_state.phase = SearchPhase::Idle;
+        self.search_state.input.clear();
+        if is_new_pattern {
+            self.jump_to_first_match()
+        } else {
+            self.jump_to_next_match()
+        }
+    }
+
+    fn jump_to_next_match(&mut self) -> Option<AppAction> {
+        if self.search_state.matches.is_empty() {
+            if let Some(pattern) = self.search_state.last_pattern.clone() {
+                let matches = self.find_matching_indexes(&pattern);
+                if matches.is_empty() {
+                    let message = format!("E486: Pattern not found: {pattern}");
+                    self.status_message = with_status_message(None, Some(message.as_str()));
+                    return None;
+                }
+                self.search_state.matches = matches;
+                return self.jump_to_first_match();
+            }
+            self.status_message =
+                with_status_message(None, Some("E35: No previous search pattern"));
+            return None;
+        }
+
+        let next = match self.search_state.current_match {
+            Some(current) if current + 1 < self.search_state.matches.len() => current + 1,
+            _ => 0,
+        };
+        self.select_match_at(next)
+    }
+
+    fn jump_to_previous_match(&mut self) -> Option<AppAction> {
+        if self.search_state.matches.is_empty() {
+            return self.jump_to_next_match();
+        }
+
+        let previous = match self.search_state.current_match {
+            Some(current) if current > 0 => current - 1,
+            _ => self.search_state.matches.len().saturating_sub(1),
+        };
+        self.select_match_at(previous)
+    }
+
+    fn jump_to_first_match(&mut self) -> Option<AppAction> {
+        if self.search_state.matches.is_empty() {
+            return None;
+        }
+        if let Some(current) = self.selected_index
+            && let Some(position) = self
+                .search_state
+                .matches
+                .iter()
+                .position(|index| *index > current)
+        {
+            return self.select_match_at(position);
+        }
+        self.select_match_at(0)
+    }
+
+    fn select_match_at(&mut self, position: usize) -> Option<AppAction> {
+        let index = self.search_state.matches.get(position).copied()?;
+        self.search_state.current_match = Some(position);
+        let pattern = self.search_state.last_pattern.clone().unwrap_or_default();
+        self.show_search_notice(format!(
+            "Match {} of {}: {pattern}",
+            position + 1,
+            self.search_state.matches.len()
+        ));
+        self.selected_index = Some(index);
+        self.sync_tree_selection_from_selected_index();
+        self.begin_detail_request().map(AppAction::LoadDetail)
+    }
+
+    fn refresh_search_matches(&mut self) {
+        self.search_state.matches = self.find_matching_indexes(&self.search_state.input);
+        self.search_state.current_match = None;
+    }
+
+    fn find_matching_indexes(&self, pattern: &str) -> Vec<usize> {
+        let needle = pattern.to_lowercase();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        self.session_list
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| searchable_text(item).to_lowercase().contains(&needle))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    pub fn is_search_match(&self, session_index: usize) -> bool {
+        !self.search_state.matches.is_empty() && self.search_state.matches.contains(&session_index)
+    }
+
+    /// Pattern to highlight while rendering the session tree, if any.
+    pub fn search_highlight_pattern(&self) -> Option<&str> {
+        match self.search_state.phase {
+            SearchPhase::Input => {
+                (!self.search_state.input.is_empty()).then_some(self.search_state.input.as_str())
+            }
+            SearchPhase::Idle if !self.search_state.matches.is_empty() => {
+                self.search_state.last_pattern.as_deref()
+            }
+            SearchPhase::Idle => None,
+        }
+    }
+
+    /// Session indexes currently considered search matches (live while typing).
+    pub fn live_search_matches(&self) -> &[usize] {
+        &self.search_state.matches
+    }
+
+    /// Session index of the currently highlighted match, if any.
+    pub fn current_match_index(&self) -> Option<usize> {
+        self.search_state
+            .current_match
+            .and_then(|position| self.search_state.matches.get(position).copied())
+    }
+
+    fn show_search_notice(&mut self, message: String) {
+        let restore_status_message = self.status_message.clone();
+        self.search_notice = Some(SearchNotice {
+            message: message.clone(),
+            restore_status_message,
+            hide_after_tick: self.tick_count.saturating_add(PATH_HINT_TTL_TICKS),
+        });
+        self.status_message = message;
+    }
+
+    pub fn clear_search_notice(&mut self) {
+        if let Some(notice) = self.search_notice.take() {
+            self.status_message = notice.restore_status_message;
+        }
+    }
+
+    /// Drop transient match results while keeping the last pattern so `n` can
+    /// re-search the refreshed list (vim keeps the pattern across buffers).
+    fn clear_search_results(&mut self) {
+        self.search_state.phase = SearchPhase::Idle;
+        self.search_state.input.clear();
+        self.search_state.matches.clear();
+        self.search_state.current_match = None;
     }
 
     fn handle_delete_modal_key(&mut self, event: KeyEvent) -> Option<AppAction> {
@@ -1122,6 +1421,10 @@ impl App {
         } else {
             self.active_engine.previous()
         };
+        self.begin_catalog_request()
+    }
+
+    fn begin_catalog_request(&mut self) -> CatalogRequest {
         self.catalog_request_token = self.catalog_request_token.saturating_add(1);
         self.catalog_loading_state = CatalogLoadingState::Loading(self.active_engine);
         self.invalidate_detail_requests();
@@ -1138,6 +1441,8 @@ impl App {
         self.pending_delete_target = None;
         self.pending_bulk_delete_target = None;
         self.clear_path_hint();
+        self.clear_search_results();
+        self.search_state.last_pattern = None;
         self.refresh_header_summary();
         self.status_message = format!(
             "{} | Loading {} sessions...",
@@ -1231,21 +1536,28 @@ impl App {
     }
 
     fn rebuild_tree_after_session_list_change(&mut self) {
+        if let Some(pattern) = self.search_state.last_pattern.clone() {
+            self.search_state.matches = self.find_matching_indexes(&pattern);
+            self.search_state.current_match = self
+                .search_state
+                .current_match
+                .filter(|position| *position < self.search_state.matches.len());
+        }
         self.tree_state = TreeState::default();
         self.open_all_groups();
         self.sync_tree_selection_from_selected_index();
     }
 
     fn sync_tree_selection_from_selected_index(&mut self) {
+        let groups = build_grouped_session_nodes(&self.session_list, &self.group_mode);
         let identifier = self
             .selected_index
-            .and_then(|index| self.session_list.get(index))
-            .map(|item| {
-                vec![
-                    group_identifier(group_label_for_item(item, &self.group_mode)),
-                    leaf_identifier(item),
-                ]
-            });
+            .and_then(|index| session_tree_path(&groups, index));
+        if let Some(path) = &identifier {
+            for length in 1..path.len() {
+                self.tree_state.open(path[..length].to_vec());
+            }
+        }
         self.tree_state.select(identifier.unwrap_or_default());
         self.tree_focus_node = self.current_tree_focus_node();
         self.refresh_right_panel_mode();
@@ -1259,11 +1571,7 @@ impl App {
     }
 
     fn tree_selected_index(&self) -> Option<usize> {
-        let selected = self.tree_state.selected();
-        if selected.len() != 2 {
-            return None;
-        }
-        let selected_leaf = &selected[1];
+        let selected_leaf = self.tree_state.selected().last()?;
         self.session_list
             .iter()
             .position(|item| leaf_identifier(item) == *selected_leaf)
@@ -1278,12 +1586,15 @@ impl App {
     fn visible_tree_identifiers(&self) -> Vec<Vec<String>> {
         let mut visible = Vec::new();
         for group in build_grouped_session_nodes(&self.session_list, &self.group_mode) {
-            let group_id = vec![group.identifier.clone()];
-            visible.push(group_id.clone());
-            if self.tree_state.opened().contains(&group_id) {
-                for child in group.children {
-                    visible.push(vec![group.identifier.clone(), child.identifier]);
-                }
+            let group_path = vec![group.identifier.clone()];
+            visible.push(group_path.clone());
+            if self.tree_state.opened().contains(&group_path) {
+                append_visible_session_paths(
+                    &group.children,
+                    &group_path,
+                    &self.tree_state,
+                    &mut visible,
+                );
             }
         }
         visible
@@ -1316,7 +1627,7 @@ impl App {
         let selected = self.tree_state.selected();
         if selected.len() == 1 {
             Some(TreeFocusNode::GroupHeader(selected[0].clone()))
-        } else if selected.len() == 2 {
+        } else if selected.len() >= 2 {
             self.tree_selected_index().map(TreeFocusNode::SessionLeaf)
         } else {
             None
@@ -1327,22 +1638,27 @@ impl App {
         build_grouped_session_nodes(&self.session_list, &self.group_mode)
             .into_iter()
             .find(|group| group.identifier == identifier)
-            .map(|group| BulkDeleteRequest {
-                engine: self.active_engine,
-                group_identifier: group.identifier,
-                group_label: group.label,
-                targets: group
-                    .children
-                    .into_iter()
-                    .map(|child| {
-                        let item = &self.session_list[child.session_index];
-                        DeleteRequest {
-                            engine: self.active_engine,
-                            path: item.abs_path.clone(),
-                            session_id: item.session_id.clone(),
-                        }
-                    })
-                    .collect(),
+            .map(|group| {
+                let mut indexes = Vec::new();
+                for root in &group.children {
+                    collect_session_indexes(root, &mut indexes);
+                }
+                BulkDeleteRequest {
+                    engine: self.active_engine,
+                    group_identifier: group.identifier,
+                    group_label: group.label,
+                    targets: indexes
+                        .into_iter()
+                        .map(|index| {
+                            let item = &self.session_list[index];
+                            DeleteRequest {
+                                engine: self.active_engine,
+                                path: item.abs_path.clone(),
+                                session_id: item.session_id.clone(),
+                            }
+                        })
+                        .collect(),
+                }
             })
     }
 
@@ -1382,17 +1698,70 @@ impl App {
         build_grouped_session_nodes(&self.session_list, &self.group_mode)
             .into_iter()
             .find(|group| group.identifier == identifier)
-            .map(|group| GroupSummaryCard {
-                group_identifier: group.identifier,
-                group_label: group.label,
-                total_sessions: group.children.len(),
-                last_active: group
-                    .children
-                    .first()
-                    .map(|child| child.display_time.clone())
-                    .unwrap_or_else(|| "-".to_string()),
-                engine: self.active_engine,
+            .map(|group| {
+                let mut indexes = Vec::new();
+                for root in &group.children {
+                    collect_session_indexes(root, &mut indexes);
+                }
+                let last_active = indexes
+                    .iter()
+                    .copied()
+                    .max_by_key(|index| self.session_list[*index].modified_at)
+                    .map(|index| self.session_list[index].display_time.clone())
+                    .unwrap_or_else(|| "-".to_string());
+                GroupSummaryCard {
+                    group_identifier: group.identifier,
+                    group_label: group.label,
+                    total_sessions: indexes.len(),
+                    root_sessions: group.root_session_count,
+                    subagent_sessions: group.subagent_count,
+                    last_active,
+                    engine: self.active_engine,
+                }
             })
+    }
+}
+
+fn session_tree_path(groups: &[GroupHeaderNode], session_index: usize) -> Option<Vec<String>> {
+    for group in groups {
+        let mut path = vec![group.identifier.clone()];
+        if append_path_to_session(&group.children, session_index, &mut path) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn append_path_to_session(
+    nodes: &[SessionTreeNode],
+    session_index: usize,
+    path: &mut Vec<String>,
+) -> bool {
+    for node in nodes {
+        path.push(node.identifier.clone());
+        if node.session_index == session_index
+            || append_path_to_session(&node.children, session_index, path)
+        {
+            return true;
+        }
+        path.pop();
+    }
+    false
+}
+
+fn append_visible_session_paths(
+    nodes: &[SessionTreeNode],
+    parent_path: &[String],
+    tree_state: &TreeState<String>,
+    visible: &mut Vec<Vec<String>>,
+) {
+    for node in nodes {
+        let mut path = parent_path.to_vec();
+        path.push(node.identifier.clone());
+        visible.push(path.clone());
+        if tree_state.opened().contains(&path) {
+            append_visible_session_paths(&node.children, &path, tree_state, visible);
+        }
     }
 }
 
@@ -1400,30 +1769,128 @@ pub fn build_grouped_session_nodes(
     session_list: &[SessionListItem],
     group_mode: &GroupMode,
 ) -> Vec<GroupHeaderNode> {
-    let mut groups: Vec<GroupHeaderNode> = Vec::new();
-    for (index, item) in session_list.iter().enumerate() {
-        let label = group_label_for_item(item, group_mode);
-        let leaf = SessionLeafNode {
-            identifier: leaf_identifier(item),
-            session_index: index,
-            session_id: item.session_id.clone(),
-            summary: item.summary.clone(),
-            display_time: item.display_time.clone(),
-            cwd_tail: item.cwd_tail.clone(),
-            file_health: item.file_health.clone(),
-        };
+    let (parent_indexes, detached) = resolve_parent_indexes(session_list);
+    let mut child_indexes = vec![Vec::new(); session_list.len()];
+    let mut root_indexes = Vec::new();
+    for (index, parent_index) in parent_indexes.iter().copied().enumerate() {
+        if let Some(parent_index) = parent_index {
+            child_indexes[parent_index].push(index);
+        } else {
+            root_indexes.push(index);
+        }
+    }
 
+    let mut groups: Vec<GroupHeaderNode> = Vec::new();
+    for root_index in root_indexes {
+        let item = &session_list[root_index];
+        let label = group_label_for_item(item, group_mode);
+        let node = build_session_tree_node(root_index, &child_indexes, &detached, session_list);
         if let Some(group) = groups.iter_mut().find(|group| group.label == label) {
-            group.children.push(leaf);
+            group.children.push(node);
         } else {
             groups.push(GroupHeaderNode {
                 identifier: group_identifier(label.clone()),
                 label,
-                children: vec![leaf],
+                root_session_count: 0,
+                subagent_count: 0,
+                children: vec![node],
             });
         }
     }
+
+    for group in &mut groups {
+        group.root_session_count = group.children.len();
+        group.subagent_count = group.children.iter().map(session_descendant_count).sum();
+    }
     groups
+}
+
+fn resolve_parent_indexes(session_list: &[SessionListItem]) -> (Vec<Option<usize>>, Vec<bool>) {
+    let mut indexes_by_id: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (index, item) in session_list.iter().enumerate() {
+        indexes_by_id
+            .entry(item.session_id.as_str())
+            .or_default()
+            .push(index);
+    }
+
+    let mut parents = vec![None; session_list.len()];
+    let mut detached = vec![false; session_list.len()];
+    for (index, item) in session_list.iter().enumerate() {
+        let Some(parent_id) = item.parent_session_id.as_deref() else {
+            continue;
+        };
+        match indexes_by_id.get(parent_id).map(Vec::as_slice) {
+            Some([parent_index]) if *parent_index != index => {
+                parents[index] = Some(*parent_index);
+            }
+            _ => detached[index] = true,
+        }
+    }
+
+    let mut cycle_member = vec![false; session_list.len()];
+    for start in 0..session_list.len() {
+        let mut positions = HashMap::new();
+        let mut path = Vec::new();
+        let mut current = Some(start);
+        while let Some(index) = current {
+            if let Some(cycle_start) = positions.get(&index).copied() {
+                for cycle_index in &path[cycle_start..] {
+                    cycle_member[*cycle_index] = true;
+                }
+                break;
+            }
+            positions.insert(index, path.len());
+            path.push(index);
+            current = parents[index];
+        }
+    }
+    for (index, is_cycle_member) in cycle_member.into_iter().enumerate() {
+        if is_cycle_member {
+            parents[index] = None;
+            detached[index] = true;
+        }
+    }
+
+    (parents, detached)
+}
+
+fn build_session_tree_node(
+    index: usize,
+    child_indexes: &[Vec<usize>],
+    detached: &[bool],
+    session_list: &[SessionListItem],
+) -> SessionTreeNode {
+    let item = &session_list[index];
+    SessionTreeNode {
+        identifier: leaf_identifier(item),
+        session_index: index,
+        session_id: item.session_id.clone(),
+        name: item.name.clone(),
+        display_time: item.display_time.clone(),
+        cwd_tail: item.cwd_tail.clone(),
+        agent_name: item.agent_name.clone(),
+        is_detached: detached[index],
+        file_health: item.file_health.clone(),
+        children: child_indexes[index]
+            .iter()
+            .map(|child| build_session_tree_node(*child, child_indexes, detached, session_list))
+            .collect(),
+    }
+}
+
+fn session_descendant_count(node: &SessionTreeNode) -> usize {
+    node.children
+        .iter()
+        .map(|child| 1 + session_descendant_count(child))
+        .sum()
+}
+
+fn collect_session_indexes(node: &SessionTreeNode, indexes: &mut Vec<usize>) {
+    indexes.push(node.session_index);
+    for child in &node.children {
+        collect_session_indexes(child, indexes);
+    }
 }
 
 pub fn grouped_session_indexes(
@@ -1433,14 +1900,11 @@ pub fn grouped_session_indexes(
     build_grouped_session_nodes(session_list, group_mode)
         .into_iter()
         .map(|group| {
-            (
-                group.label,
-                group
-                    .children
-                    .into_iter()
-                    .map(|child| child.session_index)
-                    .collect(),
-            )
+            let mut indexes = Vec::new();
+            for root in &group.children {
+                collect_session_indexes(root, &mut indexes);
+            }
+            (group.label, indexes)
         })
         .collect()
 }
@@ -1469,6 +1933,26 @@ pub fn group_identifier(label: String) -> String {
 
 pub fn leaf_identifier(item: &SessionListItem) -> String {
     item.abs_path.display().to_string()
+}
+
+fn searchable_text(item: &SessionListItem) -> String {
+    let mut parts = vec![
+        item.session_id.clone(),
+        item.name.clone(),
+        item.summary.clone(),
+        item.display_time.clone(),
+        item.cwd_tail.clone(),
+        item.cwd_group_label.clone(),
+        item.cwd_path.clone(),
+        item.abs_path.display().to_string(),
+    ];
+    if let Some(agent_name) = &item.agent_name {
+        parts.push(agent_name.clone());
+    }
+    if let Some(parent_session_id) = &item.parent_session_id {
+        parts.push(parent_session_id.clone());
+    }
+    parts.join(" ")
 }
 
 pub fn spawn_detail_loader<L: SessionDetailLoader + Send + Sync + 'static>(
@@ -1779,7 +2263,10 @@ mod tests {
     fn item(name: &str) -> SessionListItem {
         SessionListItem {
             session_id: name.to_string(),
+            name: name.to_string(),
             summary: format!("summary for {name}"),
+            parent_session_id: None,
+            agent_name: None,
             display_time: "2026-04-16 12:00".to_string(),
             cwd_tail: "demo".to_string(),
             cwd_group_label: "workspace/demo".to_string(),
@@ -1819,6 +2306,22 @@ mod tests {
         StubCatalog {
             items,
             file_health_map,
+        }
+    }
+
+    fn switch_to_engine(app: &mut App, engine: SessionEngine) -> CatalogRequest {
+        while app.active_engine != engine {
+            match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
+                Some(AppAction::LoadCatalog(request)) if request.engine == engine => {
+                    return request;
+                }
+                Some(AppAction::LoadCatalog(_)) => {}
+                other => panic!("expected catalog load request, got {other:?}"),
+            }
+        }
+        CatalogRequest {
+            request_id: app.catalog_request_token,
+            engine,
         }
     }
 
@@ -1876,10 +2379,24 @@ mod tests {
     }
 
     #[test]
-    fn default_startup_enters_codex_tab() {
+    fn default_startup_enters_pi_tab() {
         let app = App::new(&stub_catalog(vec![item("one")]));
-        assert_eq!(app.active_engine, SessionEngine::Codex);
+        assert_eq!(app.active_engine, SessionEngine::Pi);
         assert_eq!(app.group_mode, GroupMode::ByTime);
+    }
+
+    #[test]
+    fn initial_catalog_request_targets_pi_and_clears_bootstrap_data() {
+        let mut app = App::new(&stub_catalog(vec![item("bootstrap")]));
+        let request = app.initial_catalog_request();
+        assert_eq!(request.engine, SessionEngine::Pi);
+        assert_eq!(request.request_id, 1);
+        assert!(app.session_list.is_empty());
+        assert_eq!(app.selected_index, None);
+        assert_eq!(
+            app.catalog_loading_state,
+            CatalogLoadingState::Loading(SessionEngine::Pi)
+        );
     }
 
     #[test]
@@ -1906,7 +2423,108 @@ mod tests {
         assert_eq!(nodes[0].children.len(), 2);
         assert_eq!(nodes[0].children[0].identifier, "/tmp/one.jsonl");
         assert_eq!(nodes[0].children[0].session_index, 0);
-        assert_eq!(nodes[0].children[0].summary, "summary for one");
+        assert_eq!(nodes[0].children[0].name, "one");
+    }
+
+    #[test]
+    fn hierarchy_nests_descendants_under_the_root_group() {
+        let root = item("root");
+        let mut child = item("child");
+        child.parent_session_id = Some("root".to_string());
+        child.agent_name = Some("worker".to_string());
+        child.cwd_group_label = "other/project".to_string();
+        let mut grandchild = item("grandchild");
+        grandchild.parent_session_id = Some("child".to_string());
+        grandchild.agent_name = Some("reviewer".to_string());
+
+        let groups = build_grouped_session_nodes(&[root, child, grandchild], &GroupMode::ByProject);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].label, "workspace/demo");
+        assert_eq!(groups[0].root_session_count, 1);
+        assert_eq!(groups[0].subagent_count, 2);
+        assert_eq!(groups[0].children[0].session_id, "root");
+        assert_eq!(groups[0].children[0].children[0].session_id, "child");
+        assert_eq!(
+            groups[0].children[0].children[0].children[0].session_id,
+            "grandchild"
+        );
+        assert_eq!(
+            groups[0].children[0].children[0].agent_name.as_deref(),
+            Some("worker")
+        );
+    }
+
+    #[test]
+    fn missing_parents_and_cycles_remain_visible_as_detached_roots() {
+        let mut missing = item("missing");
+        missing.parent_session_id = Some("not-present".to_string());
+        let mut cycle_a = item("cycle-a");
+        cycle_a.parent_session_id = Some("cycle-b".to_string());
+        let mut cycle_b = item("cycle-b");
+        cycle_b.parent_session_id = Some("cycle-a".to_string());
+
+        let groups =
+            build_grouped_session_nodes(&[missing, cycle_a, cycle_b], &GroupMode::ByProject);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].root_session_count, 3);
+        assert_eq!(groups[0].subagent_count, 0);
+        assert!(groups[0].children.iter().all(|node| node.is_detached));
+    }
+
+    #[test]
+    fn duplicate_parent_ids_do_not_attach_children_arbitrarily() {
+        let mut first_parent = item("first-parent");
+        first_parent.session_id = "duplicate".to_string();
+        let mut second_parent = item("second-parent");
+        second_parent.session_id = "duplicate".to_string();
+        let mut child = item("ambiguous-child");
+        child.parent_session_id = Some("duplicate".to_string());
+
+        let groups = build_grouped_session_nodes(
+            &[first_parent, second_parent, child],
+            &GroupMode::ByProject,
+        );
+
+        assert_eq!(groups[0].root_session_count, 3);
+        assert!(
+            groups[0]
+                .children
+                .iter()
+                .find(|node| node.session_id == "ambiguous-child")
+                .is_some_and(|node| node.is_detached)
+        );
+    }
+
+    #[test]
+    fn nested_selection_opens_ancestors_and_group_delete_includes_descendants() {
+        let root = item("root");
+        let mut child = item("child");
+        child.parent_session_id = Some("root".to_string());
+        let mut grandchild = item("grandchild");
+        grandchild.parent_session_id = Some("child".to_string());
+        let mut app = App::new(&stub_catalog(vec![root, child, grandchild]));
+
+        assert_eq!(app.visible_tree_identifiers().len(), 2);
+        app.selected_index = Some(2);
+        app.sync_tree_selection_from_selected_index();
+
+        assert_eq!(app.tree_state.selected().len(), 4);
+        assert_eq!(app.tree_selected_index(), Some(2));
+        assert_eq!(app.visible_tree_identifiers().len(), 4);
+        let request = app
+            .bulk_delete_request_for_group("group:2026-04-16")
+            .expect("bulk delete request");
+        assert_eq!(request.targets.len(), 3);
+        assert_eq!(
+            request
+                .targets
+                .iter()
+                .map(|target| target.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["root", "child", "grandchild"]
+        );
     }
 
     #[test]
@@ -1960,7 +2578,7 @@ mod tests {
                 card.last_active.as_str(),
                 card.engine,
             )),
-            Some(("2026-04-16", 2, "2026-04-16 12:00", SessionEngine::Codex))
+            Some(("2026-04-16", 2, "2026-04-16 12:00", SessionEngine::Pi))
         );
         assert_eq!(app.detail_state, SessionDetailState::Idle);
         assert_eq!(app.header_summary, empty_header_summary());
@@ -2021,7 +2639,7 @@ mod tests {
             .pending_bulk_delete_target
             .as_ref()
             .expect("bulk delete target");
-        assert_eq!(target.engine, SessionEngine::Codex);
+        assert_eq!(target.engine, SessionEngine::Pi);
         assert_eq!(target.group_label, "2026-04-16");
         assert_eq!(target.targets.len(), 2);
         assert_eq!(
@@ -2093,12 +2711,13 @@ mod tests {
     }
 
     #[test]
-    fn bulk_delete_partial_failure_keeps_remaining_group_nodes() {
+    fn opencode_bulk_delete_partial_failure_keeps_remaining_group_nodes() {
         let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        app.active_engine = SessionEngine::OpenCode;
         let _ = app.handle_key(KeyEvent::from(KeyCode::Left));
 
         let next_detail = app.apply_bulk_delete_result(BulkDeleteResult {
-            engine: SessionEngine::Codex,
+            engine: SessionEngine::OpenCode,
             group_identifier: "group:2026-04-16".to_string(),
             group_label: "2026-04-16".to_string(),
             requested_count: 2,
@@ -2137,11 +2756,11 @@ mod tests {
         let action = app.handle_key(KeyEvent::from(KeyCode::Tab));
         match action {
             Some(AppAction::LoadCatalog(request)) => {
-                assert_eq!(request.engine, SessionEngine::Claude);
-                assert_eq!(app.active_engine, SessionEngine::Claude);
+                assert_eq!(request.engine, SessionEngine::OpenCode);
+                assert_eq!(app.active_engine, SessionEngine::OpenCode);
                 assert_eq!(
                     app.catalog_loading_state,
-                    CatalogLoadingState::Loading(SessionEngine::Claude)
+                    CatalogLoadingState::Loading(SessionEngine::OpenCode)
                 );
             }
             other => panic!("expected catalog load request, got {other:?}"),
@@ -2150,10 +2769,30 @@ mod tests {
         let action = app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
         match action {
             Some(AppAction::LoadCatalog(request)) => {
-                assert_eq!(request.engine, SessionEngine::Codex);
-                assert_eq!(app.active_engine, SessionEngine::Codex);
+                assert_eq!(request.engine, SessionEngine::Pi);
+                assert_eq!(app.active_engine, SessionEngine::Pi);
             }
             other => panic!("expected catalog load request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tab_cycles_through_all_four_catalog_engines() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        for expected_engine in [
+            SessionEngine::OpenCode,
+            SessionEngine::Codex,
+            SessionEngine::Claude,
+            SessionEngine::Pi,
+        ] {
+            let action = app.handle_key(KeyEvent::from(KeyCode::Tab));
+            match action {
+                Some(AppAction::LoadCatalog(request)) => {
+                    assert_eq!(request.engine, expected_engine);
+                    assert_eq!(app.active_engine, expected_engine);
+                }
+                other => panic!("expected catalog load request, got {other:?}"),
+            }
         }
     }
 
@@ -2181,8 +2820,8 @@ mod tests {
 
         app.apply_catalog_result(catalog_result(
             request.request_id,
-            SessionEngine::Claude,
-            vec![item("claude-one")],
+            request.engine,
+            vec![item("loaded-one")],
         ));
 
         assert_eq!(app.session_list.len(), 1);
@@ -2194,38 +2833,69 @@ mod tests {
     #[test]
     fn stale_engine_results_do_not_override_current_tab() {
         let mut app = App::new(&stub_catalog(vec![item("one")]));
-        let claude_request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
+        let opencode_request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
             Some(AppAction::LoadCatalog(request)) => request,
             other => panic!("expected catalog load request, got {other:?}"),
         };
-        let codex_request =
-            match app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)) {
-                Some(AppAction::LoadCatalog(request)) => request,
-                other => panic!("expected catalog load request, got {other:?}"),
-            };
+        let pi_request = match app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+        {
+            Some(AppAction::LoadCatalog(request)) => request,
+            other => panic!("expected catalog load request, got {other:?}"),
+        };
 
         app.apply_catalog_result(catalog_result(
-            claude_request.request_id,
-            SessionEngine::Claude,
-            vec![item("late-claude")],
+            opencode_request.request_id,
+            SessionEngine::OpenCode,
+            vec![item("late-opencode")],
         ));
         assert!(app.session_list.is_empty());
 
         app.apply_catalog_result(catalog_result(
-            codex_request.request_id,
-            SessionEngine::Codex,
-            vec![item("fresh-codex")],
+            pi_request.request_id,
+            SessionEngine::Pi,
+            vec![item("fresh-pi")],
         ));
         assert_eq!(app.session_list.len(), 1);
-        assert_eq!(app.session_list[0].session_id, "fresh-codex");
+        assert_eq!(app.session_list[0].session_id, "fresh-pi");
+    }
+
+    #[test]
+    fn catalog_results_are_isolated_across_all_four_engines() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        let mut requests = Vec::new();
+        for _ in 0..4 {
+            let request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
+                Some(AppAction::LoadCatalog(request)) => request,
+                other => panic!("expected catalog load request, got {other:?}"),
+            };
+            requests.push(request);
+        }
+
+        for request in &requests[..3] {
+            app.apply_catalog_result(catalog_result(
+                request.request_id,
+                request.engine,
+                vec![item(&format!("late-{}", request.engine.label()))],
+            ));
+            assert!(app.session_list.is_empty());
+        }
+
+        let current = &requests[3];
+        app.apply_catalog_result(catalog_result(
+            current.request_id,
+            current.engine,
+            vec![item("fresh-pi")],
+        ));
+        assert_eq!(app.session_list[0].session_id, "fresh-pi");
+        assert_eq!(app.active_engine, SessionEngine::Pi);
     }
 
     #[test]
     fn claude_load_error_stays_in_claude_context() {
         let mut app = App::new(&stub_catalog(vec![item("one")]));
-        let _ = app.handle_key(KeyEvent::from(KeyCode::Tab));
+        let request = switch_to_engine(&mut app, SessionEngine::Claude);
         app.apply_catalog_result(CatalogLoadResult {
-            request_id: 1,
+            request_id: request.request_id,
             engine: SessionEngine::Claude,
             result: Err("Unable to read session directory /tmp/claude".to_string()),
         });
@@ -2253,10 +2923,7 @@ mod tests {
     #[test]
     fn claude_tab_uses_standard_delete_confirmation_flow() {
         let mut app = App::new(&stub_catalog(vec![item("one")]));
-        let request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
-            Some(AppAction::LoadCatalog(request)) => request,
-            other => panic!("expected catalog load request, got {other:?}"),
-        };
+        let request = switch_to_engine(&mut app, SessionEngine::Claude);
         app.apply_catalog_result(catalog_result(
             request.request_id,
             SessionEngine::Claude,
@@ -2280,10 +2947,7 @@ mod tests {
     fn switching_engine_clears_delete_modal_and_pending_target() {
         let mut app = App::new(&stub_catalog(vec![item("codex-one")]));
 
-        let claude_request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
-            Some(AppAction::LoadCatalog(request)) => request,
-            other => panic!("expected catalog load request, got {other:?}"),
-        };
+        let claude_request = switch_to_engine(&mut app, SessionEngine::Claude);
         app.apply_catalog_result(catalog_result(
             claude_request.request_id,
             SessionEngine::Claude,
@@ -2317,12 +2981,37 @@ mod tests {
     }
 
     #[test]
+    fn switching_from_each_engine_clears_delete_confirmation() {
+        for engine in [
+            SessionEngine::Pi,
+            SessionEngine::OpenCode,
+            SessionEngine::Codex,
+            SessionEngine::Claude,
+        ] {
+            let mut app = App::new(&stub_catalog(vec![item("one")]));
+            app.active_engine = engine;
+            app.selected_index = Some(0);
+            let _ = app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+            assert!(app.delete_modal_state.is_some(), "{engine:?}");
+            assert_eq!(
+                app.pending_delete_target
+                    .as_ref()
+                    .map(|request| request.engine),
+                Some(engine)
+            );
+
+            let action = app.handle_key(KeyEvent::from(KeyCode::Tab));
+            assert!(matches!(action, Some(AppAction::LoadCatalog(_))));
+            assert!(app.delete_modal_state.is_none(), "{engine:?}");
+            assert!(app.pending_delete_target.is_none(), "{engine:?}");
+            assert!(app.pending_bulk_delete_target.is_none(), "{engine:?}");
+        }
+    }
+
+    #[test]
     fn claude_delete_success_updates_list_and_requests_neighbor_detail() {
         let mut app = App::new(&stub_catalog(vec![item("codex-one")]));
-        let request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
-            Some(AppAction::LoadCatalog(request)) => request,
-            other => panic!("expected catalog load request, got {other:?}"),
-        };
+        let request = switch_to_engine(&mut app, SessionEngine::Claude);
         app.apply_catalog_result(catalog_result(
             request.request_id,
             SessionEngine::Claude,
@@ -2355,10 +3044,7 @@ mod tests {
     #[test]
     fn claude_delete_failure_stays_in_claude_context_and_clears_pending_state() {
         let mut app = App::new(&stub_catalog(vec![item("codex-one")]));
-        let request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
-            Some(AppAction::LoadCatalog(request)) => request,
-            other => panic!("expected catalog load request, got {other:?}"),
-        };
+        let request = switch_to_engine(&mut app, SessionEngine::Claude);
         app.apply_catalog_result(catalog_result(
             request.request_id,
             SessionEngine::Claude,
@@ -2393,10 +3079,7 @@ mod tests {
     #[test]
     fn claude_selection_requests_claude_detail_loader() {
         let mut app = App::new(&stub_catalog(vec![item("one")]));
-        let request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
-            Some(AppAction::LoadCatalog(request)) => request,
-            other => panic!("expected catalog load request, got {other:?}"),
-        };
+        let request = switch_to_engine(&mut app, SessionEngine::Claude);
         app.apply_catalog_result(catalog_result(
             request.request_id,
             SessionEngine::Claude,
@@ -2409,6 +3092,7 @@ mod tests {
             Some(AppAction::LoadDetail(request)) => {
                 assert_eq!(request.engine, SessionEngine::Claude);
                 assert_eq!(request.path, PathBuf::from("/tmp/claude-one.jsonl"));
+                assert_eq!(request.offset, 0);
             }
             other => panic!("expected detail load request, got {other:?}"),
         }
@@ -2417,10 +3101,7 @@ mod tests {
     #[test]
     fn stale_detail_results_from_previous_engine_do_not_override_current_tab() {
         let mut app = App::new(&stub_catalog(vec![item("one")]));
-        let claude_catalog_request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
-            Some(AppAction::LoadCatalog(request)) => request,
-            other => panic!("expected catalog load request, got {other:?}"),
-        };
+        let claude_catalog_request = switch_to_engine(&mut app, SessionEngine::Claude);
         app.apply_catalog_result(catalog_result(
             claude_catalog_request.request_id,
             SessionEngine::Claude,
@@ -2460,23 +3141,20 @@ mod tests {
         let action = app.handle_key(KeyEvent::from(KeyCode::Enter));
         match action {
             Some(AppAction::Resume(request)) => {
-                assert_eq!(request.engine, SessionEngine::Codex);
+                assert_eq!(request.engine, SessionEngine::Pi);
                 assert_eq!(request.session_id, "one");
                 assert_eq!(request.cwd, PathBuf::from("/workspace/one"));
             }
             other => panic!("expected resume request, got {other:?}"),
         }
         assert_eq!(app.resume_state, ResumeState::Preparing);
-        assert_eq!(app.resume_engine, Some(SessionEngine::Codex));
+        assert_eq!(app.resume_engine, Some(SessionEngine::Pi));
     }
 
     #[test]
     fn claude_enter_creates_claude_resume_request_from_selected_session() {
         let mut app = App::new(&stub_catalog(vec![item("one")]));
-        let request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
-            Some(AppAction::LoadCatalog(request)) => request,
-            other => panic!("expected catalog load request, got {other:?}"),
-        };
+        let request = switch_to_engine(&mut app, SessionEngine::Claude);
         app.apply_catalog_result(catalog_result(
             request.request_id,
             SessionEngine::Claude,
@@ -2504,10 +3182,7 @@ mod tests {
     #[test]
     fn claude_mouse_selection_then_enter_triggers_claude_resume_request() {
         let mut app = App::new(&stub_catalog(vec![item("codex-one")]));
-        let request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
-            Some(AppAction::LoadCatalog(request)) => request,
-            other => panic!("expected catalog load request, got {other:?}"),
-        };
+        let request = switch_to_engine(&mut app, SessionEngine::Claude);
         app.apply_catalog_result(catalog_result(
             request.request_id,
             SessionEngine::Claude,
@@ -2566,24 +3241,24 @@ mod tests {
         assert!(action.is_none());
         assert_eq!(app.resume_state, ResumeState::Error);
         assert!(app.status_message.contains("missing cwd metadata"));
-        assert!(app.status_message.contains("Codex session broken"));
+        assert!(app.status_message.contains("Pi session broken"));
     }
 
     #[test]
-    fn n_on_session_leaf_creates_new_session_request_from_selected_cwd() {
+    fn ctrl_n_on_session_leaf_creates_new_session_request_from_selected_cwd() {
         let mut app = App::new(&stub_catalog(vec![item("one")]));
 
-        let action = app.handle_key(KeyEvent::from(KeyCode::Char('n')));
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
 
         match action {
             Some(AppAction::NewSession(request)) => {
-                assert_eq!(request.engine, SessionEngine::Codex);
+                assert_eq!(request.engine, SessionEngine::Pi);
                 assert_eq!(request.cwd, PathBuf::from("/workspace/one"));
             }
             other => panic!("expected new session request, got {other:?}"),
         }
         assert_eq!(app.resume_state, ResumeState::Preparing);
-        assert!(app.status_message.contains("Starting new Codex session"));
+        assert!(app.status_message.contains("Starting new Pi session"));
     }
 
     #[test]
@@ -2601,11 +3276,11 @@ mod tests {
         app.rebuild_tree_after_session_list_change();
         let _ = app.handle_key(KeyEvent::from(KeyCode::Left));
 
-        let action = app.handle_key(KeyEvent::from(KeyCode::Char('n')));
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
 
         match action {
             Some(AppAction::NewSession(request)) => {
-                assert_eq!(request.engine, SessionEngine::Codex);
+                assert_eq!(request.engine, SessionEngine::Pi);
                 assert_eq!(request.cwd, PathBuf::from("/workspace/api"));
             }
             other => panic!("expected project header new session request, got {other:?}"),
@@ -2617,10 +3292,210 @@ mod tests {
         let mut app = App::new(&stub_catalog(vec![item("one")]));
         let _ = app.handle_key(KeyEvent::from(KeyCode::Left));
 
-        let action = app.handle_key(KeyEvent::from(KeyCode::Char('n')));
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
 
         assert!(action.is_none());
         assert!(app.status_message.contains("Select a project or session"));
+    }
+
+    // --- Vim-style list search ---
+
+    fn type_search(app: &mut App, pattern: &str) {
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        for ch in pattern.chars() {
+            let _ = app.handle_key(KeyEvent::from(KeyCode::Char(ch)));
+        }
+    }
+
+    #[test]
+    fn slash_enters_search_input_and_esc_cancels() {
+        let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        assert_eq!(app.search_state.phase, SearchPhase::Input);
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('o')));
+        assert_eq!(app.search_state.input, "o");
+        assert_eq!(app.search_state.matches.len(), 2);
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.search_state.phase, SearchPhase::Idle);
+        assert!(app.search_state.input.is_empty());
+        assert!(app.search_state.matches.is_empty());
+    }
+
+    #[test]
+    fn backspace_edits_pattern_in_input_mode() {
+        let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        type_search(&mut app, "one");
+        assert_eq!(app.search_state.matches, vec![0]);
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Backspace));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Backspace));
+        assert_eq!(app.search_state.input, "o");
+        assert_eq!(app.search_state.matches, vec![0, 1]);
+    }
+
+    #[test]
+    fn search_input_swallows_global_keys() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('q')));
+        assert!(!app.should_quit);
+        assert_eq!(app.search_state.input, "q");
+    }
+
+    #[test]
+    fn search_commit_jumps_to_first_match_after_current_selection() {
+        let mut app = App::new(&stub_catalog(vec![item("alpha"), item("beta")]));
+        type_search(&mut app, "alpha");
+        let action = app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert!(matches!(action, Some(AppAction::LoadDetail(_))));
+        assert_eq!(app.search_state.phase, SearchPhase::Idle);
+        assert_eq!(app.search_state.last_pattern.as_deref(), Some("alpha"));
+        assert_eq!(app.search_state.matches, vec![0]);
+        assert_eq!(app.search_state.current_match, Some(0));
+        assert_eq!(app.selected_index, Some(0));
+    }
+
+    #[test]
+    fn search_matches_metadata_fields_case_insensitively() {
+        let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        type_search(&mut app, "TWO");
+        assert_eq!(app.search_state.matches, vec![1]);
+
+        let action = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(action, Some(AppAction::LoadDetail(_))));
+        assert_eq!(app.selected_index, Some(1));
+        assert_eq!(app.search_state.current_match, Some(0));
+    }
+
+    #[test]
+    fn n_and_uppercase_n_stay_on_the_only_match() {
+        let mut app = App::new(&stub_catalog(vec![item("aaa"), item("bbb"), item("ccc")]));
+        type_search(&mut app, "bbb");
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        // starts at selected 0, first match after it is index 1
+        assert_eq!(app.selected_index, Some(1));
+        assert_eq!(app.search_state.current_match, Some(0));
+
+        // A single match wraps forward and backward onto itself.
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('n')));
+        assert_eq!(app.selected_index, Some(1));
+        assert_eq!(app.search_state.current_match, Some(0));
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('N')));
+        assert_eq!(app.selected_index, Some(1));
+        assert_eq!(app.search_state.current_match, Some(0));
+    }
+
+    #[test]
+    fn n_wraps_forward_and_n_wraps_backward() {
+        let mut app = App::new(&stub_catalog(vec![item("one"), item("two"), item("three")]));
+        type_search(&mut app, "summary");
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.selected_index, Some(1));
+        assert_eq!(app.search_state.current_match, Some(1));
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('n')));
+        assert_eq!(app.selected_index, Some(2));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('n')));
+        assert_eq!(app.selected_index, Some(0));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('n')));
+        assert_eq!(app.selected_index, Some(1));
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('N')));
+        assert_eq!(app.selected_index, Some(0));
+    }
+
+    #[test]
+    fn empty_enter_repeats_last_pattern_as_next_match() {
+        let mut app = App::new(&stub_catalog(vec![item("apple"), item("banana")]));
+        type_search(&mut app, "apple");
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.selected_index, Some(0));
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        let action = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(action, Some(AppAction::LoadDetail(_))));
+        assert_eq!(app.selected_index, Some(0));
+    }
+
+    #[test]
+    fn esc_restores_the_previous_committed_search() {
+        let mut app = App::new(&stub_catalog(vec![item("alpha"), item("beta")]));
+        type_search(&mut app, "beta");
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.selected_index, Some(1));
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Esc));
+
+        assert_eq!(app.search_state.phase, SearchPhase::Idle);
+        assert_eq!(app.search_state.last_pattern.as_deref(), Some("beta"));
+        assert_eq!(app.search_state.matches, vec![1]);
+        assert_eq!(app.search_state.current_match, Some(0));
+    }
+
+    #[test]
+    fn catalog_refresh_recomputes_committed_matches_and_selection() {
+        let mut app = App::new(&stub_catalog(vec![item("keep-old"), item("other")]));
+        type_search(&mut app, "keep");
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        let request = app.reload_active_catalog();
+        app.apply_catalog_result(catalog_result(
+            request.request_id,
+            SessionEngine::Pi,
+            vec![item("other"), item("keep-new")],
+        ));
+
+        assert_eq!(app.search_state.matches, vec![1]);
+        assert_eq!(app.search_state.current_match, Some(0));
+        assert_eq!(app.selected_index, Some(1));
+        assert_eq!(app.tree_focus_node, Some(TreeFocusNode::SessionLeaf(1)));
+    }
+
+    #[test]
+    fn unmatched_pattern_keeps_input_mode_with_e486() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        type_search(&mut app, "zzz");
+        let action = app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert!(action.is_none());
+        assert_eq!(app.search_state.phase, SearchPhase::Input);
+        assert!(app.status_message.contains("E486: Pattern not found: zzz"));
+    }
+
+    #[test]
+    fn n_without_prior_search_reports_e35() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        let action = app.handle_key(KeyEvent::from(KeyCode::Char('n')));
+        assert!(action.is_none());
+        assert!(
+            app.status_message
+                .contains("E35: No previous search pattern")
+        );
+    }
+
+    #[test]
+    fn n_after_list_refresh_researches_with_last_pattern() {
+        let mut app = App::new(&stub_catalog(vec![item("keep-me"), item("other")]));
+        type_search(&mut app, "keep");
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.selected_index, Some(0));
+
+        let _ = app.apply_delete_result(DeleteResult::Success(DeleteSuccess {
+            deleted_path: PathBuf::from("/tmp/keep-me.jsonl"),
+            deleted_session_id: "keep-me".to_string(),
+        }));
+        assert!(app.search_state.matches.is_empty());
+        assert_eq!(app.search_state.last_pattern.as_deref(), Some("keep"));
+
+        let action = app.handle_key(KeyEvent::from(KeyCode::Char('n')));
+        assert!(action.is_none());
+        assert!(app.status_message.contains("E486: Pattern not found: keep"));
     }
 
     #[test]
@@ -2628,10 +3503,7 @@ mod tests {
         let mut broken = item("claude-broken");
         broken.cwd_path = "-".to_string();
         let mut app = App::new(&stub_catalog(vec![item("codex-one")]));
-        let request = match app.handle_key(KeyEvent::from(KeyCode::Tab)) {
-            Some(AppAction::LoadCatalog(request)) => request,
-            other => panic!("expected catalog load request, got {other:?}"),
-        };
+        let request = switch_to_engine(&mut app, SessionEngine::Claude);
         app.apply_catalog_result(catalog_result(
             request.request_id,
             SessionEngine::Claude,
@@ -2949,6 +3821,80 @@ mod tests {
             }
             other => panic!("expected viewport load request, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pi_and_opencode_launch_actions_keep_engine_and_recorded_cwd() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        app.active_engine = SessionEngine::Pi;
+
+        let resume = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        match resume {
+            Some(AppAction::Resume(request)) => {
+                assert_eq!(request.engine, SessionEngine::Pi);
+                assert_eq!(request.session_id, "one");
+                assert_eq!(request.cwd, PathBuf::from("/workspace/one"));
+            }
+            other => panic!("expected Pi resume action, got {other:?}"),
+        }
+
+        app.active_engine = SessionEngine::OpenCode;
+        let new_session = app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        match new_session {
+            Some(AppAction::NewSession(request)) => {
+                assert_eq!(request.engine, SessionEngine::OpenCode);
+                assert_eq!(request.cwd, PathBuf::from("/workspace/one"));
+            }
+            other => panic!("expected OpenCode new-session action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_session_success_refresh_clears_context_when_catalog_applies() {
+        let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        app.active_engine = SessionEngine::Pi;
+        app.selected_index = Some(1);
+        app.detail_state = SessionDetailState::Ready(ready_viewport());
+        app.resume_engine = Some(SessionEngine::Pi);
+
+        let request = app
+            .apply_new_session_result(Ok(()))
+            .unwrap_or_else(|| panic!("successful new session must refresh catalog"));
+        assert_eq!(request.engine, SessionEngine::Pi);
+        assert_eq!(app.selected_index, Some(1));
+        assert_eq!(
+            app.detail_state,
+            SessionDetailState::Ready(ready_viewport())
+        );
+
+        app.apply_catalog_result(catalog_result(
+            request.request_id,
+            request.engine,
+            vec![item("fresh")],
+        ));
+        assert_eq!(app.selected_index, None);
+        assert_eq!(app.detail_state, SessionDetailState::Idle);
+        assert_eq!(app.session_list[0].session_id, "fresh");
+    }
+
+    #[test]
+    fn new_session_failure_preserves_selection_and_detail_context() {
+        let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        app.active_engine = SessionEngine::OpenCode;
+        app.selected_index = Some(1);
+        app.detail_state = SessionDetailState::Ready(ready_viewport());
+        app.resume_engine = Some(SessionEngine::OpenCode);
+
+        assert!(
+            app.apply_new_session_result(Err("opencode failed".to_string()))
+                .is_none()
+        );
+        assert_eq!(app.selected_index, Some(1));
+        assert_eq!(
+            app.detail_state,
+            SessionDetailState::Ready(ready_viewport())
+        );
+        assert_eq!(app.resume_state, ResumeState::Error);
     }
 
     #[test]
