@@ -1,0 +1,19 @@
+task_id: implementer-mu9imryo-0w88l
+change_id: repair-phase1-system-spec-preservation
+role: implementer
+target_spec: tui-interaction
+adapter: manual
+lease_id: lease-mu9imryo-no5vr
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/tui-interaction.md
+allowed_paths:
+  - src/**
+  - tests/**
+  - .specflow/changes/repair-phase1-system-spec-preservation/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden
