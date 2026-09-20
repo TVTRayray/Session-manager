@@ -4,75 +4,50 @@
 
 ### Requirement: Navigate engines and session trees
 
-The TUI MUST start in Pi and cycle Pi, OpenCode, Codex, and Claude with Tab/Shift+Tab, requesting the selected engine's catalog and clearing stale selection/detail/delete/search context. Arrow keys or `j`/`k` MUST move through visible recursive tree rows; Left/Right and Space MUST collapse or expand groups and parent sessions. Child sessions MUST appear beneath their unique parent with Agent labels; unresolved or cyclic relationships MUST remain visible as detached roots. The current branch starts in Codex, cycles only Codex/Claude, and has no parent/Agent tree. Evidence: `f81c1275036b1b2d8946dfee93505bb464b58f57:src/app.rs` hierarchy and engine tests and `src/tui.rs` tree rendering tests.
+The TUI MUST start in the engine provided by `SessionEngine::default_engine()` (Pi) and cycle engines dynamically using `SessionEngine::tab_order()` with Tab/Shift+Tab, requesting the selected engine's catalog and clearing stale selection/detail/delete/search context. Engine tabs MUST be rendered dynamically by iterating `SessionEngine::tab_order()`. Arrow keys or `j`/`k` MUST move through visible recursive tree rows; Left/Right and Space MUST collapse or expand groups and parent sessions. Child sessions MUST appear beneath their unique parent with Agent labels. Favorite sessions MUST prepend a star icon (`★`) to their summary, and sessions with tags MUST append muted tag badges (`#tag`) to the summary.
 
-#### Scenario: Start with Pi active
+#### Scenario: Start with default engine dynamically
 
 - **GIVEN** Sessions Manager starts without a persisted engine override
 - **WHEN** the App and TUI initialize
-- **THEN** Pi is the active engine and the first catalog request targets Pi
-- **EVIDENCE** `f81c127...:src/app.rs::default_startup_enters_pi_tab`
-- **BASELINE GAP** current startup enters Codex and requests the Codex catalog
+- **THEN** the active engine is initialized from `SessionEngine::default_engine()`, and the header tab bar is rendered from `SessionEngine::tab_order()` without hard-coded variant arrays
+- **EVIDENCE** `src/app.rs::App::new` and `src/tui.rs::render_header_line`
 
-#### Scenario: Cycle through four engines
+#### Scenario: Render favorite star and tag badges on session row
 
-- **GIVEN** the TUI has started in Pi
-- **WHEN** the user repeatedly presses Tab and Shift+Tab
-- **THEN** the active engine follows Pi, OpenCode, Codex, Claude with wraparound, each transition requests that engine's catalog, and prior-engine data is not presented as current
-- **EVIDENCE** `f81c127...:src/app.rs::default_startup_enters_pi_tab` and `tab_cycles_through_codex_as_third_engine`
-- **BASELINE GAP** current startup and cycle contain only Codex/Claude
+- **GIVEN** a session is marked as favorite (`is_favorite = true`) and has tags `["bug", "urgent"]`
+- **WHEN** the session tree node is rendered
+- **THEN** `★` is prepended to the title/summary area, and `#bug #urgent` is appended in muted text, with tags truncated cleanly if terminal width is constrained
+- **EVIDENCE** `src/tui.rs::session_node_text`
 
-#### Scenario: Navigate a recursive Agent tree
+#### Scenario: Exclude subagent child nodes from favorite and tag badges
 
-- **GIVEN** catalog metadata contains a main session, child Agent, and grandchild Agent
-- **WHEN** the group and parent nodes are expanded and the user navigates visible rows
-- **THEN** descendants appear recursively under the main session with Agent labels and can be selected without launching a group or parent-toggle action accidentally
-- **EVIDENCE** `f81c127...:src/app.rs::hierarchy_nests_descendants_under_the_root_group` and `src/tui.rs::render_session_tree_uses_group_mode_name_and_subagent_hierarchy`
-- **BASELINE GAP** current tree has group headers and flat leaves only
-
-#### Scenario: Keep invalid relationships navigable
-
-- **GIVEN** relationship metadata contains a missing parent, cycle, or duplicate parent ID
-- **WHEN** the tree is built
-- **THEN** affected sessions remain visible as detached roots and traversal terminates without arbitrary attachment
-- **EVIDENCE** `f81c127...:src/app.rs` detached/cycle/duplicate-parent tests
-- **BASELINE GAP** current branch has no relationship resolver or detached state
-
-#### Scenario: Select a hidden search descendant
-
-- **GIVEN** a search match is inside collapsed group and parent nodes
-- **WHEN** search navigation selects the match
-- **THEN** all ancestors open, the descendant becomes the visible list selection, and its detail is requested
-- **EVIDENCE** `f81c127...:src/app.rs` match selection uses session tree paths and opens ancestors
-- **BASELINE GAP** current branch has neither hierarchy-aware selection nor search
+- **GIVEN** a child agent session node (`↳ Subagent`) is displayed beneath a main session
+- **WHEN** the tree row is rendered
+- **THEN** the child node does not display separate favorite stars or tags, keeping the subagent row layout uncluttered
 
 ### Requirement: Support project and time grouping
 
-The TUI MUST toggle existing project/time grouping with `g`, preserve unambiguous labels, and group each recursive parent/child tree under its root main session's group. Group headers MUST show root and subagent counts, and group actions MUST include recursive descendants. The current branch groups flat leaves and has no subagent counts. Evidence: `f81c1275036b1b2d8946dfee93505bb464b58f57:src/app.rs` grouped hierarchy and recursive delete tests plus `src/tui.rs` group rendering.
+The TUI MUST toggle grouping modes using `g` through a three-way cycle: `By Time → By Project → By Tag → By Time`. In `By Tag` mode, sessions MUST be grouped under tag headers prefixed with `🏷️`. Uncategorized sessions without tags MUST appear under a dedicated `未分类` header. Multi-tagged sessions MUST appear under every matching tag group. Group headers MUST show root and subagent counts, and group actions MUST include recursive descendants.
 
-#### Scenario: Keep descendants with the root group
+#### Scenario: Cycle through three grouping modes with g
 
-- **GIVEN** a child Agent's own cwd label differs from its main session's project group
-- **WHEN** project grouping is rendered
-- **THEN** the child remains recursively beneath the main session in the main session's group rather than splitting into another group
-- **EVIDENCE** `f81c127...:src/app.rs::hierarchy_nests_descendants_under_the_root_group`
-- **BASELINE GAP** current flat grouping has no parent root from which to inherit group placement
-
-#### Scenario: Toggle grouping without losing a nested selection
-
-- **GIVEN** a descendant session is selected in one grouping mode
+- **GIVEN** the TUI is currently in `By Project` grouping mode
 - **WHEN** the user presses `g`
-- **THEN** the alternate grouping rebuilds the hierarchy, opens the selected session's ancestors, and keeps that session selected when still present
-- **EVIDENCE** `f81c127...:src/app.rs` tree path synchronization across grouped nodes
-- **BASELINE GAP** current selection synchronization handles only flat session leaves
+- **THEN** the grouping mode switches to `By Tag`, and pressing `g` again returns to `By Time`
+- **EVIDENCE** `src/app.rs::GroupMode::toggle`
 
-#### Scenario: Include descendants in a group action
+#### Scenario: Group sessions by tags including multi-tag placement
 
-- **GIVEN** a group contains main sessions with multiple descendant levels
-- **WHEN** the user requests group deletion and reviews its confirmation
-- **THEN** the target count includes every main and descendant session exactly once
-- **EVIDENCE** `f81c127...:src/app.rs::nested_selection_opens_ancestors_and_group_delete_includes_descendants`
-- **BASELINE GAP** current group collection cannot recurse through child sessions
+- **GIVEN** Session A has tags `["bug", "refactor"]`, Session B has tag `["bug"]`, and Session C has no tags
+- **WHEN** `By Tag` grouping is rendered
+- **THEN** Session A appears under both `🏷️ bug` and `🏷️ refactor` headers, Session B appears under `🏷️ bug`, and Session C appears under `🏷️ 未分类`
+
+#### Scenario: Preserve nested selection when toggling to By Tag
+
+- **GIVEN** a session is selected in `By Time` mode
+- **WHEN** the user toggles to `By Tag` mode
+- **THEN** ancestors in the tag grouping tree are expanded and the selected session remains focused if present
 
 ### Requirement: Operate list and detail panels by keyboard and mouse
 
@@ -209,3 +184,75 @@ When a group header is selected, the TUI MUST show a Group Summary containing to
 - **THEN** Sessions, Main sessions, and Subagents show 0 and Last Active shows `-`, with no values retained from a previous group
 - **EVIDENCE** `f81c127...:src/tui.rs::render_header_summary_badge` zero-value branch
 - **BASELINE GAP** current summary has no Main/Subagent fields or recursive empty state
+
+### Requirement: Toggle favorite status with keyboard shortcut
+
+The TUI MUST allow the user to toggle the favorite state of the currently selected session leaf node by pressing `f`. The change MUST be immediately persisted to the state store and reflected on the screen without requiring a full reload. Pressing `f` on a group header MUST have no effect.
+
+#### Scenario: Toggle favorite on a selected session
+
+- **GIVEN** a session leaf is selected and currently has `is_favorite = false`
+- **WHEN** the user presses `f`
+- **THEN** `is_favorite` becomes `true`, the `★` icon immediately appears in the list row, the change is saved to `state.db`, and status is preserved across application restarts
+
+#### Scenario: Ignore favorite toggle on group headers
+
+- **GIVEN** the cursor focus is currently on a group header node
+- **WHEN** the user presses `f`
+- **THEN** no state mutation occurs, no error is triggered, and the UI remains unchanged
+
+### Requirement: Edit tags via dedicated modal dialog
+
+The TUI MUST provide a modal dialog triggered by pressing `t` on a selected session leaf to edit its tag collection. The modal MUST display the session identifier, an input field prepopulated with existing comma-separated tags, a trailing cursor indicator, and a button group containing `Cancel` and `Save`. Pressing `t` on a group header MUST have no effect. The modal MUST be mutually exclusive with other overlays (e.g., delete modal, help modal).
+
+#### Scenario: Open tag modal with prepopulated tags
+
+- **GIVEN** a session has tags `["bug", "urgent"]` and is selected
+- **WHEN** the user presses `t`
+- **THEN** the tag modal opens centered on screen, the input field contains `"bug, urgent"`, and the cursor is placed at the end of the text
+
+#### Scenario: Navigate and edit inside tag modal
+
+- **GIVEN** the tag modal is open
+- **WHEN** the user types characters, presses `Backspace`, or uses `Tab`/arrow keys to switch focus between the input field, `Cancel`, and `Save` buttons
+- **THEN** input text updates accordingly and focused buttons display bracketed highlights (`[ Cancel ]` / `[ Save ]`)
+
+#### Scenario: Save tags and dismiss modal
+
+- **GIVEN** the tag modal contains edited tags `"bug, refactor"`
+- **WHEN** the user submits with `Enter` while focused on the input field or `Save` button
+- **THEN** tags are normalized, committed to `state.db`, the session row updates immediately, the modal closes, and focus returns to the selected session in the list
+
+#### Scenario: Cancel tag editing with Esc
+
+- **GIVEN** the tag modal is open with unsaved edits
+- **WHEN** the user presses `Esc` or activates `Cancel`
+- **THEN** the modal closes without persisting changes, and list focus is restored
+
+#### Scenario: Clear all tags when submitted empty
+
+- **GIVEN** the tag modal input is cleared to empty whitespace
+- **WHEN** the user submits with `Save` or `Enter`
+- **THEN** all tags for the session are removed from memory and storage, tag badges disappear from the list row, and the modal closes
+
+### Requirement: Filter sessions using search prefixes
+
+The TUI's interactive search (triggered by `/`) MUST support prefix filtering syntax: `fav:` to match only favorited sessions, and `tag:<pattern>` to match sessions having at least one tag containing the pattern (case-insensitive). Prefixes MUST compose with ordinary free-text keywords (e.g., `tag:bug login`). Unrecognized or malformed prefixes (such as `tag:` with no pattern) MUST degrade gracefully to literal text matching without error.
+
+#### Scenario: Filter exclusively by favorite prefix
+
+- **GIVEN** the session list contains both favorited and non-favorited sessions
+- **WHEN** the user types `fav:` into the search prompt
+- **THEN** only favorited sessions match, and the live search match count reflects the number of matching favorite sessions
+
+#### Scenario: Filter by tag prefix and text keyword combination
+
+- **GIVEN** sessions with various tags and summaries
+- **WHEN** the user types `tag:bug login`
+- **THEN** only sessions that have a tag containing `"bug"` AND whose searchable metadata contains `"login"` are matched
+
+#### Scenario: Handle empty tag prefix gracefully
+
+- **GIVEN** the user types `tag:` without specifying a tag name
+- **WHEN** the search matcher processes the query
+- **THEN** it treats `"tag:"` as an ordinary literal text search term and does not throw an error or crash

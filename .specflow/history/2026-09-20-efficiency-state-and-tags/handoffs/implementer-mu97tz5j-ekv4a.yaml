@@ -1,0 +1,19 @@
+task_id: implementer-mu97tz5j-ekv4a
+change_id: efficiency-state-and-tags
+role: implementer
+target_spec: persisted-state
+adapter: manual
+lease_id: lease-mu97tz5j-53o2e
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/persisted-state.md
+allowed_paths:
+  - src/**
+  - tests/**
+  - .specflow/changes/efficiency-state-and-tags/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden

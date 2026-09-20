@@ -124,37 +124,46 @@ fn probe_catalog_result(request: CatalogRequest) -> CatalogLoadResult {
 }
 
 fn probe_item_for(engine: SessionEngine) -> SessionListItem {
-    match engine {
-        SessionEngine::Codex | SessionEngine::Pi | SessionEngine::OpenCode => SessionListItem {
-            session_id: "probe".to_string(),
-            name: "inspect current session layout".to_string(),
-            summary: "inspect current session layout".to_string(),
-            parent_session_id: None,
-            agent_name: None,
-            display_time: "2026-04-17 12:00".to_string(),
-            cwd_tail: "probe".to_string(),
-            cwd_group_label: "workspace/probe".to_string(),
-            cwd_path: "/workspace/probe".to_string(),
-            abs_path: PathBuf::from("/tmp/probe.jsonl"),
-            is_loadable: true,
-            modified_at: SystemTime::now(),
-            file_health: FileHealth::Healthy,
-        },
-        SessionEngine::Claude => SessionListItem {
-            session_id: "probe-claude".to_string(),
-            name: "resume claude conversation".to_string(),
-            summary: "resume claude conversation".to_string(),
-            parent_session_id: None,
-            agent_name: None,
-            display_time: "2026-04-17 12:30".to_string(),
-            cwd_tail: "probe-claude".to_string(),
-            cwd_group_label: "workspace/probe-claude".to_string(),
-            cwd_path: "/workspace/probe-claude".to_string(),
-            abs_path: PathBuf::from("/tmp/probe-claude.jsonl"),
-            is_loadable: true,
-            modified_at: SystemTime::now(),
-            file_health: FileHealth::Healthy,
-        },
+    let key = engine.storage_key();
+    if engine == SessionEngine::default_engine() {
+        make_probe_item(
+            "probe",
+            "inspect current session layout",
+            "2026-04-17 12:00",
+            "probe",
+        )
+    } else {
+        make_probe_item(
+            &format!("probe-{key}"),
+            &format!("resume {key} conversation"),
+            "2026-04-17 12:30",
+            &format!("probe-{key}"),
+        )
+    }
+}
+
+fn make_probe_item(
+    session_id: &str,
+    name: &str,
+    display_time: &str,
+    workspace: &str,
+) -> SessionListItem {
+    SessionListItem {
+        session_id: session_id.to_string(),
+        name: name.to_string(),
+        summary: name.to_string(),
+        parent_session_id: None,
+        agent_name: None,
+        display_time: display_time.to_string(),
+        cwd_tail: workspace.to_string(),
+        cwd_group_label: format!("workspace/{workspace}"),
+        cwd_path: format!("/workspace/{workspace}"),
+        abs_path: PathBuf::from(format!("/tmp/{session_id}.jsonl")),
+        is_loadable: true,
+        modified_at: SystemTime::now(),
+        file_health: FileHealth::Healthy,
+        is_favorite: false,
+        tags: Vec::new(),
     }
 }
 
@@ -163,7 +172,7 @@ struct StubCatalog;
 
 impl SessionCatalogReader for StubCatalog {
     fn load_sessions(&self) -> Result<CatalogLoad, String> {
-        let item = probe_item_for(SessionEngine::Pi);
+        let item = probe_item_for(SessionEngine::default_engine());
         Ok(CatalogLoad {
             items: vec![item.clone()],
             warnings: Vec::new(),

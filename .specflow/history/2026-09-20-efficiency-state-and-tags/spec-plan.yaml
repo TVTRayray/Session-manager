@@ -1,0 +1,13 @@
+specs:
+  - id: session-catalog
+    title: Engine boundary governance and catalog metadata enrichment
+    depends_on: []
+    delta_file: specs/session-catalog.md
+  - id: persisted-state
+    title: Local SQLite state storage and tag metadata lifecycle
+    depends_on: [session-catalog]
+    delta_file: specs/persisted-state.md
+  - id: tui-interaction
+    title: Favorites, tag modal, search prefix filtering, and By Tag grouping
+    depends_on: [session-catalog, persisted-state]
+    delta_file: specs/tui-interaction.md

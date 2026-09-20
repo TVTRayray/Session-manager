@@ -1,0 +1,19 @@
+task_id: implementer-mu985g4h-cwcot
+change_id: efficiency-state-and-tags
+role: implementer
+target_spec: tui-interaction
+adapter: manual
+lease_id: lease-mu985g4h-907vh
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/tui-interaction.md
+allowed_paths:
+  - src/**
+  - tests/**
+  - .specflow/changes/efficiency-state-and-tags/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden

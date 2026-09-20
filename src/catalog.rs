@@ -18,6 +18,46 @@ pub enum SessionEngine {
 }
 
 impl SessionEngine {
+    pub fn default_engine() -> Self {
+        Self::Pi
+    }
+
+    pub fn tab_order() -> &'static [Self] {
+        &[Self::Pi, Self::OpenCode, Self::Codex, Self::Claude]
+    }
+
+    pub fn storage_key(self) -> &'static str {
+        match self {
+            Self::Pi => "pi",
+            Self::OpenCode => "opencode",
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+        }
+    }
+
+    pub fn from_storage_key(key: &str) -> Option<Self> {
+        match key {
+            "pi" => Some(Self::Pi),
+            "opencode" => Some(Self::OpenCode),
+            "codex" => Some(Self::Codex),
+            "claude" => Some(Self::Claude),
+            _ => None,
+        }
+    }
+
+    pub fn supports_resume(self) -> bool {
+        match self {
+            Self::Pi | Self::OpenCode | Self::Codex | Self::Claude => true,
+        }
+    }
+
+    pub fn supports_cli_delete(self) -> bool {
+        match self {
+            Self::Pi | Self::Codex | Self::Claude => true,
+            Self::OpenCode => false,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Pi => "Pi",
@@ -83,6 +123,8 @@ pub struct SessionListItem {
     pub is_loadable: bool,
     pub modified_at: SystemTime,
     pub file_health: FileHealth,
+    pub is_favorite: bool,
+    pub tags: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -225,6 +267,8 @@ pub fn scan_opencode_db(db_path: &Path) -> Result<CatalogLoad, String> {
             is_loadable: true,
             modified_at,
             file_health: FileHealth::Healthy,
+            is_favorite: false,
+            tags: Vec::new(),
         });
     }
 
@@ -520,6 +564,8 @@ fn walk_session_dir(
                         is_loadable: false,
                         modified_at: SystemTime::UNIX_EPOCH,
                         file_health: FileHealth::Unreadable,
+                        is_favorite: false,
+                        tags: Vec::new(),
                     });
                 }
                 continue;
@@ -611,6 +657,8 @@ fn walk_session_dir(
             is_loadable: file_health != FileHealth::Unreadable,
             modified_at,
             file_health,
+            is_favorite: false,
+            tags: Vec::new(),
         });
     }
 }
@@ -1501,5 +1549,141 @@ mod tests {
         assert!(load.items[0].abs_path.ends_with("valid.jsonl"));
         assert_eq!(load.warnings.len(), 1);
         assert!(load.warnings[0].contains("Unable to access session file"));
+    }
+
+    #[test]
+    fn storage_key_round_trip_for_all_variants() {
+        for &engine in SessionEngine::tab_order() {
+            let key = engine.storage_key();
+            assert_eq!(SessionEngine::from_storage_key(key), Some(engine));
+        }
+        assert_eq!(
+            SessionEngine::from_storage_key("pi"),
+            Some(SessionEngine::Pi)
+        );
+        assert_eq!(
+            SessionEngine::from_storage_key("opencode"),
+            Some(SessionEngine::OpenCode)
+        );
+        assert_eq!(
+            SessionEngine::from_storage_key("codex"),
+            Some(SessionEngine::Codex)
+        );
+        assert_eq!(
+            SessionEngine::from_storage_key("claude"),
+            Some(SessionEngine::Claude)
+        );
+    }
+
+    #[test]
+    fn from_storage_key_returns_none_for_unknown_keys() {
+        assert_eq!(SessionEngine::from_storage_key(""), None);
+        assert_eq!(SessionEngine::from_storage_key("unknown"), None);
+        assert_eq!(SessionEngine::from_storage_key("PI"), None);
+        assert_eq!(SessionEngine::from_storage_key("Claude"), None);
+        assert_eq!(SessionEngine::from_storage_key("windsurf"), None);
+        assert_eq!(SessionEngine::from_storage_key("cursor"), None);
+    }
+
+    #[test]
+    fn storage_key_decoupled_from_display_label() {
+        assert_eq!(SessionEngine::Pi.storage_key(), "pi");
+        assert_eq!(SessionEngine::OpenCode.storage_key(), "opencode");
+        assert_eq!(SessionEngine::Codex.storage_key(), "codex");
+        assert_eq!(SessionEngine::Claude.storage_key(), "claude");
+
+        for &engine in SessionEngine::tab_order() {
+            let label = engine.label();
+            let key = engine.storage_key();
+            assert_ne!(label, key);
+            assert_eq!(key, key.to_ascii_lowercase());
+        }
+    }
+
+    #[test]
+    fn engine_centralized_defaults_and_capabilities() {
+        assert_eq!(SessionEngine::default_engine(), SessionEngine::Pi);
+        assert_eq!(
+            SessionEngine::tab_order(),
+            &[
+                SessionEngine::Pi,
+                SessionEngine::OpenCode,
+                SessionEngine::Codex,
+                SessionEngine::Claude
+            ]
+        );
+        for &engine in SessionEngine::tab_order() {
+            assert!(engine.supports_resume());
+        }
+        assert!(SessionEngine::Pi.supports_cli_delete());
+        assert!(!SessionEngine::OpenCode.supports_cli_delete());
+        assert!(SessionEngine::Codex.supports_cli_delete());
+        assert!(SessionEngine::Claude.supports_cli_delete());
+    }
+
+    #[test]
+    fn session_list_item_carries_default_user_state() {
+        let dir = must(tempdir());
+        must(fs::write(
+            dir.path().join("test.jsonl"),
+            r#"{"type":"session_meta","payload":{"id":"s1","cwd":"/demo"}}"#,
+        ));
+        let load = must(scan_session_dir(dir.path()));
+        assert_eq!(load.items.len(), 1);
+        assert!(!load.items[0].is_favorite);
+        assert!(load.items[0].tags.is_empty());
+    }
+
+    #[test]
+    fn consumer_layers_do_not_hardcode_session_engine_variants() {
+        let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let adapter_files = ["catalog.rs", "detail.rs", "resume.rs", "delete.rs"];
+        let variant_patterns = [
+            "SessionEngine::Pi",
+            "SessionEngine::OpenCode",
+            "SessionEngine::Codex",
+            "SessionEngine::Claude",
+        ];
+
+        fn visit_rs_files(dir: &Path, files: &mut Vec<PathBuf>) {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        visit_rs_files(&path, files);
+                    } else if path.extension() == Some(OsStr::new("rs")) {
+                        files.push(path);
+                    }
+                }
+            }
+        }
+
+        let mut rs_files = Vec::new();
+        visit_rs_files(&src_dir, &mut rs_files);
+
+        for path in rs_files {
+            let file_name = path.file_name().and_then(OsStr::to_str).unwrap_or("");
+            if adapter_files.contains(&file_name) {
+                continue;
+            }
+
+            let content = must(fs::read_to_string(&path));
+            let non_test_content = match content.find("#[cfg(test)]") {
+                Some(idx) => &content[..idx],
+                None => match content.find("mod tests {") {
+                    Some(idx) => &content[..idx],
+                    None => &content,
+                },
+            };
+
+            for pattern in &variant_patterns {
+                assert!(
+                    !non_test_content.contains(pattern),
+                    "Found hardcoded engine variant '{}' in consumer file: {}",
+                    pattern,
+                    path.display()
+                );
+            }
+        }
     }
 }

@@ -1,0 +1,18 @@
+task_id: reviewer-mu97o7xe-mkpi0
+change_id: efficiency-state-and-tags
+role: reviewer
+target_spec: session-catalog
+adapter: manual
+lease_id: lease-mu97o7xe-k6egk
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/session-catalog.md
+allowed_paths:
+  - .specflow/changes/efficiency-state-and-tags/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

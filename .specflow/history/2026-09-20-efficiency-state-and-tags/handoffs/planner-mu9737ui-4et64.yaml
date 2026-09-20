@@ -1,0 +1,14 @@
+task_id: planner-mu9737ui-4et64
+change_id: efficiency-state-and-tags
+role: planner
+adapter: manual
+lease_id: lease-mu9737ui-vyr7m
+inputs:
+  - proposal.md
+allowed_paths:
+  - .specflow/changes/efficiency-state-and-tags/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

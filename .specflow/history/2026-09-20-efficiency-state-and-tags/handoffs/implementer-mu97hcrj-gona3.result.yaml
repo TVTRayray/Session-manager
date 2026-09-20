@@ -1,0 +1,31 @@
+task_id: implementer-mu97hcrj-gona3
+lease_id: lease-mu97hcrj-5gn33
+outcome: completed
+summary: >-
+  session-catalog 引擎治理与元数据扩充完成。在 SessionEngine 实现了集中式方法
+  (storage_key, from_storage_key, default_engine, tab_order, supports_resume, supports_cli_delete)，
+  并在 SessionListItem 扩充了 is_favorite 与 tags 字段；消费层 (app.rs, tui.rs, shortcut_probe.rs)
+  消除了具体变体硬编码，完全改用通用集中方法；新增了 round-trip、未知 key、展示标签解耦、集中方法能力与消费层白名单隔离自动化测试。
+  所有既有测试保持 100% 通过，无跨界修改。
+evidence:
+  changed_files:
+    - src/catalog.rs
+    - src/app.rs
+    - src/tui.rs
+    - src/bin/shortcut_probe.rs
+    - .specflow/changes/efficiency-state-and-tags/tasks.md
+    - .specflow/changes/efficiency-state-and-tags/handoffs/implementer-mu97hcrj-gona3.result.yaml
+  test_results:
+    - "cargo fmt --check: passed (0 diff)"
+    - "cargo check --all-targets: passed (0 errors, 0 warnings)"
+    - "cargo test --lib catalog::tests: 25 passed, 0 failed"
+    - "cargo test: 190 library + 3 binary + 7 pty integration tests passed, 0 failed"
+    - "git diff --check: passed"
+  security_checks:
+    - "Storage keys use immutable fixed lowercase identifiers ('pi', 'opencode', 'codex', 'claude')"
+    - "from_storage_key safely parses known engines and returns None on unknown keys"
+    - "SessionListItem user state fields default to unassigned (is_favorite=false, tags=[])"
+    - "Engine branching is strictly quarantined to the adapter whitelist (catalog.rs, detail.rs, resume.rs, delete.rs)"
+    - "No out-of-scope files or future features (StateStore, modal, shortcuts, Cargo.toml) modified"
+unresolved_issues: []
+requested_transition: reviewing
