@@ -573,6 +573,11 @@ fn walk_session_dir(
         };
 
         if metadata.is_dir() {
+            // SoL-Pi stores observation ledgers under the session root, but they are
+            // extension state rather than resumable Pi sessions.
+            if path.file_name() == Some(OsStr::new("sol-pi")) {
+                continue;
+            }
             walk_session_dir(
                 &validated_path,
                 canonical_root,
@@ -1093,6 +1098,28 @@ mod tests {
                 .iter()
                 .any(|item| item.abs_path.ends_with("nested.jsonl"))
         );
+    }
+
+    #[test]
+    fn skips_sol_pi_internal_ledgers() {
+        let dir = must(tempdir());
+        let internal = dir
+            .path()
+            .join("project")
+            .join("sol-pi")
+            .join("session-id")
+            .join("observation-pack");
+        must(fs::create_dir_all(&internal));
+        must(fs::write(internal.join("ledger.jsonl"), "{}\n"));
+        must(fs::write(
+            dir.path().join("session.jsonl"),
+            r#"{"type":"session","id":"s1","cwd":"/workspace/demo"}"#,
+        ));
+
+        let load = must(scan_session_dir(dir.path()));
+        assert_eq!(load.items.len(), 1);
+        assert!(load.items[0].abs_path.ends_with("session.jsonl"));
+        assert!(load.warnings.is_empty());
     }
 
     #[test]
