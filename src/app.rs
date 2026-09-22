@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
@@ -10,10 +11,15 @@ use crate::catalog::{
     CatalogLoad, EngineCatalogReader, FileHealth, SessionCatalogReader, SessionEngine,
     SessionListItem,
 };
+use crate::config::{DisplayConfig, ExportConfig};
 use crate::delete::DeleteRequest;
-use crate::detail::{DetailViewport, SessionDetailLoader};
+use crate::detail::{DetailViewport, SessionDetailLoader, load_detail_for_engine};
+use crate::export::{export_group_sessions, export_single_session};
 use crate::resume::{NewSessionRequest, ResumeSessionRequest};
-use crate::state::{StateError, StateStore, normalize_tags};
+use crate::search::{
+    IndexProgress, IndexingCoordinator, SearchHit, SearchService, compute_target_scroll_offset,
+};
+use crate::state::{SessionUserMeta, StateError, StateStore, normalize_tags};
 
 const DEFAULT_VIEWPORT_HEIGHT: usize = 16;
 const PATH_HINT_TTL_TICKS: u64 = 20;
@@ -227,6 +233,63 @@ pub struct TagModalState {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExportModalFocus {
+    Cancel,
+    Export,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExportModalState {
+    pub group_identifier: String,
+    pub group_label: String,
+    pub session_count: usize,
+    pub focus: ExportModalFocus,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchOverlayState {
+    pub query: String,
+    pub cursor_position: usize,
+    pub is_loading: bool,
+    pub error_message: Option<String>,
+    pub results: Vec<SearchHit>,
+    pub selected_index: usize,
+    pub scroll_offset: usize,
+    pub debounce_ticks: u8,
+    pub last_searched_query: String,
+}
+
+impl Default for SearchOverlayState {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            cursor_position: 0,
+            is_loading: false,
+            error_message: None,
+            results: Vec::new(),
+            selected_index: 0,
+            scroll_offset: 0,
+            debounce_ticks: 0,
+            last_searched_query: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectDashboardState {
+    pub project_path: String,
+    pub project_name: String,
+    pub engine_counts: Vec<(SessionEngine, usize)>,
+    pub total_sessions: usize,
+    pub favorite_count: usize,
+    pub top_tags: Vec<(String, usize)>,
+    pub last_active: String,
+    pub content_scale: Option<(usize, usize)>,
+    pub recent_sessions: Vec<(SessionEngine, SessionListItem)>,
+    pub selected_index: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionTreeNode {
     pub identifier: String,
     pub session_index: usize,
@@ -261,6 +324,7 @@ pub enum TreeFocusNode {
 pub enum RightPanelMode {
     SessionDetail,
     GroupSummary,
+    ProjectDashboard,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -312,7 +376,7 @@ pub struct App {
     pub show_help_modal: bool,
     pub delete_modal_state: Option<DeleteModalState>,
     pub tag_modal_state: Option<TagModalState>,
-    pub state_store: StateStore,
+    pub state_store: Arc<StateStore>,
     pub pending_delete_target: Option<DeleteRequest>,
     pub pending_bulk_delete_target: Option<BulkDeleteRequest>,
     pub delete_result_message: Option<String>,
@@ -338,24 +402,41 @@ pub struct App {
     pub engine_status_messages: HashMap<SessionEngine, String>,
     pub search_state: SearchState,
     pub search_notice: Option<SearchNotice>,
+    pub export_modal_state: Option<ExportModalState>,
+    pub search_overlay_state: Option<SearchOverlayState>,
+    pub project_dashboard_state: Option<ProjectDashboardState>,
+    pub export_config: ExportConfig,
+    pub display_config: DisplayConfig,
+    pub indexing_coordinator: IndexingCoordinator,
+    pub index_progress: Option<IndexProgress>,
+    pub catalog_cache: HashMap<SessionEngine, Vec<SessionListItem>>,
+    pub pending_search_jump: Option<(String, usize)>,
+    pub pending_action: Option<AppAction>,
     tick_count: u64,
     pending_full_redraw: bool,
-    terminal_size: TerminalSizeState,
+    pub terminal_size: TerminalSizeState,
     catalog_request_token: u64,
 }
 
 impl App {
     pub fn new<C: SessionCatalogReader>(catalog: &C) -> Self {
         #[cfg(test)]
-        let store = StateStore::open_in_memory();
+        let store = Arc::new(StateStore::open_in_memory());
         #[cfg(not(test))]
-        let store = StateStore::open();
-        Self::new_with_state_store(catalog, store)
+        let store = Arc::new(StateStore::open());
+        Self::new_with_arc_state_store(catalog, store)
     }
 
     pub fn new_with_state_store<C: SessionCatalogReader>(
         catalog: &C,
         state_store: StateStore,
+    ) -> Self {
+        Self::new_with_arc_state_store(catalog, Arc::new(state_store))
+    }
+
+    pub fn new_with_arc_state_store<C: SessionCatalogReader>(
+        catalog: &C,
+        state_store: Arc<StateStore>,
     ) -> Self {
         match catalog.load_sessions() {
             Ok(CatalogLoad {
@@ -387,7 +468,7 @@ impl App {
 
                 let mut app = Self {
                     active_engine: default_engine,
-                    session_list,
+                    session_list: session_list.clone(),
                     selected_index,
                     detail_state,
                     status_message: status_message.clone(),
@@ -395,7 +476,7 @@ impl App {
                     show_help_modal: false,
                     delete_modal_state: None,
                     tag_modal_state: None,
-                    state_store,
+                    state_store: Arc::clone(&state_store),
                     pending_delete_target: None,
                     pending_bulk_delete_target: None,
                     delete_result_message: None,
@@ -424,6 +505,16 @@ impl App {
                     engine_status_messages: HashMap::from([(default_engine, status_message)]),
                     search_state: SearchState::default(),
                     search_notice: None,
+                    export_modal_state: None,
+                    search_overlay_state: None,
+                    project_dashboard_state: None,
+                    export_config: crate::config::load_export_config(),
+                    display_config: crate::config::load_config(),
+                    indexing_coordinator: IndexingCoordinator::new(),
+                    index_progress: None,
+                    catalog_cache: HashMap::from([(default_engine, session_list)]),
+                    pending_search_jump: None,
+                    pending_action: None,
                     tick_count: 0,
                     pending_full_redraw: false,
                     terminal_size: default_terminal_size(),
@@ -432,6 +523,13 @@ impl App {
                 app.open_all_groups();
                 app.sync_tree_selection_from_selected_index();
                 app.refresh_header_summary();
+                if !app.session_list.is_empty() {
+                    app.indexing_coordinator.start_indexing_catalog(
+                        Arc::clone(&app.state_store),
+                        default_engine,
+                        &app.session_list,
+                    );
+                }
                 app
             }
             Err(err) => Self {
@@ -476,6 +574,16 @@ impl App {
                 )]),
                 search_state: SearchState::default(),
                 search_notice: None,
+                export_modal_state: None,
+                search_overlay_state: None,
+                project_dashboard_state: None,
+                export_config: crate::config::load_export_config(),
+                display_config: crate::config::load_config(),
+                indexing_coordinator: IndexingCoordinator::new(),
+                index_progress: None,
+                catalog_cache: HashMap::new(),
+                pending_search_jump: None,
+                pending_action: None,
                 tick_count: 0,
                 pending_full_redraw: false,
                 terminal_size: default_terminal_size(),
@@ -500,6 +608,40 @@ impl App {
         {
             self.clear_search_notice();
         }
+        if let Some(progress) = self.indexing_coordinator.latest_progress() {
+            self.index_progress = Some(progress);
+        }
+        if let Some(overlay) = &mut self.search_overlay_state {
+            if overlay.debounce_ticks > 0 {
+                overlay.debounce_ticks = overlay.debounce_ticks.saturating_sub(1);
+                if overlay.debounce_ticks == 0 && overlay.query != overlay.last_searched_query {
+                    overlay.last_searched_query = overlay.query.clone();
+                    overlay.is_loading = false;
+                    if overlay.query.trim().is_empty() {
+                        overlay.results.clear();
+                        overlay.error_message = None;
+                        overlay.selected_index = 0;
+                        overlay.scroll_offset = 0;
+                    } else {
+                        match SearchService::search(&self.state_store, &overlay.query) {
+                            Ok(results) => {
+                                overlay.results = results;
+                                overlay.error_message = None;
+                            }
+                            Err(_err) => {
+                                overlay.results.clear();
+                                overlay.error_message = Some(
+                                    "Search query failed. Please check state database or retry."
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        overlay.selected_index = 0;
+                        overlay.scroll_offset = 0;
+                    }
+                }
+            }
+        }
     }
 
     pub fn tick_count(&self) -> u64 {
@@ -516,6 +658,10 @@ impl App {
 
     pub fn consume_full_redraw(&mut self) -> bool {
         std::mem::take(&mut self.pending_full_redraw)
+    }
+
+    pub fn take_pending_action(&mut self) -> Option<AppAction> {
+        self.pending_action.take()
     }
 
     pub fn initial_catalog_request(&mut self) -> CatalogRequest {
@@ -576,6 +722,20 @@ impl App {
             self.selected_index = self.current_match_index();
             self.sync_tree_selection_from_selected_index();
         }
+        self.catalog_cache
+            .insert(result.engine, self.session_list.clone());
+        if !self.session_list.is_empty() {
+            self.indexing_coordinator.start_indexing_catalog(
+                Arc::clone(&self.state_store),
+                result.engine,
+                &self.session_list,
+            );
+        }
+        if let Some((session_id, block_index)) = self.pending_search_jump.take() {
+            if let Some(action) = self.execute_search_jump(&session_id, block_index) {
+                self.pending_action = Some(action);
+            }
+        }
         self.refresh_header_summary();
     }
 
@@ -586,20 +746,77 @@ impl App {
         if self.tag_modal_state.is_some() {
             return self.handle_tag_modal_key(event);
         }
+        if self.export_modal_state.is_some() {
+            return self.handle_export_modal_key(event);
+        }
+        if self.search_overlay_state.is_some() {
+            return self.handle_search_overlay_key(event);
+        }
 
         if self.show_help_modal {
             self.show_help_modal = false;
             return None;
         }
+
+        if self.right_panel_mode == RightPanelMode::ProjectDashboard {
+            match event.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('D') => {
+                    self.right_panel_mode = RightPanelMode::GroupSummary;
+                    self.project_dashboard_state = None;
+                    return None;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if let Some(state) = &mut self.project_dashboard_state {
+                        if !state.recent_sessions.is_empty()
+                            && state.selected_index + 1 < state.recent_sessions.len()
+                        {
+                            state.selected_index += 1;
+                        }
+                    }
+                    return None;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if let Some(state) = &mut self.project_dashboard_state {
+                        state.selected_index = state.selected_index.saturating_sub(1);
+                    }
+                    return None;
+                }
+                KeyCode::Enter => {
+                    return self.handle_dashboard_enter();
+                }
+                _ => {}
+            }
+        }
+
         if self.search_state.phase == SearchPhase::Input {
             return self.handle_search_input_key(event);
         }
         if event.code == KeyCode::Char('?') {
-            self.show_help_modal = true;
+            if !self.has_active_modal() {
+                self.show_help_modal = true;
+            }
             return None;
         }
         if event.code == KeyCode::Char('/') {
-            self.begin_search_input();
+            if !self.has_active_modal() {
+                self.begin_search_input();
+            }
+            return None;
+        }
+        if event.code == KeyCode::Char('f')
+            && event.modifiers.contains(KeyModifiers::CONTROL)
+            && !event.modifiers.contains(KeyModifiers::ALT)
+        {
+            if !self.has_active_modal() {
+                self.begin_search_overlay();
+            }
+            return None;
+        }
+        if event.code == KeyCode::Char('e') {
+            return self.handle_export_key();
+        }
+        if event.code == KeyCode::Char('D') {
+            self.handle_project_dashboard_key();
             return None;
         }
 
@@ -701,10 +918,7 @@ impl App {
         terminal_width: u16,
         terminal_height: u16,
     ) -> Option<AppAction> {
-        if self.delete_modal_state.is_some()
-            || self.tag_modal_state.is_some()
-            || self.show_help_modal
-        {
+        if self.has_active_modal() {
             return None;
         }
 
@@ -834,6 +1048,9 @@ impl App {
                     self.rebuild_tree_after_session_list_change();
                     self.refresh_header_summary();
                 }
+                if let Some(list) = self.catalog_cache.get_mut(&self.active_engine) {
+                    list.retain(|item| item.abs_path != success.deleted_path);
+                }
 
                 let message = format!("Deleted session {}", success.deleted_session_id);
                 self.delete_result_message = Some(message.clone());
@@ -872,6 +1089,11 @@ impl App {
                 self.session_list.remove(index);
                 self.file_health_map.remove(&success.deleted_path);
             }
+        }
+        if let Some(list) = self.catalog_cache.get_mut(&result.engine) {
+            let deleted_paths: HashSet<_> =
+                result.deleted.iter().map(|d| &d.deleted_path).collect();
+            list.retain(|item| !deleted_paths.contains(&item.abs_path));
         }
 
         let deleted_count = result.deleted.len();
@@ -1379,8 +1601,550 @@ impl App {
         }
     }
 
+    pub fn has_active_modal(&self) -> bool {
+        self.delete_modal_state.is_some()
+            || self.tag_modal_state.is_some()
+            || self.export_modal_state.is_some()
+            || self.search_overlay_state.is_some()
+            || self.show_help_modal
+    }
+
+    fn handle_export_modal_key(&mut self, event: KeyEvent) -> Option<AppAction> {
+        let Some(modal) = &mut self.export_modal_state else {
+            return None;
+        };
+
+        match event.code {
+            KeyCode::Esc | KeyCode::Char('n') => {
+                self.export_modal_state = None;
+                None
+            }
+            KeyCode::Tab
+            | KeyCode::BackTab
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Char('h')
+            | KeyCode::Char('l') => {
+                modal.focus = match modal.focus {
+                    ExportModalFocus::Cancel => ExportModalFocus::Export,
+                    ExportModalFocus::Export => ExportModalFocus::Cancel,
+                };
+                None
+            }
+            KeyCode::Enter => match modal.focus {
+                ExportModalFocus::Cancel => {
+                    self.export_modal_state = None;
+                    None
+                }
+                ExportModalFocus::Export => {
+                    self.confirm_group_export();
+                    None
+                }
+            },
+            _ => None,
+        }
+    }
+
+    fn confirm_group_export(&mut self) {
+        let Some(modal) = self.export_modal_state.take() else {
+            return;
+        };
+        let group_id = modal.group_identifier;
+        let group_label = modal.group_label;
+
+        let groups = build_grouped_session_nodes(&self.session_list, &self.group_mode);
+        let Some(group) = groups.iter().find(|g| g.identifier == group_id) else {
+            self.status_message = "⚡ 导出失败：未找到指定分组".to_string();
+            return;
+        };
+
+        let mut indexes = Vec::new();
+        for root in &group.children {
+            collect_session_indexes(root, &mut indexes);
+        }
+        indexes.sort_unstable();
+        indexes.dedup();
+
+        let mut sessions_to_export = Vec::new();
+        for idx in indexes {
+            let item = &self.session_list[idx];
+            let detail_res = load_detail_for_engine(self.active_engine, &item.abs_path);
+            match detail_res {
+                Ok(detail) => {
+                    let meta = SessionUserMeta {
+                        is_favorite: item.is_favorite,
+                        tags: item.tags.clone(),
+                        updated_at: 0,
+                    };
+                    sessions_to_export.push(Ok((detail, Some(meta))));
+                }
+                Err(err) => {
+                    sessions_to_export.push(Err((item.session_id.clone(), err)));
+                }
+            }
+        }
+
+        match export_group_sessions(
+            &self.export_config.output_dir,
+            self.active_engine,
+            &group_label,
+            &sessions_to_export,
+            &self.display_config,
+        ) {
+            Ok((summary, path)) => {
+                if summary.failed.is_empty() {
+                    self.status_message = format!(
+                        "⚡ 已导出 {} 个会话到 {}",
+                        summary.succeeded,
+                        path.display()
+                    );
+                } else {
+                    self.status_message = format!(
+                        "⚡ 已导出 {} 个会话（{} 个失败，详见 index.md）",
+                        summary.succeeded,
+                        summary.failed.len()
+                    );
+                }
+            }
+            Err(err) => {
+                self.status_message = format!("⚡ 导出失败：{err}");
+            }
+        }
+    }
+
+    fn handle_export_key(&mut self) -> Option<AppAction> {
+        if self.has_active_modal() {
+            return None;
+        }
+        match &self.tree_focus_node {
+            Some(TreeFocusNode::GroupHeader(identifier)) => {
+                let id = identifier.clone();
+                self.begin_group_export_modal(&id);
+                None
+            }
+            Some(TreeFocusNode::SessionLeaf(_)) => {
+                self.execute_single_session_export();
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn begin_group_export_modal(&mut self, identifier: &str) {
+        if self.has_active_modal() {
+            return;
+        }
+        let Some(target) = self.bulk_delete_request_for_group(identifier) else {
+            return;
+        };
+        self.export_modal_state = Some(ExportModalState {
+            group_identifier: target.group_identifier,
+            group_label: target.group_label,
+            session_count: target.targets.len(),
+            focus: ExportModalFocus::Cancel,
+        });
+    }
+
+    fn execute_single_session_export(&mut self) {
+        let Some(selected) = self.selected_item().cloned() else {
+            return;
+        };
+        let detail = match load_detail_for_engine(self.active_engine, &selected.abs_path) {
+            Ok(d) => d,
+            Err(err) => {
+                let msg = format!("⚡ 导出失败：{err}");
+                self.status_message = with_status_message(None, Some(msg.as_str()));
+                return;
+            }
+        };
+        let meta = SessionUserMeta {
+            is_favorite: selected.is_favorite,
+            tags: selected.tags.clone(),
+            updated_at: 0,
+        };
+        match export_single_session(
+            &self.export_config.output_dir,
+            self.active_engine,
+            &detail,
+            Some(&meta),
+            &self.display_config,
+        ) {
+            Ok(path) => {
+                let msg = format!("⚡ Exported to {}", path.display());
+                self.status_message = msg;
+            }
+            Err(err) => {
+                let msg = format!("⚡ 导出失败：{err}");
+                self.status_message = with_status_message(None, Some(msg.as_str()));
+            }
+        }
+    }
+
+    pub fn begin_search_overlay(&mut self) {
+        if self.has_active_modal() {
+            return;
+        }
+        self.search_overlay_state = Some(SearchOverlayState::default());
+    }
+
+    pub fn trigger_search_immediately(&mut self) {
+        if let Some(overlay) = &mut self.search_overlay_state {
+            overlay.debounce_ticks = 0;
+            overlay.is_loading = false;
+            overlay.last_searched_query = overlay.query.clone();
+            if overlay.query.trim().is_empty() {
+                overlay.results.clear();
+                overlay.error_message = None;
+                overlay.selected_index = 0;
+                overlay.scroll_offset = 0;
+            } else {
+                match SearchService::search(&self.state_store, &overlay.query) {
+                    Ok(results) => {
+                        overlay.results = results;
+                        overlay.error_message = None;
+                    }
+                    Err(_err) => {
+                        overlay.results.clear();
+                        overlay.error_message = Some(
+                            "Search query failed. Please check state database or retry."
+                                .to_string(),
+                        );
+                    }
+                }
+                overlay.selected_index = 0;
+                overlay.scroll_offset = 0;
+            }
+        }
+    }
+
+    fn handle_search_overlay_key(&mut self, event: KeyEvent) -> Option<AppAction> {
+        let Some(overlay) = &mut self.search_overlay_state else {
+            return None;
+        };
+
+        match event.code {
+            KeyCode::Esc => {
+                self.search_overlay_state = None;
+                None
+            }
+            KeyCode::Up | KeyCode::Char('k')
+                if event.modifiers.contains(KeyModifiers::CONTROL) || event.code == KeyCode::Up =>
+            {
+                overlay.selected_index = overlay.selected_index.saturating_sub(1);
+                None
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if event.modifiers.contains(KeyModifiers::CONTROL)
+                    || event.code == KeyCode::Down =>
+            {
+                if !overlay.results.is_empty() && overlay.selected_index + 1 < overlay.results.len()
+                {
+                    overlay.selected_index += 1;
+                }
+                None
+            }
+            KeyCode::Left => {
+                overlay.cursor_position = overlay.cursor_position.saturating_sub(1);
+                None
+            }
+            KeyCode::Right => {
+                let char_count = overlay.query.chars().count();
+                if overlay.cursor_position < char_count {
+                    overlay.cursor_position += 1;
+                }
+                None
+            }
+            KeyCode::Backspace => {
+                if overlay.cursor_position > 0 {
+                    let mut chars: Vec<char> = overlay.query.chars().collect();
+                    if overlay.cursor_position <= chars.len() {
+                        chars.remove(overlay.cursor_position - 1);
+                        overlay.query = chars.into_iter().collect();
+                        overlay.cursor_position -= 1;
+                        overlay.debounce_ticks = 2;
+                        overlay.is_loading = true;
+                        overlay.error_message = None;
+                    }
+                }
+                None
+            }
+            KeyCode::Enter => {
+                if let Some(hit) = overlay.results.get(overlay.selected_index).cloned() {
+                    self.search_overlay_state = None;
+                    self.jump_to_search_hit(hit)
+                } else {
+                    None
+                }
+            }
+            KeyCode::Char(c) => {
+                let mut chars: Vec<char> = overlay.query.chars().collect();
+                if overlay.cursor_position <= chars.len() {
+                    chars.insert(overlay.cursor_position, c);
+                    overlay.query = chars.into_iter().collect();
+                    overlay.cursor_position += 1;
+                    overlay.debounce_ticks = 2;
+                    overlay.is_loading = true;
+                    overlay.error_message = None;
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    pub fn jump_to_search_hit(&mut self, hit: SearchHit) -> Option<AppAction> {
+        if hit.engine != self.active_engine {
+            self.active_engine = hit.engine;
+            self.pending_search_jump = Some((hit.session_id.clone(), hit.block_index));
+            return Some(AppAction::LoadCatalog(self.begin_catalog_request()));
+        }
+
+        self.execute_search_jump(&hit.session_id, hit.block_index)
+    }
+
+    pub fn execute_search_jump(
+        &mut self,
+        session_id: &str,
+        block_index: usize,
+    ) -> Option<AppAction> {
+        let pos = self
+            .session_list
+            .iter()
+            .position(|it| it.session_id == session_id);
+        let Some(idx) = pos else {
+            self.status_message = with_status_message(None, Some("会话已不存在"));
+            return None;
+        };
+
+        self.selected_index = Some(idx);
+        self.sync_tree_selection_from_selected_index();
+
+        let item = &self.session_list[idx];
+        let offset = match load_detail_for_engine(self.active_engine, &item.abs_path) {
+            Ok(detail) => compute_target_scroll_offset(&detail, block_index),
+            Err(_) => 0,
+        };
+
+        self.detail_viewport_state.scroll_offset = offset;
+        self.begin_detail_request_with_offset(offset)
+            .map(AppAction::LoadDetail)
+    }
+
+    pub fn begin_detail_request_with_offset(&mut self, offset: usize) -> Option<DetailRequest> {
+        let selected = self.selected_item()?.clone();
+        self.refresh_header_summary();
+        if !selected.is_loadable {
+            let message = format!("Session {} is not loadable", selected.session_id);
+            self.status_message = with_status_message(None, Some(message.as_str()));
+            self.detail_state = SessionDetailState::Error(message);
+            self.right_panel_mode = RightPanelMode::SessionDetail;
+            self.group_summary_card = None;
+            return None;
+        }
+
+        self.parse_cancellation_token = self.parse_cancellation_token.saturating_add(1);
+        self.detail_state = SessionDetailState::Loading;
+        self.detail_viewport_state.scroll_offset = offset;
+        self.right_panel_mode = RightPanelMode::SessionDetail;
+        self.group_summary_card = None;
+
+        Some(DetailRequest {
+            request_id: self.parse_cancellation_token,
+            engine: self.active_engine,
+            path: selected.abs_path,
+            offset,
+            height: self.detail_viewport_state.viewport_height,
+        })
+    }
+
+    fn handle_project_dashboard_key(&mut self) {
+        if self.has_active_modal() {
+            return;
+        }
+        if self.right_panel_mode == RightPanelMode::ProjectDashboard {
+            self.right_panel_mode = RightPanelMode::GroupSummary;
+            self.project_dashboard_state = None;
+            return;
+        }
+        if self.group_mode != GroupMode::ByProject {
+            return;
+        }
+        if let Some(TreeFocusNode::GroupHeader(identifier)) = &self.tree_focus_node.clone() {
+            self.open_project_dashboard(identifier);
+        }
+    }
+
+    pub fn open_project_dashboard(&mut self, group_id: &str) {
+        let groups = build_grouped_session_nodes(&self.session_list, &self.group_mode);
+        let Some(group) = groups.iter().find(|g| g.identifier == group_id) else {
+            return;
+        };
+        let project_name = group.label.clone();
+        let project_path = self
+            .first_group_child_cwd(group_id)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let mut engine_counts = Vec::new();
+        let mut all_project_sessions: Vec<(SessionEngine, SessionListItem)> = Vec::new();
+
+        let current_items: Vec<SessionListItem> = self
+            .session_list
+            .iter()
+            .filter(|it| {
+                let label = if it.cwd_group_label == "-" {
+                    "unknown-project"
+                } else {
+                    &it.cwd_group_label
+                };
+                label == project_name
+            })
+            .cloned()
+            .collect();
+
+        let mut seen_engines = HashSet::new();
+        seen_engines.insert(self.active_engine);
+
+        if !current_items.is_empty() {
+            engine_counts.push((self.active_engine, current_items.len()));
+            all_project_sessions
+                .extend(current_items.into_iter().map(|it| (self.active_engine, it)));
+        }
+
+        for (engine, items) in &self.catalog_cache {
+            if seen_engines.contains(engine) {
+                continue;
+            }
+            seen_engines.insert(*engine);
+            let matching: Vec<SessionListItem> = items
+                .iter()
+                .filter(|it| {
+                    let label = if it.cwd_group_label == "-" {
+                        "unknown-project"
+                    } else {
+                        &it.cwd_group_label
+                    };
+                    label == project_name
+                })
+                .cloned()
+                .collect();
+            if !matching.is_empty() {
+                engine_counts.push((*engine, matching.len()));
+                all_project_sessions.extend(matching.into_iter().map(|it| (*engine, it)));
+            }
+        }
+
+        let total_sessions = all_project_sessions.len();
+        let favorite_count = all_project_sessions
+            .iter()
+            .filter(|(_, s)| s.is_favorite)
+            .count();
+
+        let mut tag_counts: HashMap<String, usize> = HashMap::new();
+        for (_, sess) in &all_project_sessions {
+            let mut unique_tags = sess.tags.clone();
+            unique_tags.sort();
+            unique_tags.dedup();
+            for tag in unique_tags {
+                *tag_counts.entry(tag).or_insert(0) += 1;
+            }
+        }
+        let mut top_tags: Vec<(String, usize)> = tag_counts.into_iter().collect();
+        top_tags.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        top_tags.truncate(5);
+
+        let last_active = all_project_sessions
+            .iter()
+            .max_by_key(|(_, s)| s.modified_at)
+            .map(|(_, s)| s.display_time.clone())
+            .unwrap_or_else(|| "-".to_string());
+
+        let mut engine_session_map: HashMap<SessionEngine, Vec<String>> = HashMap::new();
+        for (eng, item) in &all_project_sessions {
+            engine_session_map
+                .entry(*eng)
+                .or_default()
+                .push(item.session_id.clone());
+        }
+
+        let mut total_messages = 0;
+        let mut total_chars = 0;
+        let mut has_metrics = false;
+
+        for (eng, session_ids) in engine_session_map {
+            if let Ok(Some((msgs, chars))) = self
+                .state_store
+                .query_project_metrics(Some(eng), &session_ids)
+            {
+                total_messages += msgs;
+                total_chars += chars;
+                has_metrics = true;
+            }
+        }
+
+        let content_scale = if has_metrics {
+            Some((total_messages, total_chars))
+        } else {
+            None
+        };
+
+        all_project_sessions.sort_by(|a, b| {
+            b.1.modified_at
+                .cmp(&a.1.modified_at)
+                .then_with(|| a.1.session_id.cmp(&b.1.session_id))
+        });
+        let recent_sessions = all_project_sessions;
+
+        self.project_dashboard_state = Some(ProjectDashboardState {
+            project_path,
+            project_name,
+            engine_counts,
+            total_sessions,
+            favorite_count,
+            top_tags,
+            last_active,
+            content_scale,
+            recent_sessions,
+            selected_index: 0,
+        });
+        self.right_panel_mode = RightPanelMode::ProjectDashboard;
+    }
+
+    fn handle_dashboard_enter(&mut self) -> Option<AppAction> {
+        let Some(dashboard) = &self.project_dashboard_state else {
+            return None;
+        };
+        let Some(target) = dashboard
+            .recent_sessions
+            .get(dashboard.selected_index)
+            .cloned()
+        else {
+            return None;
+        };
+        self.right_panel_mode = RightPanelMode::SessionDetail;
+        self.project_dashboard_state = None;
+
+        let (target_engine, target_item) = target;
+        if target_engine == self.active_engine {
+            if let Some(pos) = self
+                .session_list
+                .iter()
+                .position(|it| it.session_id == target_item.session_id)
+            {
+                self.selected_index = Some(pos);
+                self.sync_tree_selection_from_selected_index();
+                return self.begin_detail_request().map(AppAction::LoadDetail);
+            }
+        } else {
+            self.active_engine = target_engine;
+            self.pending_search_jump = Some((target_item.session_id, 0));
+            return Some(AppAction::LoadCatalog(self.begin_catalog_request()));
+        }
+
+        None
+    }
+
     pub fn begin_tag_modal(&mut self) {
-        if self.delete_modal_state.is_some() || self.show_help_modal {
+        if self.has_active_modal() {
             return;
         }
         let Some(target_idx) = self.target_session_index() else {
@@ -1467,7 +2231,7 @@ impl App {
     }
 
     fn begin_delete_confirmation(&mut self) {
-        if self.tag_modal_state.is_some() || self.show_help_modal {
+        if self.has_active_modal() {
             return;
         }
 
@@ -1581,30 +2345,7 @@ impl App {
     }
 
     fn begin_detail_request(&mut self) -> Option<DetailRequest> {
-        let selected = self.selected_item()?.clone();
-        self.refresh_header_summary();
-        if !selected.is_loadable {
-            let message = format!("Session {} is not loadable", selected.session_id);
-            self.status_message = with_status_message(None, Some(message.as_str()));
-            self.detail_state = SessionDetailState::Error(message);
-            self.right_panel_mode = RightPanelMode::SessionDetail;
-            self.group_summary_card = None;
-            return None;
-        }
-
-        self.parse_cancellation_token = self.parse_cancellation_token.saturating_add(1);
-        self.detail_state = SessionDetailState::Loading;
-        self.detail_viewport_state.scroll_offset = 0;
-        self.right_panel_mode = RightPanelMode::SessionDetail;
-        self.group_summary_card = None;
-
-        Some(DetailRequest {
-            request_id: self.parse_cancellation_token,
-            engine: self.active_engine,
-            path: selected.abs_path,
-            offset: 0,
-            height: self.detail_viewport_state.viewport_height,
-        })
+        self.begin_detail_request_with_offset(0)
     }
 
     fn begin_resume_request(&mut self) -> Option<ResumeSessionRequest> {
@@ -1718,6 +2459,8 @@ impl App {
     }
 
     fn begin_catalog_request(&mut self) -> CatalogRequest {
+        self.indexing_coordinator.cancel_current();
+        self.index_progress = None;
         self.catalog_request_token = self.catalog_request_token.saturating_add(1);
         self.catalog_loading_state = CatalogLoadingState::Loading(self.active_engine);
         self.invalidate_detail_requests();
@@ -1750,6 +2493,8 @@ impl App {
     }
 
     fn reload_active_catalog(&mut self) -> CatalogRequest {
+        self.indexing_coordinator.cancel_current();
+        self.index_progress = None;
         self.catalog_request_token = self.catalog_request_token.saturating_add(1);
         self.catalog_loading_state = CatalogLoadingState::Loading(self.active_engine);
         self.invalidate_detail_requests();
@@ -4516,5 +5261,570 @@ mod tests {
                 .opened()
                 .contains(&vec!["group:tag1".to_string()])
         );
+    }
+
+    #[test]
+    fn export_shortcut_on_session_leaf_and_group_header() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let session_file = temp_dir.path().join("sess1.jsonl");
+        std::fs::write(
+            &session_file,
+            "{\"type\":\"session\",\"id\":\"sess1\",\"timestamp\":\"2026-04-16T01:02:03Z\",\"cwd\":\"/workspace/demo\"}\n\
+             {\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello world\"}]}}\n",
+        )
+        .unwrap();
+
+        let mut sess1 = item("sess1");
+        sess1.abs_path = session_file.clone();
+        sess1.cwd_group_label = "workspace/demo".to_string();
+
+        let export_out = temp_dir.path().join("exports");
+        let mut app = App::new(&stub_catalog(vec![sess1]));
+        app.export_config.output_dir = export_out.clone();
+
+        // 1. On session leaf: pressing 'e' executes single export
+        assert_eq!(app.selected_index, Some(0));
+        let action = app.handle_key(KeyEvent::from(KeyCode::Char('e')));
+        assert_eq!(action, None);
+        assert!(app.export_modal_state.is_none());
+        assert!(app.status_message.contains("Exported to"));
+        let exported_md = export_out.join("pi").join("sess1.md");
+        assert!(exported_md.exists());
+        let md_content = std::fs::read_to_string(&exported_md).unwrap();
+        assert!(md_content.contains("session_id: \"sess1\""));
+        assert!(md_content.contains("hello world"));
+
+        // 2. On group header: pressing 'e' opens export modal
+        app.group_mode = GroupMode::ByProject;
+        app.open_all_groups();
+        app.sync_tree_selection_from_selected_index();
+        app.handle_key(KeyEvent::from(KeyCode::Left));
+        assert!(matches!(
+            app.tree_focus_node,
+            Some(TreeFocusNode::GroupHeader(_))
+        ));
+
+        let action = app.handle_key(KeyEvent::from(KeyCode::Char('e')));
+        assert_eq!(action, None);
+        assert!(app.export_modal_state.is_some());
+        let modal = app.export_modal_state.as_ref().unwrap();
+        assert_eq!(modal.group_label, "workspace/demo");
+        assert_eq!(modal.session_count, 1);
+        assert_eq!(modal.focus, ExportModalFocus::Cancel);
+    }
+
+    #[test]
+    fn export_modal_navigation_and_confirm_and_cancel() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let session_file = temp_dir.path().join("sess1.jsonl");
+        std::fs::write(
+            &session_file,
+            "{\"type\":\"session\",\"id\":\"sess1\",\"timestamp\":\"2026-04-16T01:02:03Z\",\"cwd\":\"/workspace/demo\"}\n\
+             {\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello batch\"}]}}\n",
+        )
+        .unwrap();
+
+        let mut sess1 = item("sess1");
+        sess1.abs_path = session_file;
+        sess1.cwd_group_label = "workspace/demo".to_string();
+
+        let export_out = temp_dir.path().join("exports");
+        let mut app = App::new(&stub_catalog(vec![sess1]));
+        app.export_config.output_dir = export_out.clone();
+
+        // Focus group header and open modal
+        app.group_mode = GroupMode::ByProject;
+        app.open_all_groups();
+        app.sync_tree_selection_from_selected_index();
+        app.handle_key(KeyEvent::from(KeyCode::Left));
+        assert!(matches!(
+            app.tree_focus_node,
+            Some(TreeFocusNode::GroupHeader(_))
+        ));
+        app.handle_key(KeyEvent::from(KeyCode::Char('e')));
+        assert!(app.export_modal_state.is_some());
+
+        // Tab to Export
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert_eq!(
+            app.export_modal_state.as_ref().unwrap().focus,
+            ExportModalFocus::Export
+        );
+
+        // BackTab back to Cancel
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(
+            app.export_modal_state.as_ref().unwrap().focus,
+            ExportModalFocus::Cancel
+        );
+
+        // Right to Export
+        app.handle_key(KeyEvent::from(KeyCode::Right));
+        assert_eq!(
+            app.export_modal_state.as_ref().unwrap().focus,
+            ExportModalFocus::Export
+        );
+
+        // Left to Cancel
+        app.handle_key(KeyEvent::from(KeyCode::Left));
+        assert_eq!(
+            app.export_modal_state.as_ref().unwrap().focus,
+            ExportModalFocus::Cancel
+        );
+
+        // Tab to Export and Enter to confirm
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert!(app.export_modal_state.is_none());
+        assert!(app.status_message.contains("已导出 1 个会话"));
+        let group_dir = export_out.join("pi").join("workspace_demo");
+        assert!(group_dir.join("index.md").exists());
+        assert!(group_dir.join("sess1.md").exists());
+
+        // Cancel branch
+        app.handle_key(KeyEvent::from(KeyCode::Char('e')));
+        assert!(app.export_modal_state.is_some());
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.export_modal_state.is_none());
+    }
+
+    #[test]
+    fn search_overlay_open_close_debounce_and_navigation() {
+        let mut app = App::new(&stub_catalog(vec![item("s1")]));
+
+        // Ctrl+F opens search overlay
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert_eq!(action, None);
+        assert!(app.search_overlay_state.is_some());
+        assert_eq!(app.search_state.phase, SearchPhase::Idle); // Does not interfere with '/' search
+
+        // Typing characters
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('i')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+        let overlay = app.search_overlay_state.as_ref().unwrap();
+        assert_eq!(overlay.query, "fix");
+        assert_eq!(overlay.cursor_position, 3);
+        assert_eq!(overlay.debounce_ticks, 2);
+        assert!(overlay.is_loading);
+
+        // Backspace
+        app.handle_key(KeyEvent::from(KeyCode::Backspace));
+        let overlay = app.search_overlay_state.as_ref().unwrap();
+        assert_eq!(overlay.query, "fi");
+        assert_eq!(overlay.cursor_position, 2);
+
+        // Debounce on_tick
+        app.on_tick();
+        assert_eq!(app.search_overlay_state.as_ref().unwrap().debounce_ticks, 1);
+        app.on_tick();
+        assert_eq!(app.search_overlay_state.as_ref().unwrap().debounce_ticks, 0);
+        assert!(!app.search_overlay_state.as_ref().unwrap().is_loading);
+
+        // Navigation in results
+        let overlay = app.search_overlay_state.as_mut().unwrap();
+        overlay.results = vec![
+            SearchHit::new(SessionEngine::Pi, "s1", 0, "hit one", 1.0, 1),
+            SearchHit::new(SessionEngine::Pi, "s2", 1, "hit two", 2.0, 1),
+        ];
+        assert_eq!(overlay.selected_index, 0);
+
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(app.search_overlay_state.as_ref().unwrap().selected_index, 1);
+
+        app.handle_key(KeyEvent::from(KeyCode::Up));
+        assert_eq!(app.search_overlay_state.as_ref().unwrap().selected_index, 0);
+
+        // Esc closes overlay
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.search_overlay_state.is_none());
+    }
+
+    #[test]
+    fn search_overlay_jump_to_engine_and_scroll_offset() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let session_file = temp_dir.path().join("jump-sess.jsonl");
+        std::fs::write(
+            &session_file,
+            "{\"type\":\"session\",\"id\":\"jump-sess\",\"timestamp\":\"2026-04-16T01:02:03Z\",\"cwd\":\"/workspace/jump\"}\n\
+             {\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"block 0 question\"}]}}\n\
+             {\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"block 1 answer\"}]}}\n",
+        )
+        .unwrap();
+
+        let mut item1 = item("jump-sess");
+        item1.abs_path = session_file;
+
+        let mut app = App::new(&stub_catalog(vec![item1]));
+        app.begin_search_overlay();
+
+        let overlay = app.search_overlay_state.as_mut().unwrap();
+        overlay.results = vec![SearchHit::new(
+            SessionEngine::Pi,
+            "jump-sess",
+            1,
+            "answer <<hit>>",
+            1.0,
+            1,
+        )];
+
+        // Press Enter to jump
+        let action = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.search_overlay_state.is_none());
+        assert_eq!(app.selected_index, Some(0));
+        assert!(app.detail_viewport_state.scroll_offset > 0);
+        match action {
+            Some(AppAction::LoadDetail(req)) => {
+                assert_eq!(req.engine, SessionEngine::Pi);
+                assert_eq!(req.offset, app.detail_viewport_state.scroll_offset);
+            }
+            other => panic!("expected LoadDetail, got {other:?}"),
+        }
+
+        // Cross engine jump: target is Codex
+        app.begin_search_overlay();
+        let overlay = app.search_overlay_state.as_mut().unwrap();
+        overlay.results = vec![SearchHit::new(
+            SessionEngine::Codex,
+            "codex-sess",
+            0,
+            "codex <<snippet>>",
+            1.0,
+            1,
+        )];
+
+        let action = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.search_overlay_state.is_none());
+        assert_eq!(app.active_engine, SessionEngine::Codex);
+        match action {
+            Some(AppAction::LoadCatalog(req)) => {
+                assert_eq!(req.engine, SessionEngine::Codex);
+            }
+            other => panic!("expected LoadCatalog, got {other:?}"),
+        }
+
+        // Apply catalog result for Codex: take_pending_action must yield DetailRequest
+        let mut codex_item = item("codex-sess");
+        codex_item.abs_path = std::path::PathBuf::from("/tmp/codex-sess.jsonl");
+        app.apply_catalog_result(CatalogLoadResult {
+            request_id: app.catalog_request_token,
+            engine: SessionEngine::Codex,
+            result: Ok(CatalogLoad {
+                items: vec![codex_item],
+                warnings: Vec::new(),
+                file_health_map: HashMap::new(),
+            }),
+        });
+
+        let pending = app.take_pending_action();
+        match pending {
+            Some(AppAction::LoadDetail(req)) => {
+                assert_eq!(req.engine, SessionEngine::Codex);
+                assert_eq!(req.path, std::path::PathBuf::from("/tmp/codex-sess.jsonl"));
+            }
+            other => panic!("expected LoadDetail from pending_action, got {other:?}"),
+        }
+        assert!(app.take_pending_action().is_none());
+        assert_eq!(app.detail_state, SessionDetailState::Loading);
+    }
+
+    #[test]
+    fn cross_engine_same_session_id_search_and_dashboard_jump_deterministic() {
+        let mut pi_item = item("sess-dup");
+        pi_item.cwd_group_label = "shared-project".to_string();
+        pi_item.cwd_path = "/workspace/shared-project".to_string();
+        pi_item.abs_path = std::path::PathBuf::from("/tmp/pi-dup.jsonl");
+
+        let mut codex_item = item("sess-dup");
+        codex_item.cwd_group_label = "shared-project".to_string();
+        codex_item.cwd_path = "/workspace/shared-project".to_string();
+        codex_item.abs_path = std::path::PathBuf::from("/tmp/codex-dup.jsonl");
+
+        let mut app = App::new(&stub_catalog(vec![pi_item.clone()]));
+        assert_eq!(app.active_engine, SessionEngine::Pi);
+
+        // Pre-populate catalog cache for Codex
+        app.catalog_cache
+            .insert(SessionEngine::Codex, vec![codex_item.clone()]);
+
+        // 1. Cross-engine search jump to Codex with same session ID
+        app.begin_search_overlay();
+        let overlay = app.search_overlay_state.as_mut().unwrap();
+        overlay.results = vec![SearchHit::new(
+            SessionEngine::Codex,
+            "sess-dup",
+            0,
+            "snippet",
+            1.0,
+            1,
+        )];
+
+        let action = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.active_engine, SessionEngine::Codex);
+        assert!(matches!(action, Some(AppAction::LoadCatalog(_))));
+
+        // Catalog load arrives for Codex
+        app.apply_catalog_result(CatalogLoadResult {
+            request_id: app.catalog_request_token,
+            engine: SessionEngine::Codex,
+            result: Ok(CatalogLoad {
+                items: vec![codex_item.clone()],
+                warnings: Vec::new(),
+                file_health_map: HashMap::new(),
+            }),
+        });
+
+        // Detail request MUST point to Codex path, not Pi path
+        let pending = app.take_pending_action();
+        match pending {
+            Some(AppAction::LoadDetail(req)) => {
+                assert_eq!(req.engine, SessionEngine::Codex);
+                assert_eq!(req.path, std::path::PathBuf::from("/tmp/codex-dup.jsonl"));
+            }
+            other => panic!("expected LoadDetail for Codex, got {other:?}"),
+        }
+
+        // 2. Switch back to Pi, test dashboard jump with same session ID
+        app.active_engine = SessionEngine::Pi;
+        app.session_list = vec![pi_item.clone()];
+        app.group_mode = GroupMode::ByProject;
+        app.open_project_dashboard("group:shared-project");
+
+        let dashboard = app.project_dashboard_state.as_ref().unwrap();
+        assert_eq!(dashboard.recent_sessions.len(), 2);
+
+        // Find the index corresponding to (SessionEngine::Codex, "sess-dup")
+        let codex_idx = dashboard
+            .recent_sessions
+            .iter()
+            .position(|(eng, it)| *eng == SessionEngine::Codex && it.session_id == "sess-dup")
+            .unwrap();
+
+        app.project_dashboard_state.as_mut().unwrap().selected_index = codex_idx;
+        let db_action = app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        assert_eq!(app.active_engine, SessionEngine::Codex);
+        assert!(matches!(db_action, Some(AppAction::LoadCatalog(_))));
+
+        app.apply_catalog_result(CatalogLoadResult {
+            request_id: app.catalog_request_token,
+            engine: SessionEngine::Codex,
+            result: Ok(CatalogLoad {
+                items: vec![codex_item.clone()],
+                warnings: Vec::new(),
+                file_health_map: HashMap::new(),
+            }),
+        });
+
+        let db_pending = app.take_pending_action();
+        match db_pending {
+            Some(AppAction::LoadDetail(req)) => {
+                assert_eq!(req.engine, SessionEngine::Codex);
+                assert_eq!(req.path, std::path::PathBuf::from("/tmp/codex-dup.jsonl"));
+            }
+            other => panic!("expected LoadDetail for Codex from dashboard, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn search_overlay_error_message_handling_and_clearing() {
+        let mut app = App::new(&stub_catalog(vec![item("s1")]));
+        app.begin_search_overlay();
+
+        let overlay = app.search_overlay_state.as_mut().unwrap();
+        overlay.error_message =
+            Some("Search query failed. Please check state database or retry.".to_string());
+        overlay.results = vec![SearchHit::new(SessionEngine::Pi, "s1", 0, "dummy", 1.0, 1)];
+
+        // Typing a character clears error_message and initiates debounced search
+        app.handle_key(KeyEvent::from(KeyCode::Char('a')));
+        let overlay = app.search_overlay_state.as_ref().unwrap();
+        assert_eq!(overlay.query, "a");
+        assert!(overlay.error_message.is_none());
+        assert!(overlay.is_loading);
+    }
+
+    #[test]
+    fn project_dashboard_by_project_restrictions_metrics_and_jump() {
+        let mut s1 = item("s1");
+        s1.cwd_group_label = "my-project".to_string();
+        s1.cwd_path = "/workspace/my-project".to_string();
+        s1.is_favorite = true;
+        s1.tags = vec!["bug".to_string(), "bug".to_string(), "p0".to_string()]; // Duplicate "bug" to test deduplication
+
+        let mut s2 = item("s2");
+        s2.cwd_group_label = "my-project".to_string();
+        s2.cwd_path = "/workspace/my-project".to_string();
+        s2.tags = vec!["bug".to_string()];
+
+        let mut app = App::new(&stub_catalog(vec![s1, s2]));
+
+        // 1. In ByTime mode: pressing 'D' on group header is ignored
+        assert_eq!(app.group_mode, GroupMode::ByTime);
+        app.tree_state.select(vec!["group:Today".to_string()]);
+        app.sync_tree_selection_from_tree();
+        app.handle_key(KeyEvent::from(KeyCode::Char('D')));
+        assert_eq!(app.right_panel_mode, RightPanelMode::GroupSummary);
+
+        // 2. On session leaf: pressing 'D' is ignored
+        app.group_mode = GroupMode::ByProject;
+        app.tree_state = TreeState::default();
+        app.open_all_groups();
+        app.selected_index = Some(0);
+        app.sync_tree_selection_from_selected_index();
+        assert!(matches!(
+            app.tree_focus_node,
+            Some(TreeFocusNode::SessionLeaf(_))
+        ));
+        app.handle_key(KeyEvent::from(KeyCode::Char('D')));
+        assert_eq!(app.right_panel_mode, RightPanelMode::SessionDetail);
+
+        // 3. On ByProject group header: pressing 'D' opens Project Dashboard
+        app.tree_state.select(vec!["group:my-project".to_string()]);
+        app.sync_tree_selection_from_tree();
+        assert!(matches!(
+            app.tree_focus_node,
+            Some(TreeFocusNode::GroupHeader(_))
+        ));
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('D')));
+        assert_eq!(app.right_panel_mode, RightPanelMode::ProjectDashboard);
+        assert!(app.project_dashboard_state.is_some());
+
+        let dashboard = app.project_dashboard_state.as_ref().unwrap();
+        assert_eq!(dashboard.project_name, "my-project");
+        assert_eq!(dashboard.project_path, "/workspace/my-project");
+        assert_eq!(dashboard.total_sessions, 2);
+        assert_eq!(dashboard.favorite_count, 1);
+
+        // Multi-tag deduplication check: "bug" occurred in 2 sessions, "p0" in 1 session
+        let bug_tag = dashboard.top_tags.iter().find(|(t, _)| t == "bug").unwrap();
+        assert_eq!(bug_tag.1, 2); // Deduped per session!
+        let p0_tag = dashboard.top_tags.iter().find(|(t, _)| t == "p0").unwrap();
+        assert_eq!(p0_tag.1, 1);
+
+        // 4. Navigation inside dashboard
+        assert_eq!(dashboard.selected_index, 0);
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(
+            app.project_dashboard_state.as_ref().unwrap().selected_index,
+            1
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Up));
+        assert_eq!(
+            app.project_dashboard_state.as_ref().unwrap().selected_index,
+            0
+        );
+
+        // 5. Enter jumps to selected session and closes dashboard
+        let action = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.right_panel_mode, RightPanelMode::SessionDetail);
+        assert!(app.project_dashboard_state.is_none());
+        assert!(matches!(action, Some(AppAction::LoadDetail(_))));
+
+        // 6. Dismiss with Esc / q / D
+        app.tree_state.select(vec!["group:my-project".to_string()]);
+        app.sync_tree_selection_from_tree();
+        app.handle_key(KeyEvent::from(KeyCode::Char('D')));
+        assert_eq!(app.right_panel_mode, RightPanelMode::ProjectDashboard);
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.right_panel_mode, RightPanelMode::GroupSummary);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('D')));
+        assert_eq!(app.right_panel_mode, RightPanelMode::ProjectDashboard);
+        app.handle_key(KeyEvent::from(KeyCode::Char('q')));
+        assert_eq!(app.right_panel_mode, RightPanelMode::GroupSummary);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('D')));
+        assert_eq!(app.right_panel_mode, RightPanelMode::ProjectDashboard);
+        app.handle_key(KeyEvent::from(KeyCode::Char('D')));
+        assert_eq!(app.right_panel_mode, RightPanelMode::GroupSummary);
+    }
+
+    #[test]
+    fn modal_mutual_exclusivity_and_key_interception() {
+        let mut app = App::new(&stub_catalog(vec![item("s1")]));
+
+        // 1. Delete modal active -> intercepts Ctrl+F, e, D, t, ?
+        app.begin_delete_confirmation();
+        assert!(app.delete_modal_state.is_some());
+        assert!(app.has_active_modal());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert!(app.search_overlay_state.is_none());
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('e')));
+        assert!(app.export_modal_state.is_none());
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('D')));
+        assert_ne!(app.right_panel_mode, RightPanelMode::ProjectDashboard);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('t')));
+        assert!(app.tag_modal_state.is_none());
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('?')));
+        assert!(!app.show_help_modal);
+
+        // Cancel delete modal
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.delete_modal_state.is_none());
+
+        // 2. Export modal active -> intercepts other modals
+        app.handle_key(KeyEvent::from(KeyCode::Left));
+        app.handle_key(KeyEvent::from(KeyCode::Char('e')));
+        assert!(app.export_modal_state.is_some());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert!(app.search_overlay_state.is_none());
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        assert!(app.delete_modal_state.is_none());
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.export_modal_state.is_none());
+
+        // 3. Search overlay active -> intercepts other modals
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert!(app.search_overlay_state.is_some());
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('e')));
+        assert!(app.export_modal_state.is_none());
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        assert!(app.delete_modal_state.is_none());
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.search_overlay_state.is_none());
+    }
+
+    #[test]
+    fn regression_check_existing_interactions_remain_intact() {
+        let mut app = App::new(&stub_catalog(vec![item("sess_a"), item("sess_b")]));
+
+        // 1. Tab switches engine
+        let action = app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert!(matches!(action, Some(AppAction::LoadCatalog(_))));
+
+        // 2. Favorite toggle
+        let _ = app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)); // Back to Pi
+        app.session_list = vec![item("sess_a"), item("sess_b")];
+        app.selected_index = Some(0);
+        assert!(!app.session_list[0].is_favorite);
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        assert!(app.session_list[0].is_favorite);
+
+        // 3. Slash search
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        assert_eq!(app.search_state.phase, SearchPhase::Input);
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.search_state.phase, SearchPhase::Idle);
+
+        // 4. Tag editing modal
+        app.handle_key(KeyEvent::from(KeyCode::Char('t')));
+        assert!(app.tag_modal_state.is_some());
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.tag_modal_state.is_none());
     }
 }

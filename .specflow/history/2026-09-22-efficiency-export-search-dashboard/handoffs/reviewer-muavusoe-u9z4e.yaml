@@ -1,0 +1,18 @@
+task_id: reviewer-muavusoe-u9z4e
+change_id: efficiency-export-search-dashboard
+role: reviewer
+target_spec: content-search
+adapter: manual
+lease_id: lease-muavusoe-2id8k
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/content-search.md
+allowed_paths:
+  - .specflow/changes/efficiency-export-search-dashboard/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

@@ -1,0 +1,19 @@
+task_id: implementer-muavco0m-9xpjb
+change_id: efficiency-export-search-dashboard
+role: implementer
+target_spec: content-search
+adapter: manual
+lease_id: lease-muavco0m-xiad5
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/content-search.md
+allowed_paths:
+  - src/**
+  - tests/**
+  - .specflow/changes/efficiency-export-search-dashboard/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden

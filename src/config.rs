@@ -56,17 +56,57 @@ impl DisplayConfig {
 // ── TOML file schema ──────────────────────────────────────────────────────
 
 #[derive(Deserialize, Default)]
-struct ConfigFile {
+pub struct ConfigFile {
     #[serde(default)]
-    display: DisplaySection,
+    pub display: DisplaySection,
+    #[serde(default)]
+    pub export: Option<ExportSection>,
 }
 
 #[derive(Deserialize)]
-struct DisplaySection {
+pub struct DisplaySection {
     /// Recognised values: "user", "assistant", "thinking", "tool_call", "tool_output",
     /// "system_context", "corrupted_line".
     #[serde(default = "default_visible_blocks")]
-    visible_blocks: Vec<String>,
+    pub visible_blocks: Vec<String>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExportSection {
+    pub output_dir: Option<String>,
+}
+
+/// Export configuration resolved from config file or defaults.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportConfig {
+    pub output_dir: PathBuf,
+}
+
+impl Default for ExportConfig {
+    fn default() -> Self {
+        Self {
+            output_dir: default_export_root(),
+        }
+    }
+}
+
+/// Resolves the default export root directory (`~/.session-manager/exports`).
+pub fn default_export_root() -> PathBuf {
+    if let Some(home) = dirs::home_dir() {
+        return home.join(".session-manager").join("exports");
+    }
+    PathBuf::from(".session-manager").join("exports")
+}
+
+/// Expands a leading tilde in a path if present using `dirs::home_dir()`.
+pub fn expand_tilde<P: AsRef<std::path::Path>>(path: P) -> PathBuf {
+    let p = path.as_ref();
+    if let Ok(stripped) = p.strip_prefix("~") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(stripped);
+        }
+    }
+    p.to_path_buf()
 }
 
 impl Default for DisplaySection {
@@ -133,13 +173,18 @@ pub fn load_config_from_path(path: &std::path::Path) -> DisplayConfig {
 
 /// Parses TOML content into a `DisplayConfig`.
 pub fn parse_config_content(content: &str) -> DisplayConfig {
+    parse_app_config_content(content).0
+}
+
+/// Parses TOML content into `(DisplayConfig, ExportConfig)`.
+pub fn parse_app_config_content(content: &str) -> (DisplayConfig, ExportConfig) {
     let config_file: ConfigFile = match toml::from_str(content) {
         Ok(config) => config,
         Err(err) => {
             eprintln!(
                 "[session-manager] Warning: failed to parse config file: {err}. Using defaults."
             );
-            return DisplayConfig::default();
+            return (DisplayConfig::default(), ExportConfig::default());
         }
     };
 
@@ -158,7 +203,36 @@ pub fn parse_config_content(content: &str) -> DisplayConfig {
         })
         .collect();
 
-    DisplayConfig { visible_blocks }
+    let export_config = match config_file.export {
+        Some(section) => match section.output_dir {
+            Some(dir) if !dir.trim().is_empty() => ExportConfig {
+                output_dir: expand_tilde(dir.trim()),
+            },
+            _ => ExportConfig::default(),
+        },
+        None => ExportConfig::default(),
+    };
+
+    (DisplayConfig { visible_blocks }, export_config)
+}
+
+/// Loads export configuration from `~/.session-manager/config.toml`.
+pub fn load_export_config() -> ExportConfig {
+    let Some(path) = config_path() else {
+        return ExportConfig::default();
+    };
+
+    load_export_config_from_path(&path)
+}
+
+/// Loads export configuration from an explicit path. Useful for testing.
+pub fn load_export_config_from_path(path: &std::path::Path) -> ExportConfig {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => return ExportConfig::default(),
+    };
+
+    parse_app_config_content(&content).1
 }
 
 #[cfg(test)]
@@ -261,5 +335,52 @@ visible_blocks = ["user", "unknown_thing", "tool_output"]
         assert!(!config.is_visible(&BlockKind::User));
         assert!(config.is_visible(&BlockKind::Assistant));
         assert!(!config.is_visible(&BlockKind::ToolCall));
+    }
+
+    #[test]
+    fn parses_export_config_with_custom_output_dir() {
+        let content = r#"
+[display]
+visible_blocks = ["user"]
+
+[export]
+output_dir = "/custom/export/dir"
+"#;
+        let (display, export) = parse_app_config_content(content);
+        assert!(display.is_visible(&BlockKind::User));
+        assert!(!display.is_visible(&BlockKind::Assistant));
+        assert_eq!(export.output_dir, PathBuf::from("/custom/export/dir"));
+    }
+
+    #[test]
+    fn parses_export_config_with_tilde_expansion() {
+        let content = r#"
+[export]
+output_dir = "~/my-exports"
+"#;
+        let (_, export) = parse_app_config_content(content);
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(export.output_dir, home.join("my-exports"));
+        }
+    }
+
+    #[test]
+    fn missing_export_section_uses_default_output_dir() {
+        let content = r#"
+[display]
+visible_blocks = ["user"]
+"#;
+        let (_, export) = parse_app_config_content(content);
+        assert_eq!(export.output_dir, default_export_root());
+    }
+
+    #[test]
+    fn empty_export_output_dir_uses_default() {
+        let content = r#"
+[export]
+output_dir = "   "
+"#;
+        let (_, export) = parse_app_config_content(content);
+        assert_eq!(export.output_dir, default_export_root());
     }
 }

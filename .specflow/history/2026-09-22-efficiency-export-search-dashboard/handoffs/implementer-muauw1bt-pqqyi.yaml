@@ -1,0 +1,19 @@
+task_id: implementer-muauw1bt-pqqyi
+change_id: efficiency-export-search-dashboard
+role: implementer
+target_spec: persisted-state
+adapter: manual
+lease_id: lease-muauw1bt-hqae8
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/persisted-state.md
+allowed_paths:
+  - src/**
+  - tests/**
+  - .specflow/changes/efficiency-export-search-dashboard/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden

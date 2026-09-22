@@ -9,6 +9,35 @@ use rusqlite::{Connection, OpenFlags, params};
 
 use crate::catalog::SessionEngine;
 
+/// Status of SQLite FTS5 full-text search availability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FtsAvailability {
+    Ready,
+    Disabled(&'static str),
+}
+
+impl FtsAvailability {
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    pub fn disabled_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Ready => None,
+            Self::Disabled(reason) => Some(reason),
+        }
+    }
+}
+
+impl fmt::Display for FtsAvailability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ready => write!(f, "Ready"),
+            Self::Disabled(reason) => write!(f, "Disabled: {reason}"),
+        }
+    }
+}
+
 /// Metadata stored for a session by the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionUserMeta {
@@ -109,6 +138,8 @@ enum StateBackend {
 pub struct StateStore {
     backend: Mutex<StateBackend>,
     is_degraded: bool,
+    db_path: Option<PathBuf>,
+    fts_availability: FtsAvailability,
 }
 
 impl StateStore {
@@ -138,10 +169,17 @@ impl StateStore {
     /// Opens or creates state store at a specific filesystem path.
     /// Falls back safely to in-memory mode upon corruption or initialization failure.
     pub fn open_at(path: &Path) -> Self {
-        match Self::try_open_sqlite(path) {
-            Ok(conn) => Self {
+        Self::open_at_with_fts_override(path, None)
+    }
+
+    /// Opens state store at a specific path with an optional FTS5 availability override (for testing degradation).
+    pub fn open_at_with_fts_override(path: &Path, fts_override: Option<bool>) -> Self {
+        match Self::try_open_sqlite_with_override(path, fts_override) {
+            Ok((conn, fts_avail)) => Self {
                 backend: Mutex::new(StateBackend::Sqlite(conn)),
                 is_degraded: false,
+                db_path: Some(path.to_path_buf()),
+                fts_availability: fts_avail,
             },
             Err(err) => {
                 eprintln!(
@@ -151,6 +189,10 @@ impl StateStore {
                 Self {
                     backend: Mutex::new(StateBackend::InMemory(HashMap::new())),
                     is_degraded: true,
+                    db_path: None,
+                    fts_availability: FtsAvailability::Disabled(
+                        "State store degraded to in-memory mode",
+                    ),
                 }
             }
         }
@@ -158,20 +200,38 @@ impl StateStore {
 
     /// Creates an in-memory state store (useful for tests or degraded fallback).
     pub fn open_in_memory() -> Self {
+        Self::open_in_memory_with_fts_override(None)
+    }
+
+    /// Creates an in-memory state store with an optional FTS5 availability override.
+    pub fn open_in_memory_with_fts_override(fts_override: Option<bool>) -> Self {
         match Connection::open_in_memory() {
-            Ok(mut conn) => match Self::run_migrations(&mut conn) {
-                Ok(()) => Self {
-                    backend: Mutex::new(StateBackend::Sqlite(conn)),
-                    is_degraded: false,
-                },
-                Err(_) => Self {
-                    backend: Mutex::new(StateBackend::InMemory(HashMap::new())),
-                    is_degraded: true,
-                },
-            },
+            Ok(mut conn) => {
+                let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
+                match Self::run_migrations(&mut conn, fts_override) {
+                    Ok(fts_avail) => Self {
+                        backend: Mutex::new(StateBackend::Sqlite(conn)),
+                        is_degraded: false,
+                        db_path: None,
+                        fts_availability: fts_avail,
+                    },
+                    Err(_) => Self {
+                        backend: Mutex::new(StateBackend::InMemory(HashMap::new())),
+                        is_degraded: true,
+                        db_path: None,
+                        fts_availability: FtsAvailability::Disabled(
+                            "State store degraded to in-memory mode",
+                        ),
+                    },
+                }
+            }
             Err(_) => Self {
                 backend: Mutex::new(StateBackend::InMemory(HashMap::new())),
                 is_degraded: true,
+                db_path: None,
+                fts_availability: FtsAvailability::Disabled(
+                    "State store degraded to in-memory mode",
+                ),
             },
         }
     }
@@ -180,7 +240,50 @@ impl StateStore {
         self.is_degraded
     }
 
-    fn try_open_sqlite(path: &Path) -> Result<Connection, StateError> {
+    pub fn fts_status(&self) -> FtsAvailability {
+        self.fts_availability
+    }
+
+    pub fn db_path(&self) -> Option<&Path> {
+        self.db_path.as_deref()
+    }
+
+    /// Opens an independent SQLite connection to the state database for background workers.
+    /// Configured with WAL journal mode and busy timeout to avoid contention with the TUI thread.
+    pub fn open_worker_connection(&self) -> Result<Connection, StateError> {
+        let path = match &self.db_path {
+            Some(p) => p,
+            None => {
+                return Err(StateError::Degraded(
+                    "cannot open worker connection for in-memory or degraded state store"
+                        .to_string(),
+                ));
+            }
+        };
+
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags)?;
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        Ok(conn)
+    }
+
+    /// Detects whether the FTS5 extension module is available in the active SQLite engine.
+    pub fn detect_fts5_support(conn: &Connection) -> bool {
+        let result: Result<i32, _> = conn.query_row(
+            "SELECT 1 FROM pragma_module_list WHERE name = 'fts5'",
+            [],
+            |row| row.get(0),
+        );
+        matches!(result, Ok(1))
+    }
+
+    fn try_open_sqlite_with_override(
+        path: &Path,
+        fts_override: Option<bool>,
+    ) -> Result<(Connection, FtsAvailability), StateError> {
         if let Some(parent) = path.parent() {
             if !parent.exists() {
                 fs::create_dir_all(parent)?;
@@ -191,11 +294,18 @@ impl StateStore {
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let mut conn = Connection::open_with_flags(path, flags)?;
-        Self::run_migrations(&mut conn)?;
-        Ok(conn)
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+
+        let fts_status = Self::run_migrations(&mut conn, fts_override)?;
+        Ok((conn, fts_status))
     }
 
-    fn run_migrations(conn: &mut Connection) -> Result<(), StateError> {
+    fn run_migrations(
+        conn: &mut Connection,
+        fts_override: Option<bool>,
+    ) -> Result<FtsAvailability, StateError> {
+        let fts_supported = fts_override.unwrap_or_else(|| Self::detect_fts5_support(conn));
         let current_version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
         if current_version < 1 {
@@ -215,7 +325,70 @@ impl StateStore {
             tx.commit()?;
         }
 
-        Ok(())
+        let fts_status = if fts_supported {
+            if current_version < 2 {
+                let tx = conn.transaction()?;
+                tx.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS index_meta (
+                        engine        TEXT    NOT NULL,
+                        session_id    TEXT    NOT NULL,
+                        indexed_mtime INTEGER NOT NULL,
+                        indexed_size  INTEGER NOT NULL,
+                        PRIMARY KEY (engine, session_id)
+                    );
+                    CREATE VIRTUAL TABLE IF NOT EXISTS session_content_fts USING fts5(
+                        engine,
+                        session_id,
+                        block_index UNINDEXED,
+                        role,
+                        content,
+                        tokenize = 'unicode61'
+                    );
+                    PRAGMA user_version = 2;",
+                )?;
+                tx.commit()?;
+            } else {
+                let has_fts: bool = conn
+                    .query_row(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_content_fts'",
+                        [],
+                        |row| row.get::<_, i32>(0),
+                    )
+                    .map(|v| v == 1)
+                    .unwrap_or(false);
+                if !has_fts {
+                    conn.execute_batch(
+                        "CREATE VIRTUAL TABLE IF NOT EXISTS session_content_fts USING fts5(
+                            engine,
+                            session_id,
+                            block_index UNINDEXED,
+                            role,
+                            content,
+                            tokenize = 'unicode61'
+                        );",
+                    )?;
+                }
+            }
+            FtsAvailability::Ready
+        } else {
+            if current_version < 2 {
+                let tx = conn.transaction()?;
+                tx.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS index_meta (
+                        engine        TEXT    NOT NULL,
+                        session_id    TEXT    NOT NULL,
+                        indexed_mtime INTEGER NOT NULL,
+                        indexed_size  INTEGER NOT NULL,
+                        PRIMARY KEY (engine, session_id)
+                    );
+                    PRAGMA user_version = 2;",
+                )?;
+                tx.commit()?;
+            }
+            FtsAvailability::Disabled("FTS5 module not available in SQLite runtime")
+        };
+
+        Ok(fts_status)
     }
 
     /// Loads all known session metadata from the database.
@@ -368,6 +541,328 @@ impl StateStore {
             }
         }
     }
+
+    /// Atomically replaces indexed transcript blocks and updates index_meta for a session.
+    pub fn upsert_session_content(
+        &self,
+        engine: SessionEngine,
+        session_id: &str,
+        mtime: i64,
+        size: i64,
+        blocks: &[(usize, &str, &str)],
+    ) -> Result<(), StateError> {
+        if !self.fts_availability.is_ready() {
+            return Err(StateError::Degraded(
+                "full-text search is disabled or unavailable".to_string(),
+            ));
+        }
+
+        let mut guard = match self.backend.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        match &mut *guard {
+            StateBackend::InMemory(_) => Err(StateError::Degraded(
+                "in-memory backend does not support FTS indexing".to_string(),
+            )),
+            StateBackend::Sqlite(conn) => {
+                Self::upsert_session_content_conn(conn, engine, session_id, mtime, size, blocks)
+            }
+        }
+    }
+
+    /// Alias for `upsert_session_content`.
+    pub fn upsert_session_index(
+        &self,
+        engine: SessionEngine,
+        session_id: &str,
+        mtime: i64,
+        size: i64,
+        blocks: &[(usize, &str, &str)],
+    ) -> Result<(), StateError> {
+        self.upsert_session_content(engine, session_id, mtime, size, blocks)
+    }
+
+    /// Transactionally upserts FTS5 blocks and updates index_meta on an arbitrary SQLite connection.
+    pub fn upsert_session_content_conn(
+        conn: &mut Connection,
+        engine: SessionEngine,
+        session_id: &str,
+        mtime: i64,
+        size: i64,
+        blocks: &[(usize, &str, &str)],
+    ) -> Result<(), StateError> {
+        let engine_key = engine.storage_key();
+        let tx = conn.transaction()?;
+
+        // 1. Delete prior index entries for this session
+        tx.execute(
+            "DELETE FROM session_content_fts WHERE engine = ?1 AND session_id = ?2",
+            params![engine_key, session_id],
+        )?;
+
+        // 2. Insert new transcript blocks
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO session_content_fts (engine, session_id, block_index, role, content)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for &(block_index, role, content) in blocks {
+                stmt.execute(params![
+                    engine_key,
+                    session_id,
+                    block_index as i64,
+                    role,
+                    content
+                ])?;
+            }
+        }
+
+        // 3. Upsert index_meta
+        tx.execute(
+            "INSERT INTO index_meta (engine, session_id, indexed_mtime, indexed_size)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(engine, session_id) DO UPDATE SET
+                 indexed_mtime = excluded.indexed_mtime,
+                 indexed_size = excluded.indexed_size",
+            params![engine_key, session_id, mtime, size],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Cascades deletion of a session from both session_content_fts and index_meta.
+    pub fn delete_session_content(
+        &self,
+        engine: SessionEngine,
+        session_id: &str,
+    ) -> Result<(), StateError> {
+        let mut guard = match self.backend.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        match &mut *guard {
+            StateBackend::InMemory(_) => Ok(()),
+            StateBackend::Sqlite(conn) => {
+                Self::delete_session_content_conn(conn, engine, session_id)
+            }
+        }
+    }
+
+    /// Alias for `delete_session_content`.
+    pub fn delete_session_index(
+        &self,
+        engine: SessionEngine,
+        session_id: &str,
+    ) -> Result<(), StateError> {
+        self.delete_session_content(engine, session_id)
+    }
+
+    /// Cascades deletion of a session from both session_content_fts and index_meta on an arbitrary connection.
+    pub fn delete_session_content_conn(
+        conn: &mut Connection,
+        engine: SessionEngine,
+        session_id: &str,
+    ) -> Result<(), StateError> {
+        let engine_key = engine.storage_key();
+        let tx = conn.transaction()?;
+
+        let has_fts: bool = tx
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_content_fts'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|v| v == 1)
+            .unwrap_or(false);
+
+        if has_fts {
+            tx.execute(
+                "DELETE FROM session_content_fts WHERE engine = ?1 AND session_id = ?2",
+                params![engine_key, session_id],
+            )?;
+        }
+
+        let has_meta: bool = tx
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='index_meta'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|v| v == 1)
+            .unwrap_or(false);
+
+        if has_meta {
+            tx.execute(
+                "DELETE FROM index_meta WHERE engine = ?1 AND session_id = ?2",
+                params![engine_key, session_id],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Loads all indexed session metadata (mtime, size) for incremental indexing synchronization.
+    pub fn load_index_meta(
+        &self,
+    ) -> Result<HashMap<(SessionEngine, String), (i64, i64)>, StateError> {
+        let mut guard = match self.backend.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        match &mut *guard {
+            StateBackend::InMemory(_) => Ok(HashMap::new()),
+            StateBackend::Sqlite(conn) => Self::load_index_meta_conn(conn),
+        }
+    }
+
+    /// Alias for `load_index_meta`.
+    pub fn get_indexed_metadata(
+        &self,
+    ) -> Result<HashMap<(SessionEngine, String), (i64, i64)>, StateError> {
+        self.load_index_meta()
+    }
+
+    /// Loads index_meta records on an arbitrary connection.
+    pub fn load_index_meta_conn(
+        conn: &Connection,
+    ) -> Result<HashMap<(SessionEngine, String), (i64, i64)>, StateError> {
+        let has_meta: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='index_meta'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|v| v == 1)
+            .unwrap_or(false);
+
+        if !has_meta {
+            return Ok(HashMap::new());
+        }
+
+        let mut stmt =
+            conn.prepare("SELECT engine, session_id, indexed_mtime, indexed_size FROM index_meta")?;
+        let rows = stmt.query_map([], |row| {
+            let engine_raw: String = row.get(0)?;
+            let session_id: String = row.get(1)?;
+            let mtime: i64 = row.get(2)?;
+            let size: i64 = row.get(3)?;
+            Ok((engine_raw, session_id, mtime, size))
+        })?;
+
+        let mut map = HashMap::new();
+        for item in rows.flatten() {
+            let (engine_raw, session_id, mtime, size) = item;
+            if let Some(engine) = SessionEngine::from_storage_key(&engine_raw) {
+                map.insert((engine, session_id), (mtime, size));
+            }
+        }
+
+        Ok(map)
+    }
+
+    /// Queries aggregate content metrics (total message count and character count) for a list of session IDs.
+    pub fn query_project_content_stats(
+        &self,
+        engine: Option<SessionEngine>,
+        session_ids: &[String],
+    ) -> Result<Option<(usize, usize)>, StateError> {
+        if !self.fts_availability.is_ready() {
+            return Ok(None);
+        }
+
+        let mut guard = match self.backend.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        match &mut *guard {
+            StateBackend::InMemory(_) => Ok(None),
+            StateBackend::Sqlite(conn) => {
+                Self::query_project_content_stats_conn(conn, engine, session_ids)
+            }
+        }
+    }
+
+    /// Alias for `query_project_content_stats`.
+    pub fn query_project_metrics(
+        &self,
+        engine: Option<SessionEngine>,
+        session_ids: &[String],
+    ) -> Result<Option<(usize, usize)>, StateError> {
+        self.query_project_content_stats(engine, session_ids)
+    }
+
+    /// Queries aggregate content metrics on an arbitrary connection.
+    pub fn query_project_content_stats_conn(
+        conn: &Connection,
+        engine: Option<SessionEngine>,
+        session_ids: &[String],
+    ) -> Result<Option<(usize, usize)>, StateError> {
+        let has_fts: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_content_fts'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|v| v == 1)
+            .unwrap_or(false);
+
+        if !has_fts {
+            return Ok(None);
+        }
+
+        if session_ids.is_empty() {
+            return Ok(Some((0, 0)));
+        }
+
+        let mut total_messages: usize = 0;
+        let mut total_chars: usize = 0;
+
+        for chunk in session_ids.chunks(500) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let (count, chars): (i64, i64) = match engine {
+                Some(eng) => {
+                    let sql = format!(
+                        "SELECT count(*), coalesce(sum(length(content)), 0)
+                         FROM session_content_fts
+                         WHERE engine = ?1 AND session_id IN ({placeholders})"
+                    );
+                    let mut params_vec: Vec<&dyn rusqlite::ToSql> =
+                        Vec::with_capacity(chunk.len() + 1);
+                    let engine_key = eng.storage_key();
+                    params_vec.push(&engine_key);
+                    for id in chunk {
+                        params_vec.push(id);
+                    }
+                    conn.query_row(&sql, rusqlite::params_from_iter(params_vec), |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })?
+                }
+                None => {
+                    let sql = format!(
+                        "SELECT count(*), coalesce(sum(length(content)), 0)
+                         FROM session_content_fts
+                         WHERE session_id IN ({placeholders})"
+                    );
+                    let params_vec: Vec<&dyn rusqlite::ToSql> =
+                        chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+                    conn.query_row(&sql, rusqlite::params_from_iter(params_vec), |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })?
+                }
+            };
+            total_messages += count as usize;
+            total_chars += chars as usize;
+        }
+
+        Ok(Some((total_messages, total_chars)))
+    }
 }
 
 #[cfg(test)]
@@ -391,28 +886,47 @@ mod tests {
     }
 
     #[test]
-    fn schema_migration_initializes_v1_table_and_user_version() {
+    fn schema_migration_initializes_v2_table_and_user_version() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("state.db");
 
         let store = StateStore::open_at(&db_path);
         assert!(!store.is_degraded());
+        assert_eq!(store.fts_status(), FtsAvailability::Ready);
 
         // Verify SQLite user_version and table creation
         let conn = Connection::open(&db_path).unwrap();
         let version: i32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
 
-        let count: i64 = conn
+        let meta_count: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='session_meta'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(meta_count, 1);
+
+        let index_meta_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='index_meta'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_meta_count, 1);
+
+        let fts_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='session_content_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_count, 1);
     }
 
     #[test]
@@ -634,6 +1148,8 @@ mod tests {
         let store = StateStore {
             backend: Mutex::new(StateBackend::Sqlite(conn)),
             is_degraded: false,
+            db_path: Some(db_path),
+            fts_availability: FtsAvailability::Ready,
         };
 
         // Write should return an error, not panic or crash
@@ -644,5 +1160,512 @@ mod tests {
             StateError::PermissionDenied(_) | StateError::Sqlite(_) => {}
             other => panic!("Expected permission or sqlite error, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn v1_migration_preserves_existing_data_and_advances_version() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("v1_state.db");
+
+        // Manually construct a pristine Schema v1 database
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session_meta (
+                    engine       TEXT    NOT NULL,
+                    session_id   TEXT    NOT NULL,
+                    is_favorite  INTEGER NOT NULL DEFAULT 0,
+                    tags         TEXT    NOT NULL DEFAULT '',
+                    updated_at   INTEGER NOT NULL,
+                    PRIMARY KEY (engine, session_id)
+                );
+                CREATE INDEX idx_session_meta_fav ON session_meta(is_favorite);
+                INSERT INTO session_meta VALUES ('pi', 'sess-1', 1, '[\"tag1\", \"tag2\"]', 1000);
+                INSERT INTO session_meta VALUES ('claude', 'sess-2', 0, '[\"work\"]', 2000);
+                PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+
+        // Open with StateStore which triggers v1 -> v2 migration
+        let store = StateStore::open_at(&db_path);
+        assert!(!store.is_degraded());
+        assert_eq!(store.fts_status(), FtsAvailability::Ready);
+
+        // Verify user_version is now 2
+        let conn = Connection::open(&db_path).unwrap();
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+
+        // Verify index_meta and session_content_fts were created
+        let index_meta_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='index_meta'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|v| v == 1)
+            .unwrap_or(false);
+        assert!(index_meta_exists);
+
+        let fts_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_content_fts'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|v| v == 1)
+            .unwrap_or(false);
+        assert!(fts_exists);
+
+        // Verify existing v1 session_meta data is 100% intact
+        let meta = store.load_all_meta();
+        let pi_meta = meta
+            .get(&(SessionEngine::Pi, "sess-1".to_string()))
+            .expect("Pi session-1 must exist");
+        assert!(pi_meta.is_favorite);
+        assert_eq!(pi_meta.tags, vec!["tag1", "tag2"]);
+        assert_eq!(pi_meta.updated_at, 1000);
+
+        let claude_meta = meta
+            .get(&(SessionEngine::Claude, "sess-2".to_string()))
+            .expect("Claude session-2 must exist");
+        assert!(!claude_meta.is_favorite);
+        assert_eq!(claude_meta.tags, vec!["work"]);
+        assert_eq!(claude_meta.updated_at, 2000);
+    }
+
+    #[test]
+    fn migration_and_repeated_open_is_idempotent() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("idempotent.db");
+
+        {
+            let store = StateStore::open_at(&db_path);
+            store
+                .set_favorite(SessionEngine::Pi, "sess-repeat", true)
+                .unwrap();
+            store
+                .set_tags(SessionEngine::Pi, "sess-repeat", &["first_run".to_string()])
+                .unwrap();
+            store
+                .upsert_session_index(
+                    SessionEngine::Pi,
+                    "sess-repeat",
+                    100,
+                    200,
+                    &[(0, "user", "hello world")],
+                )
+                .unwrap();
+        }
+
+        // Reopen database multiple times
+        for _ in 0..3 {
+            let store = StateStore::open_at(&db_path);
+            assert_eq!(store.fts_status(), FtsAvailability::Ready);
+
+            let conn = Connection::open(&db_path).unwrap();
+            let version: i32 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 2);
+
+            let all_meta = store.load_all_meta();
+            let item = all_meta
+                .get(&(SessionEngine::Pi, "sess-repeat".to_string()))
+                .expect("session must survive reopened db");
+            assert!(item.is_favorite);
+            assert_eq!(item.tags, vec!["first_run"]);
+
+            let index_meta = store.get_indexed_metadata().unwrap();
+            assert_eq!(
+                index_meta.get(&(SessionEngine::Pi, "sess-repeat".to_string())),
+                Some(&(100, 200))
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_sqlite_fts5_detection() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(
+            StateStore::detect_fts5_support(&conn),
+            "Bundled rusqlite build must support FTS5"
+        );
+
+        let store = StateStore::open_in_memory();
+        assert_eq!(store.fts_status(), FtsAvailability::Ready);
+    }
+
+    #[test]
+    fn fts5_unavailable_simulation_graceful_degradation() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("no_fts5.db");
+
+        // First populate with v1 data
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session_meta (
+                    engine       TEXT    NOT NULL,
+                    session_id   TEXT    NOT NULL,
+                    is_favorite  INTEGER NOT NULL DEFAULT 0,
+                    tags         TEXT    NOT NULL DEFAULT '',
+                    updated_at   INTEGER NOT NULL,
+                    PRIMARY KEY (engine, session_id)
+                );
+                INSERT INTO session_meta VALUES ('pi', 'sess-degrade', 1, '[\"important\"]', 100);
+                PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+
+        // Open with FTS5 explicitly forced as unavailable
+        let store = StateStore::open_at_with_fts_override(&db_path, Some(false));
+        assert!(!store.is_degraded()); // Core store itself is not degraded
+        assert_eq!(
+            store.fts_status(),
+            FtsAvailability::Disabled("FTS5 module not available in SQLite runtime")
+        );
+
+        // Verify session_content_fts was NOT created
+        let conn = Connection::open(&db_path).unwrap();
+        let fts_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_content_fts'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|v| v == 1)
+            .unwrap_or(false);
+        assert!(
+            !fts_exists,
+            "FTS table must not be created when FTS5 is disabled"
+        );
+
+        // Verify index_meta table was still created
+        let index_meta_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='index_meta'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|v| v == 1)
+            .unwrap_or(false);
+        assert!(
+            index_meta_exists,
+            "index_meta table should still be created"
+        );
+
+        // Verify core features continue to work flawlessly
+        let meta = store.load_all_meta();
+        assert!(
+            meta.get(&(SessionEngine::Pi, "sess-degrade".to_string()))
+                .unwrap()
+                .is_favorite
+        );
+
+        store
+            .set_favorite(SessionEngine::Pi, "sess-degrade", false)
+            .unwrap();
+        store
+            .set_tags(
+                SessionEngine::Pi,
+                "sess-degrade",
+                &["still_working".to_string()],
+            )
+            .unwrap();
+
+        let updated_meta = store.load_all_meta();
+        let item = updated_meta
+            .get(&(SessionEngine::Pi, "sess-degrade".to_string()))
+            .unwrap();
+        assert!(!item.is_favorite);
+        assert_eq!(item.tags, vec!["still_working"]);
+
+        // Verify FTS operations safely degrade with error/None, without panicking
+        let err = store
+            .upsert_session_index(
+                SessionEngine::Pi,
+                "sess-degrade",
+                100,
+                200,
+                &[(0, "user", "test")],
+            )
+            .unwrap_err();
+        assert!(matches!(err, StateError::Degraded(_)));
+
+        let stats = store
+            .query_project_metrics(Some(SessionEngine::Pi), &["sess-degrade".to_string()])
+            .unwrap();
+        assert_eq!(stats, None);
+    }
+
+    #[test]
+    fn worker_connection_thread_isolation_and_concurrency() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("concurrency.db");
+        let store = StateStore::open_at(&db_path);
+
+        // Open worker connection
+        let mut worker_conn = store
+            .open_worker_connection()
+            .expect("Worker connection must open successfully");
+
+        // Worker writes an index
+        StateStore::upsert_session_content_conn(
+            &mut worker_conn,
+            SessionEngine::Pi,
+            "sess-worker",
+            500,
+            1200,
+            &[
+                (0, "user", "worker input"),
+                (1, "assistant", "worker reply"),
+            ],
+        )
+        .unwrap();
+
+        // Main store writes favorite and tags
+        store
+            .set_favorite(SessionEngine::Pi, "sess-main", true)
+            .unwrap();
+        store
+            .set_tags(SessionEngine::Pi, "sess-main", &["main_tag".to_string()])
+            .unwrap();
+
+        // Main store can read what worker wrote
+        let indexed = store.get_indexed_metadata().unwrap();
+        assert_eq!(
+            indexed.get(&(SessionEngine::Pi, "sess-worker".to_string())),
+            Some(&(500, 1200))
+        );
+
+        let metrics = store
+            .query_project_metrics(Some(SessionEngine::Pi), &["sess-worker".to_string()])
+            .unwrap()
+            .expect("metrics should be returned");
+        assert_eq!(metrics.0, 2); // 2 messages
+        assert_eq!(metrics.1, "worker input".len() + "worker reply".len());
+
+        // Worker can read index_meta
+        let worker_meta = StateStore::load_index_meta_conn(&worker_conn).unwrap();
+        assert_eq!(
+            worker_meta.get(&(SessionEngine::Pi, "sess-worker".to_string())),
+            Some(&(500, 1200))
+        );
+    }
+
+    #[test]
+    fn fts_upsert_idempotence_and_delete_cascade() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("fts_lifecycle.db");
+        let store = StateStore::open_at(&db_path);
+
+        // Initial upsert
+        store
+            .upsert_session_index(
+                SessionEngine::Pi,
+                "sess-lifecycle",
+                1000,
+                3000,
+                &[
+                    (0, "user", "first message"),
+                    (1, "assistant", "first response"),
+                    (2, "tool", "first tool call"),
+                ],
+            )
+            .unwrap();
+
+        let initial_meta = store.get_indexed_metadata().unwrap();
+        assert_eq!(
+            initial_meta.get(&(SessionEngine::Pi, "sess-lifecycle".to_string())),
+            Some(&(1000, 3000))
+        );
+
+        let stats_1 = store
+            .query_project_metrics(Some(SessionEngine::Pi), &["sess-lifecycle".to_string()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(stats_1.0, 3);
+
+        // Idempotent re-index with updated content (2 blocks instead of 3)
+        store
+            .upsert_session_index(
+                SessionEngine::Pi,
+                "sess-lifecycle",
+                1500,
+                4000,
+                &[
+                    (0, "user", "updated message"),
+                    (1, "assistant", "updated response"),
+                ],
+            )
+            .unwrap();
+
+        let updated_meta = store.get_indexed_metadata().unwrap();
+        assert_eq!(
+            updated_meta.get(&(SessionEngine::Pi, "sess-lifecycle".to_string())),
+            Some(&(1500, 4000))
+        );
+
+        let stats_2 = store
+            .query_project_metrics(Some(SessionEngine::Pi), &["sess-lifecycle".to_string()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(stats_2.0, 2); // Exactly 2 blocks, old 3 blocks purged
+
+        // Cascade deletion
+        store
+            .delete_session_index(SessionEngine::Pi, "sess-lifecycle")
+            .unwrap();
+
+        let meta_after_delete = store.get_indexed_metadata().unwrap();
+        assert_eq!(
+            meta_after_delete.get(&(SessionEngine::Pi, "sess-lifecycle".to_string())),
+            None
+        );
+
+        let stats_after_delete = store
+            .query_project_metrics(Some(SessionEngine::Pi), &["sess-lifecycle".to_string()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(stats_after_delete, (0, 0));
+    }
+
+    #[test]
+    fn failed_migration_leaves_previous_version_intact() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("failed_migration.db");
+
+        // Manually build v1 db
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session_meta (
+                    engine       TEXT    NOT NULL,
+                    session_id   TEXT    NOT NULL,
+                    is_favorite  INTEGER NOT NULL DEFAULT 0,
+                    tags         TEXT    NOT NULL DEFAULT '',
+                    updated_at   INTEGER NOT NULL,
+                    PRIMARY KEY (engine, session_id)
+                );
+                INSERT INTO session_meta VALUES ('pi', 'sess-safe', 1, '[\"precious\"]', 42);
+                PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+
+        // Simulate a failure in migration transaction
+        {
+            let mut conn = Connection::open(&db_path).unwrap();
+            let res: Result<(), rusqlite::Error> = (|| {
+                let tx = conn.transaction()?;
+                // Execute a syntax error to trigger rollback
+                tx.execute_batch("INVALID SQL SYNTAX HERE;")?;
+                tx.execute("PRAGMA user_version = 2", [])?;
+                tx.commit()?;
+                Ok(())
+            })();
+            assert!(res.is_err(), "Transaction must fail and roll back");
+        }
+
+        // Verify version is still 1 and original data is untouched
+        let conn = Connection::open(&db_path).unwrap();
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+
+        let favorite: i32 = conn
+            .query_row(
+                "SELECT is_favorite FROM session_meta WHERE session_id = 'sess-safe'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(favorite, 1);
+    }
+
+    #[test]
+    fn project_content_metrics_aggregation() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("metrics.db");
+        let store = StateStore::open_at(&db_path);
+
+        // Empty session list returns Some((0, 0))
+        let empty_stats = store.query_project_metrics(None, &[]).unwrap();
+        assert_eq!(empty_stats, Some((0, 0)));
+
+        // Non-existent sessions return Some((0, 0))
+        let missing_stats = store
+            .query_project_metrics(None, &["missing-1".to_string(), "missing-2".to_string()])
+            .unwrap();
+        assert_eq!(missing_stats, Some((0, 0)));
+
+        // Index session 1 (Pi)
+        store
+            .upsert_session_index(
+                SessionEngine::Pi,
+                "sess-p1",
+                10,
+                20,
+                &[(0, "user", "ABC"), (1, "assistant", "DEFG")],
+            )
+            .unwrap();
+
+        // Index session 2 (Pi)
+        store
+            .upsert_session_index(
+                SessionEngine::Pi,
+                "sess-p2",
+                10,
+                20,
+                &[(0, "user", "HIJKL"), (1, "assistant", "MNOPQR")],
+            )
+            .unwrap();
+
+        // Index session 3 (Claude)
+        store
+            .upsert_session_index(
+                SessionEngine::Claude,
+                "sess-c1",
+                10,
+                20,
+                &[(0, "user", "12345")],
+            )
+            .unwrap();
+
+        // Query with Pi engine filter
+        let pi_stats = store
+            .query_project_metrics(
+                Some(SessionEngine::Pi),
+                &[
+                    "sess-p1".to_string(),
+                    "sess-p2".to_string(),
+                    "sess-c1".to_string(),
+                ],
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(pi_stats.0, 4); // 2 + 2 = 4 messages
+        assert_eq!(pi_stats.1, 7 + 11); // 18 chars
+
+        // Query across all engines (None)
+        let all_stats = store
+            .query_project_metrics(
+                None,
+                &[
+                    "sess-p1".to_string(),
+                    "sess-p2".to_string(),
+                    "sess-c1".to_string(),
+                ],
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(all_stats.0, 5); // 4 + 1 = 5 messages
+        assert_eq!(all_stats.1, 18 + 5); // 23 chars
     }
 }

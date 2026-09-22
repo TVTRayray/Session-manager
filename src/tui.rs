@@ -6,9 +6,9 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use tui_tree_widget::{Tree, TreeItem};
 
 use crate::app::{
-    App, CatalogLoadingState, DeleteModalFocus, DeleteScope, FocusedPanel, GroupMode,
-    GroupSummaryCard, RightPanelMode, SearchPhase, SessionDetailState, SplitDirection,
-    TagModalFocus, build_grouped_session_nodes,
+    App, CatalogLoadingState, DeleteModalFocus, DeleteScope, ExportModalFocus, ExportModalState,
+    FocusedPanel, GroupMode, GroupSummaryCard, RightPanelMode, SearchPhase, SessionDetailState,
+    SplitDirection, TagModalFocus, build_grouped_session_nodes,
 };
 use crate::catalog::{FileHealth, SessionEngine};
 use crate::detail::{RenderedLine, RenderedLineKind};
@@ -79,9 +79,18 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     let detail_text = render_right_panel_text(app);
 
+    let detail_title_string;
     let detail_title = match app.right_panel_mode {
         RightPanelMode::GroupSummary => "Group Summary",
         RightPanelMode::SessionDetail => "Detail",
+        RightPanelMode::ProjectDashboard => {
+            detail_title_string = if let Some(dash) = &app.project_dashboard_state {
+                format!("Dashboard: {}", dash.project_name)
+            } else {
+                "Dashboard".to_string()
+            };
+            detail_title_string.as_str()
+        }
     };
     let detail = Paragraph::new(detail_text)
         .block(panel_block(
@@ -93,16 +102,48 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     let status_text = if app.search_state.phase == SearchPhase::Input {
         search_prompt_line(app, outer[2].width)
-    } else if app.status_message.is_empty() {
-        Line::from(" Tab:Engine | j/k:Nav | /:Search n/N | Ctrl+N:New | d:Del | ?:Help | q:Quit")
     } else {
-        Line::from(vec![
-            Span::styled(
-                " >> ",
-                Style::default().fg(THEME_WARN).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(app.status_message.as_str(), Style::default().fg(THEME_WARN)),
-        ])
+        let index_indicator = if let Some(progress) = &app.index_progress {
+            if !progress.is_complete {
+                Some(format!(
+                    "[索引中 {}/{}]",
+                    progress.indexed_count, progress.total_count
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if app.status_message.is_empty() {
+            let default_msg = " Tab:Engine | j/k:Nav | /:Search | Ctrl+F:FullText | e:Export | D:Dash | ?:Help | q:Quit";
+            if let Some(ind) = index_indicator {
+                Line::from(vec![
+                    Span::styled(format!(" {ind} "), Style::default().fg(THEME_WARN)),
+                    Span::raw(default_msg),
+                ])
+            } else {
+                Line::from(default_msg)
+            }
+        } else if let Some(ind) = index_indicator {
+            Line::from(vec![
+                Span::styled(format!(" {ind} "), Style::default().fg(THEME_WARN)),
+                Span::styled(
+                    " >> ",
+                    Style::default().fg(THEME_WARN).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(app.status_message.as_str(), Style::default().fg(THEME_WARN)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled(
+                    " >> ",
+                    Style::default().fg(THEME_WARN).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(app.status_message.as_str(), Style::default().fg(THEME_WARN)),
+            ])
+        }
     };
 
     let status = Paragraph::new(status_text).style(Style::default().bg(THEME_BG));
@@ -205,8 +246,16 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         frame.render_widget(modal_widget, area);
     }
 
+    if let Some(modal) = &app.export_modal_state {
+        render_export_modal(frame, modal);
+    }
+
+    if app.search_overlay_state.is_some() {
+        render_search_overlay(frame, app);
+    }
+
     if app.show_help_modal {
-        let area = centered_rect(52, 19, frame.area());
+        let area = centered_rect(75, 23, frame.area());
         frame.render_widget(Clear, area);
         let help_text = Text::from(vec![
             Line::from("Keyboard Shortcuts"),
@@ -220,6 +269,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             Line::from("  Space              Expand / Collapse"),
             Line::from("  f                  Toggle favorite"),
             Line::from("  t                  Edit tags"),
+            Line::from("  e                  Export to Markdown"),
+            Line::from("  Ctrl+F             Full-text search"),
+            Line::from("  D                  Project dashboard (on group header)"),
             Line::from("  d / Delete         Delete session"),
             Line::from("  g                  Toggle group mode"),
             Line::from("  Ctrl+Alt+H/V      Switch layout"),
@@ -352,7 +404,514 @@ fn render_right_panel_text(app: &App) -> Text<'static> {
                 Text::from(format!("Unable to load session detail.\n{err}"))
             }
         },
+        RightPanelMode::ProjectDashboard => render_project_dashboard(app),
     }
+}
+
+fn render_export_modal(frame: &mut Frame<'_>, modal: &ExportModalState) {
+    let screen = frame.area();
+    let area = centered_rect(70, 10, screen);
+    frame.render_widget(Clear, area);
+
+    let cancel = delete_button_span("Cancel", modal.focus == ExportModalFocus::Cancel);
+    let export = delete_button_span("Export", modal.focus == ExportModalFocus::Export);
+    let buttons = Line::from(vec![cancel, Span::raw("    "), export]);
+
+    let modal_text = Text::from(vec![
+        Line::from("Export all sessions in this group to Markdown?"),
+        Line::from(""),
+        Line::from(format!("Group: {}", modal.group_label)),
+        Line::from(format!("Sessions: {}", modal.session_count)),
+        Line::from(""),
+        buttons,
+    ]);
+
+    let modal_widget = Paragraph::new(modal_text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Confirm Export ")
+                .border_style(Style::default().fg(THEME_HIGHLIGHT)),
+        )
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(modal_widget, area);
+}
+
+fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
+    let Some(overlay) = &app.search_overlay_state else {
+        return;
+    };
+
+    let screen = frame.area();
+    let percent_x = if screen.width < 80 { 96 } else { 84 };
+    let height = if screen.height < 24 {
+        ((screen.height as u32 * 90) / 100) as u16
+    } else {
+        ((screen.height as u32 * 80) / 100) as u16
+    };
+
+    let area = centered_rect(
+        percent_x,
+        height.clamp(16.min(screen.height), screen.height),
+        screen,
+    );
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Full-text Search ")
+        .border_style(Style::default().fg(THEME_HIGHLIGHT));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height < 3 || inner.width < 10 {
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Search input line
+            Constraint::Length(1), // Divider
+            Constraint::Min(1),    // Results list
+            Constraint::Length(1), // Divider
+            Constraint::Length(1), // Footer
+        ])
+        .split(inner);
+
+    // 1. Search input line
+    let search_line = Paragraph::new(Line::from(vec![
+        Span::styled(" 🔍 ", Style::default().fg(THEME_HIGHLIGHT)),
+        Span::styled(overlay.query.as_str(), Style::default().fg(THEME_TEXT)),
+    ]));
+    frame.render_widget(search_line, chunks[0]);
+
+    let cursor_x = chunks[0].x + 4 + overlay.cursor_position as u16;
+    if cursor_x < chunks[0].x + chunks[0].width {
+        frame.set_cursor_position((cursor_x, chunks[0].y));
+    }
+
+    // 2. Top divider
+    let divider = Paragraph::new(Line::from(Span::styled(
+        "─".repeat(chunks[1].width as usize),
+        Style::default().fg(THEME_BORDER),
+    )));
+    frame.render_widget(divider, chunks[1]);
+
+    // 3. Results list or informative messages
+    if !app.state_store.fts_status().is_ready() {
+        let notice = Paragraph::new(Text::from(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "⚠️ 全文搜索不可用：当前 SQLite 环境未启用 FTS5 扩展组件",
+                Style::default().fg(THEME_WARN),
+            )),
+        ]))
+        .alignment(Alignment::Center);
+        frame.render_widget(notice, chunks[2]);
+    } else if overlay.is_loading {
+        let loading = Paragraph::new(Text::from(vec![
+            Line::from(""),
+            Line::from(Span::styled("搜索中...", Style::default().fg(THEME_BORDER))),
+        ]))
+        .alignment(Alignment::Center);
+        frame.render_widget(loading, chunks[2]);
+    } else if let Some(err_msg) = &overlay.error_message {
+        let err = Paragraph::new(Text::from(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("⚠️ {}", err_msg),
+                Style::default().fg(THEME_WARN),
+            )),
+        ]))
+        .alignment(Alignment::Center);
+        frame.render_widget(err, chunks[2]);
+    } else if overlay.query.trim().is_empty() {
+        let hint = Paragraph::new(Text::from(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "Type keywords to search session transcripts...",
+                Style::default().fg(THEME_BORDER),
+            )),
+        ]))
+        .alignment(Alignment::Center);
+        frame.render_widget(hint, chunks[2]);
+    } else if overlay.results.is_empty() {
+        let empty = Paragraph::new(Text::from(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "No matching sessions found.",
+                Style::default().fg(THEME_BORDER),
+            )),
+        ]))
+        .alignment(Alignment::Center);
+        frame.render_widget(empty, chunks[2]);
+    } else {
+        let item_height = 3;
+        let visible_items = (chunks[2].height as usize / item_height).max(1);
+        let scroll_offset = overlay
+            .selected_index
+            .saturating_sub(visible_items.saturating_sub(1));
+
+        let mut lines = Vec::new();
+        for (i, hit) in overlay
+            .results
+            .iter()
+            .enumerate()
+            .skip(scroll_offset)
+            .take(visible_items)
+        {
+            let is_selected = i == overlay.selected_index;
+            let pointer = if is_selected { "▸ " } else { "  " };
+
+            let pointer_span = Span::styled(
+                pointer,
+                if is_selected {
+                    Style::default()
+                        .fg(THEME_HIGHLIGHT)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(THEME_BORDER)
+                },
+            );
+
+            let item = if hit.engine == app.active_engine {
+                app.session_list
+                    .iter()
+                    .find(|it| it.session_id == hit.session_id)
+                    .or_else(|| {
+                        app.catalog_cache.get(&hit.engine).and_then(|items| {
+                            items.iter().find(|it| it.session_id == hit.session_id)
+                        })
+                    })
+            } else {
+                app.catalog_cache
+                    .get(&hit.engine)
+                    .and_then(|items| items.iter().find(|it| it.session_id == hit.session_id))
+            };
+
+            let project = item
+                .map(|it| {
+                    if !it.cwd_group_label.is_empty()
+                        && it.cwd_group_label != "unknown-project"
+                        && it.cwd_group_label != "-"
+                    {
+                        it.cwd_group_label.as_str()
+                    } else if !it.cwd_tail.is_empty() && it.cwd_tail != "-" {
+                        it.cwd_tail.as_str()
+                    } else {
+                        "-"
+                    }
+                })
+                .unwrap_or("-");
+
+            let title = item
+                .map(|it| {
+                    if !it.name.is_empty() {
+                        it.name.as_str()
+                    } else {
+                        it.session_id.as_str()
+                    }
+                })
+                .unwrap_or(&hit.session_id);
+
+            let time = item
+                .map(|it| {
+                    if !it.display_time.is_empty() && it.display_time != "metadata unavailable" {
+                        short_time(&it.display_time)
+                    } else {
+                        "-".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "-".to_string());
+
+            let header_text = format!("[{}] {}", project, truncate_summary(title, 34));
+            let header_span = Span::styled(
+                format!("{:<42}", header_text),
+                if is_selected {
+                    Style::default().fg(THEME_TEXT).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(THEME_TEXT)
+                },
+            );
+            let meta_span = Span::styled(
+                format!("{} · {}", hit.engine.label(), time),
+                Style::default().fg(THEME_BORDER),
+            );
+
+            lines.push(Line::from(vec![pointer_span, header_span, meta_span]));
+
+            let mut snippet_spans = vec![Span::raw("    \"...")];
+            render_highlighted_snippet(&hit.snippet, &mut snippet_spans);
+            snippet_spans.push(Span::raw("...\""));
+            if hit.extra_matches() > 0 {
+                snippet_spans.push(Span::styled(
+                    format!(" ({} more matches in this session)", hit.extra_matches()),
+                    Style::default().fg(THEME_BORDER),
+                ));
+            }
+            lines.push(Line::from(snippet_spans));
+            lines.push(Line::from(""));
+        }
+
+        let results_widget = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        frame.render_widget(results_widget, chunks[2]);
+    }
+
+    // 4. Bottom divider
+    let bot_divider = Paragraph::new(Line::from(Span::styled(
+        "─".repeat(chunks[3].width as usize),
+        Style::default().fg(THEME_BORDER),
+    )));
+    frame.render_widget(bot_divider, chunks[3]);
+
+    // 5. Footer
+    let footer_left = if !app.state_store.fts_status().is_ready() {
+        Span::styled(" 索引状态：已禁用", Style::default().fg(THEME_WARN))
+    } else if let Some(progress) = &app.index_progress {
+        if !progress.is_complete {
+            Span::styled(
+                format!(
+                    " ⚠️ 索引构建中 ({}/{})，搜索结果基于已完成部分",
+                    progress.indexed_count, progress.total_count
+                ),
+                Style::default().fg(THEME_WARN),
+            )
+        } else {
+            Span::styled(
+                format!(
+                    " 索引状态：已完成 {}/{} 会话",
+                    progress.indexed_count, progress.total_count
+                ),
+                Style::default().fg(THEME_BORDER),
+            )
+        }
+    } else {
+        Span::styled(" 索引状态：就绪", Style::default().fg(THEME_BORDER))
+    };
+
+    let footer_right = Span::styled(
+        "↑↓ 选择   Enter 跳转   Esc 关闭 ",
+        Style::default().fg(THEME_BORDER),
+    );
+
+    let available_w = chunks[4].width as usize;
+    let left_len = footer_left.width();
+    let right_len = footer_right.width();
+    let pad = available_w.saturating_sub(left_len + right_len);
+
+    let footer_line = if available_w < left_len + right_len {
+        Line::from(vec![footer_left])
+    } else {
+        Line::from(vec![footer_left, Span::raw(" ".repeat(pad)), footer_right])
+    };
+    frame.render_widget(Paragraph::new(footer_line), chunks[4]);
+}
+
+fn render_highlighted_snippet(snippet: &str, spans: &mut Vec<Span<'static>>) {
+    let mut rest = snippet;
+    while let Some(start_idx) = rest.find("<<") {
+        if start_idx > 0 {
+            spans.push(Span::styled(
+                rest[..start_idx].to_string(),
+                Style::default().fg(THEME_TEXT),
+            ));
+        }
+        let after_start = &rest[start_idx + 2..];
+        if let Some(end_idx) = after_start.find(">>") {
+            let matched = &after_start[..end_idx];
+            spans.push(Span::styled(
+                matched.to_string(),
+                Style::default().fg(THEME_WARN).add_modifier(Modifier::BOLD),
+            ));
+            rest = &after_start[end_idx + 2..];
+        } else {
+            spans.push(Span::styled(
+                after_start.to_string(),
+                Style::default().fg(THEME_WARN).add_modifier(Modifier::BOLD),
+            ));
+            rest = "";
+            break;
+        }
+    }
+    if !rest.is_empty() {
+        spans.push(Span::styled(
+            rest.to_string(),
+            Style::default().fg(THEME_TEXT),
+        ));
+    }
+}
+
+fn render_project_dashboard(app: &App) -> Text<'static> {
+    let Some(dashboard) = &app.project_dashboard_state else {
+        return Text::from(vec![Line::from("No project selected.")]);
+    };
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  项目路径      ", Style::default().fg(THEME_BORDER)),
+        Span::styled(
+            dashboard.project_path.clone(),
+            Style::default().fg(THEME_TEXT),
+        ),
+    ]));
+
+    let engine_breakdown: Vec<String> = dashboard
+        .engine_counts
+        .iter()
+        .map(|(eng, count)| format!("{}: {count}", eng.label()))
+        .collect();
+    let breakdown_str = if engine_breakdown.is_empty() {
+        String::new()
+    } else {
+        format!("   ({})", engine_breakdown.join(", "))
+    };
+
+    lines.push(Line::from(vec![
+        Span::styled("  会话总数      ", Style::default().fg(THEME_BORDER)),
+        Span::styled(
+            format!("{}{breakdown_str}", dashboard.total_sessions),
+            Style::default().fg(THEME_TEXT).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    if !dashboard.engine_counts.is_empty() {
+        let mut bar_spans = vec![Span::styled(
+            "  引擎分布      ",
+            Style::default().fg(THEME_BORDER),
+        )];
+        for (i, (eng, count)) in dashboard.engine_counts.iter().enumerate() {
+            if i > 0 {
+                bar_spans.push(Span::raw("  "));
+            }
+            let bar_len = 10;
+            let filled = if dashboard.total_sessions > 0 {
+                (count * bar_len) / dashboard.total_sessions
+            } else {
+                0
+            };
+            let bar = format!(
+                "{}{}",
+                "█".repeat(filled),
+                "░".repeat(bar_len.saturating_sub(filled))
+            );
+            bar_spans.push(Span::styled(
+                format!("{} ", eng.label()),
+                Style::default().fg(THEME_HIGHLIGHT),
+            ));
+            bar_spans.push(Span::styled(
+                format!("[{bar}] "),
+                Style::default().fg(THEME_TEXT),
+            ));
+            bar_spans.push(Span::styled(
+                count.to_string(),
+                Style::default().fg(THEME_WARN),
+            ));
+        }
+        lines.push(Line::from(bar_spans));
+    }
+
+    lines.push(Line::from(vec![
+        Span::styled("  收藏数        ", Style::default().fg(THEME_BORDER)),
+        Span::styled(
+            dashboard.favorite_count.to_string(),
+            Style::default().fg(THEME_TEXT),
+        ),
+    ]));
+
+    let tags_str = if dashboard.top_tags.is_empty() {
+        "(none)".to_string()
+    } else {
+        dashboard
+            .top_tags
+            .iter()
+            .map(|(tag, count)| format!("#{tag} ({count})"))
+            .collect::<Vec<_>>()
+            .join("  ")
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  常用标签      ", Style::default().fg(THEME_BORDER)),
+        Span::styled(tags_str, Style::default().fg(THEME_TEXT)),
+    ]));
+
+    lines.push(Line::from(vec![
+        Span::styled("  最近活跃      ", Style::default().fg(THEME_BORDER)),
+        Span::styled(
+            dashboard.last_active.clone(),
+            Style::default().fg(THEME_TEXT),
+        ),
+    ]));
+
+    let scale_str = match dashboard.content_scale {
+        Some((msgs, words)) => format!("约 {words} 字 · {msgs} 条消息"),
+        None => "N/A".to_string(),
+    };
+    lines.push(Line::from(vec![
+        Span::styled("  正文规模      ", Style::default().fg(THEME_BORDER)),
+        Span::styled(scale_str, Style::default().fg(THEME_TEXT)),
+    ]));
+
+    lines.push(Line::from(Span::styled(
+        "  ──────────────────────────────────────────────────────────",
+        Style::default().fg(THEME_BORDER),
+    )));
+
+    // Recent sessions (only if terminal height is >= 20 or unknown 0)
+    if app.terminal_size.height >= 20 || app.terminal_size.height == 0 {
+        lines.push(Line::from(Span::styled(
+            "  最近会话",
+            Style::default()
+                .fg(THEME_BORDER)
+                .add_modifier(Modifier::BOLD),
+        )));
+
+        if dashboard.recent_sessions.is_empty() {
+            lines.push(Line::from("    (暂无会话)"));
+        } else {
+            for (idx, (engine, sess)) in dashboard.recent_sessions.iter().enumerate().take(8) {
+                let is_selected = idx == dashboard.selected_index;
+                let pointer = if is_selected { "  ▸ " } else { "    " };
+                let title = if sess.name.is_empty() {
+                    &sess.summary
+                } else {
+                    &sess.name
+                };
+                let truncated_title = truncate_summary(title, 32);
+
+                let line_style = if is_selected {
+                    Style::default()
+                        .fg(THEME_HIGHLIGHT)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(THEME_TEXT)
+                };
+
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        pointer,
+                        if is_selected {
+                            Style::default().fg(THEME_HIGHLIGHT)
+                        } else {
+                            Style::default().fg(THEME_BORDER)
+                        },
+                    ),
+                    Span::styled(format!("{truncated_title:<34}"), line_style),
+                    Span::styled(
+                        format!("[{}] ", engine.label()),
+                        Style::default().fg(THEME_BORDER),
+                    ),
+                    Span::styled(
+                        format!("{:<8}", short_time(&sess.display_time)),
+                        Style::default().fg(THEME_BORDER),
+                    ),
+                ]));
+            }
+        }
+    }
+
+    Text::from(lines)
 }
 
 fn loading_spinner(tick_count: u64) -> &'static str {
@@ -894,7 +1453,7 @@ fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{GroupMode, compute_layout};
+    use crate::app::{GroupMode, SearchOverlayState, compute_layout};
     use crate::catalog::{CatalogLoad, SessionCatalogReader, SessionListItem};
     use ratatui::buffer::Buffer;
     use ratatui::widgets::Widget;
@@ -1397,5 +1956,405 @@ mod tests {
 
         assert!(rendered.contains("f                  Toggle favorite"));
         assert!(rendered.contains("t                  Edit tags"));
+        assert!(rendered.contains("e                  Export to Markdown"));
+        assert!(rendered.contains("Ctrl+F             Full-text search"));
+        assert!(rendered.contains("D                  Project dashboard (on group header)"));
+    }
+
+    #[test]
+    fn export_modal_renders_centered_and_shows_buttons() {
+        let mut app = App::new(&StubCatalog);
+        app.export_modal_state = Some(ExportModalState {
+            group_identifier: "group:workspace/demo".to_string(),
+            group_label: "workspace/demo".to_string(),
+            session_count: 15,
+            focus: ExportModalFocus::Cancel,
+        });
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..24)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Confirm Export"));
+        assert!(rendered.contains("Export all sessions in this group to Markdown?"));
+        assert!(rendered.contains("Group: workspace/demo"));
+        assert!(rendered.contains("Sessions: 15"));
+        assert!(rendered.contains("[ Cancel ]"));
+        assert!(rendered.contains("Export"));
+
+        // Toggle focus to Export
+        app.export_modal_state.as_mut().unwrap().focus = ExportModalFocus::Export;
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..24)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("[ Export ]"));
+    }
+
+    #[test]
+    fn search_overlay_renders_header_results_and_footer() {
+        let mut app = App::new(&StubCatalog);
+        let overlay = SearchOverlayState {
+            query: "migration".to_string(),
+            cursor_position: 9,
+            is_loading: false,
+            error_message: None,
+            results: vec![crate::search::SearchHit::new(
+                SessionEngine::Pi,
+                "sess-pi-migration",
+                0,
+                "fixing <<migration>> script in database",
+                1.5,
+                3,
+            )],
+            selected_index: 0,
+            scroll_offset: 0,
+            debounce_ticks: 0,
+            last_searched_query: "migration".to_string(),
+        };
+        app.search_overlay_state = Some(overlay);
+        app.index_progress = Some(crate::search::IndexProgress {
+            indexed_count: 42,
+            total_count: 128,
+            is_complete: false,
+        });
+
+        let backend = ratatui::backend::TestBackend::new(100, 28);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..28)
+            .map(|y| {
+                (0..100)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let normalized = rendered.replace(' ', "");
+        assert!(rendered.contains("Full-text Search"));
+        assert!(rendered.contains("🔍"));
+        assert!(rendered.contains("migration"));
+        assert!(rendered.contains("sess-pi-migration"));
+        assert!(rendered.contains("2 more matches in this session"));
+        assert!(rendered.contains("42/128"));
+        assert!(normalized.contains("↑↓选择Enter跳转Esc关闭"));
+    }
+
+    #[test]
+    fn search_overlay_empty_and_disabled_states() {
+        let mut app = App::new(&StubCatalog);
+        app.search_overlay_state = Some(SearchOverlayState {
+            query: "nonexistent".to_string(),
+            cursor_position: 11,
+            is_loading: false,
+            error_message: None,
+            results: Vec::new(),
+            selected_index: 0,
+            scroll_offset: 0,
+            debounce_ticks: 0,
+            last_searched_query: "nonexistent".to_string(),
+        });
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..24)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("No matching sessions found."));
+    }
+
+    #[test]
+    fn project_dashboard_renders_ascii_metrics_progress_bars_and_sessions() {
+        let mut app = App::new(&StubCatalog);
+        app.group_mode = GroupMode::ByProject;
+        app.right_panel_mode = RightPanelMode::ProjectDashboard;
+        app.project_dashboard_state = Some(crate::app::ProjectDashboardState {
+            project_path: "/home/ray/workspace/python-script".to_string(),
+            project_name: "python-script".to_string(),
+            engine_counts: vec![
+                (SessionEngine::Pi, 25),
+                (SessionEngine::Codex, 4),
+                (SessionEngine::Claude, 2),
+            ],
+            total_sessions: 31,
+            favorite_count: 3,
+            top_tags: vec![
+                ("bug".to_string(), 5),
+                ("重构".to_string(), 3),
+                ("数据核查".to_string(), 2),
+            ],
+            last_active: "2026-09-16 14:02".to_string(),
+            content_scale: Some((210, 42000)),
+            recent_sessions: vec![(
+                SessionEngine::Pi,
+                SessionListItem {
+                    session_id: "recent-1".to_string(),
+                    name: "新彭楠-备煤日进及消".to_string(),
+                    summary: "新彭楠-备煤日进及消".to_string(),
+                    parent_session_id: None,
+                    agent_name: None,
+                    display_time: "09-16 14:02".to_string(),
+                    cwd_tail: "python-script".to_string(),
+                    cwd_group_label: "python-script".to_string(),
+                    cwd_path: "/workspace/python-script".to_string(),
+                    abs_path: PathBuf::from("/tmp/recent-1.jsonl"),
+                    is_loadable: true,
+                    modified_at: SystemTime::now(),
+                    file_health: FileHealth::Healthy,
+                    is_favorite: false,
+                    tags: Vec::new(),
+                },
+            )],
+            selected_index: 0,
+        });
+
+        let backend = ratatui::backend::TestBackend::new(88, 28);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..28)
+            .map(|y| (0..88).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let normalized = rendered.replace(' ', "");
+
+        assert!(rendered.contains("Dashboard: python-script"));
+        assert!(normalized.contains("项目路径"));
+        assert!(rendered.contains("/home/ray/workspace/python-script"));
+        assert!(normalized.contains("会话总数"));
+        assert!(rendered.contains("31"));
+        assert!(rendered.contains("Pi: 25"));
+        assert!(rendered.contains("Codex: 4"));
+        assert!(normalized.contains("引擎分布"));
+        assert!(rendered.contains("█")); // Progress bar block
+        assert!(normalized.contains("收藏数"));
+        assert!(rendered.contains("3"));
+        assert!(normalized.contains("常用标签"));
+        assert!(rendered.contains("#bug (5)"));
+        assert!(normalized.contains("#重构(3)"));
+        assert!(normalized.contains("最近活跃"));
+        assert!(rendered.contains("2026-09-16 14:02"));
+        assert!(normalized.contains("正文规模"));
+        assert!(normalized.contains("约42000字·210条消息"));
+        assert!(normalized.contains("最近会话"));
+        assert!(normalized.contains("新彭楠-备煤日进及消"));
+        assert!(rendered.contains("[Pi]"));
+    }
+
+    #[test]
+    fn search_overlay_card_renders_project_name_timestamp_and_fallback() {
+        let mut app = App::new(&StubCatalog);
+        // StubCatalog has session "one" with cwd_group_label "workspace/demo", display_time "2026-04-29 12:00"
+        let overlay = SearchOverlayState {
+            query: "test".to_string(),
+            cursor_position: 4,
+            is_loading: false,
+            error_message: None,
+            results: vec![
+                // 1. Matching hit in catalog
+                crate::search::SearchHit::new(
+                    SessionEngine::Pi,
+                    "one",
+                    0,
+                    "matched snippet",
+                    1.0,
+                    1,
+                ),
+                // 2. Unmatched hit (cold cache / fallback)
+                crate::search::SearchHit::new(
+                    SessionEngine::Pi,
+                    "cold-session",
+                    0,
+                    "cold snippet",
+                    1.0,
+                    1,
+                ),
+            ],
+            selected_index: 0,
+            scroll_offset: 0,
+            debounce_ticks: 0,
+            last_searched_query: "test".to_string(),
+        };
+        app.search_overlay_state = Some(overlay);
+
+        let backend = ratatui::backend::TestBackend::new(100, 28);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..28)
+            .map(|y| {
+                (0..100)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // First hit has project and timestamp from catalog
+        assert!(rendered.contains("[workspace/demo]"));
+        assert!(rendered.contains("04-29 12:00"));
+        assert!(rendered.contains("Pi · 04-29 12:00"));
+
+        // Second hit falls back gracefully to [-] and Pi · -
+        assert!(rendered.contains("[-]"));
+        assert!(rendered.contains("cold-session"));
+        assert!(rendered.contains("Pi · -"));
+    }
+
+    #[test]
+    fn search_overlay_renders_error_message_prominently() {
+        let mut app = App::new(&StubCatalog);
+        app.search_overlay_state = Some(SearchOverlayState {
+            query: "broken_query".to_string(),
+            cursor_position: 12,
+            is_loading: false,
+            error_message: Some(
+                "Search query failed. Please check state database or retry.".to_string(),
+            ),
+            results: Vec::new(),
+            selected_index: 0,
+            scroll_offset: 0,
+            debounce_ticks: 0,
+            last_searched_query: "broken_query".to_string(),
+        });
+
+        let backend = ratatui::backend::TestBackend::new(100, 28);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..28)
+            .map(|y| {
+                (0..100)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Search query failed. Please check state database or retry."));
+        assert!(!rendered.contains("No matching sessions found."));
+    }
+
+    #[test]
+    fn search_overlay_distinguishes_disabled_empty_and_error_states() {
+        let mut app = App::new(&StubCatalog);
+
+        // 1. Loading state
+        app.search_overlay_state = Some(SearchOverlayState {
+            query: "loading_test".to_string(),
+            cursor_position: 12,
+            is_loading: true,
+            error_message: None,
+            results: Vec::new(),
+            selected_index: 0,
+            scroll_offset: 0,
+            debounce_ticks: 2,
+            last_searched_query: String::new(),
+        });
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..24)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let normalized = rendered.replace(' ', "");
+        assert!(normalized.contains("搜索中..."));
+
+        // 2. Empty query prompt
+        app.search_overlay_state = Some(SearchOverlayState::default());
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..24)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Type keywords to search session transcripts..."));
+    }
+
+    #[test]
+    fn project_dashboard_renders_na_when_content_scale_is_none() {
+        let mut app = App::new(&StubCatalog);
+        app.right_panel_mode = RightPanelMode::ProjectDashboard;
+        app.project_dashboard_state = Some(crate::app::ProjectDashboardState {
+            project_path: "/workspace/na-test".to_string(),
+            project_name: "na-test".to_string(),
+            engine_counts: vec![(SessionEngine::Pi, 1)],
+            total_sessions: 1,
+            favorite_count: 0,
+            top_tags: Vec::new(),
+            last_active: "2026-04-16 12:00".to_string(),
+            content_scale: None, // FTS unavailable / disabled -> N/A
+            recent_sessions: Vec::new(),
+            selected_index: 0,
+        });
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..24)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let normalized = rendered.replace(' ', "");
+
+        assert!(normalized.contains("正文规模"));
+        assert!(rendered.contains("N/A"));
+    }
+
+    #[test]
+    fn narrow_and_small_screen_rendering_safety() {
+        let mut app = App::new(&StubCatalog);
+
+        // 1. Ultra narrow (width 40, height 12) normal mode
+        let backend = ratatui::backend::TestBackend::new(40, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        // 2. Ultra narrow with search overlay
+        app.search_overlay_state = Some(SearchOverlayState::default());
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        // 3. Ultra narrow with export modal
+        app.search_overlay_state = None;
+        app.export_modal_state = Some(ExportModalState {
+            group_identifier: "group:demo".to_string(),
+            group_label: "demo".to_string(),
+            session_count: 2,
+            focus: ExportModalFocus::Cancel,
+        });
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        // 4. Ultra small with project dashboard (height < 20 omits recent sessions safely)
+        app.export_modal_state = None;
+        app.right_panel_mode = RightPanelMode::ProjectDashboard;
+        app.project_dashboard_state = Some(crate::app::ProjectDashboardState {
+            project_path: "/path".to_string(),
+            project_name: "test".to_string(),
+            engine_counts: vec![(SessionEngine::Pi, 1)],
+            total_sessions: 1,
+            favorite_count: 0,
+            top_tags: Vec::new(),
+            last_active: "-".to_string(),
+            content_scale: None,
+            recent_sessions: Vec::new(),
+            selected_index: 0,
+        });
+        terminal.draw(|f| render(f, &mut app)).unwrap();
     }
 }

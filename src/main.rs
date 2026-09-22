@@ -87,6 +87,19 @@ fn run_app(
         app.set_detail_viewport_height(size.height.saturating_sub(3) as usize);
         app.on_tick();
         drain_catalog_results(app, &catalog_result_rx);
+        while let Some(action) = app.take_pending_action() {
+            dispatch_action(
+                terminal,
+                terminal_mode,
+                app,
+                action,
+                &catalog_request_tx,
+                &detail_request_tx,
+                delete_executor,
+                resume_executor,
+                new_session_executor,
+            )?;
+        }
         drain_detail_results(app, &detail_result_rx);
         if app.consume_full_redraw() {
             active_terminal(terminal)?.clear()?;

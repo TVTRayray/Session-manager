@@ -1,0 +1,18 @@
+task_id: reviewer-muauscxb-t43mt
+change_id: efficiency-export-search-dashboard
+role: reviewer
+target_spec: session-export
+adapter: manual
+lease_id: lease-muauscxb-pfk88
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/session-export.md
+allowed_paths:
+  - .specflow/changes/efficiency-export-search-dashboard/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden
