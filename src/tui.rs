@@ -255,13 +255,15 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
 
     if app.show_help_modal {
-        let area = centered_rect(75, 23, frame.area());
+        let area = centered_rect(75, 25, frame.area());
         frame.render_widget(Clear, area);
         let help_text = Text::from(vec![
             Line::from("Keyboard Shortcuts"),
             Line::from(""),
             Line::from("  Tab / Shift+Tab   Switch engine"),
-            Line::from("  j / k / Arrows    Navigate"),
+            Line::from("  j / k / Arrows    Navigate (j/k cycle)"),
+            Line::from("  J / K             Jump 5 rows"),
+            Line::from("  z                 Collapse all"),
             Line::from("  Enter              Toggle / Resume"),
             Line::from("  /                  Search sessions"),
             Line::from("  n / N              Next / prev match"),
@@ -1903,6 +1905,9 @@ mod tests {
         // validate the key content strings exist in the source layout.
         let help_content = vec![
             "Keyboard Shortcuts",
+            "j / k / Arrows    Navigate (j/k cycle)",
+            "J / K             Jump 5 rows",
+            "z                 Collapse all",
             "Ctrl+Alt+H/V",
             "Ctrl+Alt+Arrows",
             "Ctrl+Alt+=/-",
@@ -1913,6 +1918,25 @@ mod tests {
             // are non-empty and would appear in a rendered modal.
             assert!(!expected.is_empty());
         }
+    }
+
+    #[test]
+    fn help_modal_displays_jump_and_collapse_shortcuts() {
+        let mut app = App::new(&StubCatalog);
+        app.show_help_modal = true;
+
+        let backend = ratatui::backend::TestBackend::new(80, 26);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..26)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("j / k / Arrows    Navigate (j/k cycle)"));
+        assert!(rendered.contains("J / K             Jump 5 rows"));
+        assert!(rendered.contains("z                 Collapse all"));
     }
 
     #[test]

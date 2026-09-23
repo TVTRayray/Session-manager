@@ -1,0 +1,29 @@
+task_id: implementer-mudvwexv-wzz9v
+lease_id: lease-mudvwexv-22n5z
+outcome: completed
+summary: "Dashboard 活动期间消费 J/K/z，阻止下传到隐藏会话树；保留 j/k、方向键和 D/Esc/Enter 原行为。回归测试涵盖 D 与直接进入、退出后 Phase 2 导航恢复。"
+evidence:
+  changed_files:
+    - src/app.rs
+    - .specflow/changes/prd8-phase2-navigation-enhancements/handoffs/implementer-mudvwexv-wzz9v.result.yaml
+  test_results:
+    - command: "cargo test --lib app::tests::dashboard_navigation_keys_do_not_reach_hidden_tree"
+      status: passed
+      details: "1 passed"
+    - command: "cargo fmt --check"
+      status: passed
+    - command: "cargo check --all-targets"
+      status: passed
+    - command: "cargo test --lib app::tests"
+      status: passed
+      details: "113 passed"
+    - command: "cargo test --lib tui::tests"
+      status: passed
+      details: "44 passed"
+    - command: "cargo test"
+      status: passed
+      details: "296 lib + 3 main + 7 integration passed; 0 doc tests"
+    - command: "git diff --check"
+      status: passed
+unresolved_issues: []
+requested_transition: reviewing

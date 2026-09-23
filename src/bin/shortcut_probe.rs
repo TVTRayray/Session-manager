@@ -172,11 +172,22 @@ struct StubCatalog;
 
 impl SessionCatalogReader for StubCatalog {
     fn load_sessions(&self) -> Result<CatalogLoad, String> {
+        let prev_item = make_probe_item(
+            "probe-initial",
+            "initial probe session",
+            "2026-04-17 12:01",
+            "probe-initial",
+        );
         let item = probe_item_for(SessionEngine::default_engine());
+        let items = vec![prev_item.clone(), item.clone()];
+        let file_health_map = items
+            .iter()
+            .map(|i| (i.abs_path.clone(), i.file_health.clone()))
+            .collect();
         Ok(CatalogLoad {
-            items: vec![item.clone()],
+            items,
             warnings: Vec::new(),
-            file_health_map: HashMap::from([(item.abs_path.clone(), item.file_health.clone())]),
+            file_health_map,
         })
     }
 }

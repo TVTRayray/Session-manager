@@ -1,0 +1,95 @@
+change_id: prd8-phase2-navigation-enhancements
+state: archived
+created_at: 2026-09-23T06:35:55.466Z
+updated_at: 2026-09-23T09:36:40.585Z
+specs:
+  - id: tui-interaction
+    title: Fast jump, circular traversal, and bulk collapse
+    state: qa_passed
+    depends_on: []
+    qa_attempts: 2
+    qa_report: reviews/reviewer-mudwe235-oq3vy.md
+leases: []
+history:
+  - at: 2026-09-23T06:35:55.466Z
+    event: change_created
+    detail: "PRDs: docs/prd-8.md"
+  - at: 2026-09-23T06:36:03.217Z
+    event: task_dispatched
+    detail: planner:planner-mudqbuhd-1h0gu:route=planner
+  - at: 2026-09-23T06:44:13.205Z
+    event: plan_submitted
+  - at: 2026-09-23T06:47:46.712Z
+    event: spec_ready
+    detail: tui-interaction
+  - at: 2026-09-23T06:47:46.712Z
+    event: plan_approved
+  - at: 2026-09-23T06:48:15.672Z
+    event: task_dispatched
+    detail: implementer:implementer-mudqrjn9-b8e1p:tui-interaction:route=implementer
+  - at: 2026-09-23T07:05:40.860Z
+    event: implementation_completed
+    detail: tui-interaction
+  - at: 2026-09-23T07:07:54.532Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mudrgt9g-6tmjl:tui-interaction:route=reviewer
+  - at: 2026-09-23T09:05:02.882Z
+    event: lease_expired
+    detail: lease-mudrgt9g-04759:reviewer-mudrgt9g-6tmjl
+  - at: 2026-09-23T09:05:02.883Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mudvngdf-262u6:tui-interaction:route=reviewer
+  - at: 2026-09-23T09:05:06.352Z
+    event: herdr_agent_started
+    detail: reviewer-reviewer-mudvngdf-262u6:wW:p27
+  - at: 2026-09-23T09:05:20.236Z
+    event: herdr_probe
+    detail: reviewer-reviewer-mudvngdf-262u6:unknown
+  - at: 2026-09-23T09:09:29.456Z
+    event: repair_dispatched
+    detail: tui-interaction:attempt-1
+  - at: 2026-09-23T09:12:00.931Z
+    event: task_dispatched
+    detail: implementer:implementer-mudvwexv-wzz9v:tui-interaction:route=implementer
+  - at: 2026-09-23T09:12:04.387Z
+    event: herdr_agent_started
+    detail: implementer-implementer-mudvwexv:wW:p28
+  - at: 2026-09-23T09:15:33.469Z
+    event: implementation_completed
+    detail: tui-interaction
+  - at: 2026-09-23T09:15:52.181Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mudw1ddh-5x0wb:tui-interaction:route=reviewer
+  - at: 2026-09-23T09:15:55.644Z
+    event: herdr_agent_started
+    detail: reviewer-reviewer-mudw1ddh-5x0wb:wW:p29
+  - at: 2026-09-23T09:20:19.423Z
+    event: repair_dispatched
+    detail: tui-interaction:attempt-2
+  - at: 2026-09-23T09:22:51.654Z
+    event: task_dispatched
+    detail: implementer:implementer-mudwad1h-a48ib:tui-interaction:route=implementer
+  - at: 2026-09-23T09:22:55.130Z
+    event: herdr_agent_started
+    detail: implementer-implementer-mudwad1h:wW:p2A
+  - at: 2026-09-23T09:25:19.424Z
+    event: implementation_completed
+    detail: tui-interaction
+  - at: 2026-09-23T09:25:44.082Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mudwe235-oq3vy:tui-interaction:route=reviewer
+  - at: 2026-09-23T09:25:47.543Z
+    event: herdr_agent_started
+    detail: reviewer-reviewer-mudwe235-oq3vy:wW:p2B
+  - at: 2026-09-23T09:28:50.162Z
+    event: qa_passed
+    detail: tui-interaction
+  - at: 2026-09-23T09:28:50.163Z
+    event: archive_ready
+  - at: 2026-09-23T09:36:40.585Z
+    event: archive_completed
+    detail: Merged 1 Delta Spec file(s).
+labels:
+  - prd8
+  - phase2
+  - navigation

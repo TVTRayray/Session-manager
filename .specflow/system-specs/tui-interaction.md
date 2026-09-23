@@ -4,7 +4,7 @@
 
 ### Requirement: Navigate engines and session trees
 
-The TUI MUST start in the engine provided by `SessionEngine::default_engine()` (Pi) and cycle engines dynamically using `SessionEngine::tab_order()` with Tab/Shift+Tab (Pi → OpenCode → Codex → Claude), requesting the selected engine's catalog and clearing stale selection, detail, delete, and search context. Engine tabs MUST be rendered dynamically by iterating `SessionEngine::tab_order()`. Arrow keys or `j`/`k` MUST move through visible recursive tree rows; Left/Right and Space MUST collapse or expand groups and parent sessions. Child sessions MUST appear beneath their unique parent with Agent labels; unresolved, duplicate-parent, or cyclic relationships MUST remain visible as detached roots without crashing or infinite loops. Selecting a search match MUST automatically expand all ancestor nodes to reveal the target session. Favorite sessions MUST prepend a star icon (`★`) to their summary, and sessions with tags MUST append muted tag badges (`#tag`) to the summary, truncating cleanly under constrained widths. Child agent nodes MUST be excluded from separate favorite and tag badges to maintain uncluttered subagent rows.
+The TUI MUST start in the engine provided by `SessionEngine::default_engine()` (Pi) and cycle engines dynamically using `SessionEngine::tab_order()` with Tab/Shift+Tab (Pi → OpenCode → Codex → Claude), requesting the selected engine's catalog and clearing stale selection, detail, delete, and search context. Engine tabs MUST be rendered dynamically by iterating `SessionEngine::tab_order()`. Arrow keys or `j`/`k` MUST move through visible recursive tree rows; Left/Right and Space MUST collapse or expand groups and parent sessions. Uppercase `J` and `K` MUST jump downwards or upwards by 5 visible rows, halting at the upper or lower boundary without wraparound. Lowercase `j` and `k` MUST traverse rows with circular wraparound at list boundaries (pressing `j` at the last visible row wraps to the first row, and pressing `k` at the first visible row wraps to the last row). Pressing `z` MUST collapse all currently expanded group and parent session nodes (`tree_state.close_all()`), safely retaining selection on the closest visible ancestor node or the first item and synchronizing the header overview. All modal dialogs and search inputs MUST isolate and intercept navigation keys from the session tree. Child sessions MUST appear beneath their unique parent with Agent labels; unresolved, duplicate-parent, or cyclic relationships MUST remain visible as detached roots without crashing or infinite loops. Selecting a search match MUST automatically expand all ancestor nodes to reveal the target session. Favorite sessions MUST prepend a star icon (`★`) to their summary, and sessions with tags MUST append muted tag badges (`#tag`) to the summary, truncating cleanly under constrained widths. Child agent nodes MUST be excluded from separate favorite and tag badges to maintain uncluttered subagent rows.
 
 #### Scenario: Cycle through engines
 
@@ -49,6 +49,35 @@ The TUI MUST start in the engine provided by `SessionEngine::default_engine()` (
 - **GIVEN** a child agent session node (`↳ Subagent`) is displayed beneath a main session
 - **WHEN** the tree row is rendered
 - **THEN** the child node does not display separate favorite stars or tags, keeping the subagent row layout uncluttered
+
+#### Scenario: Fast jump through visible rows with J and K
+
+- **GIVEN** the session tree contains 20 visible rows and the selection cursor is on row 3
+- **WHEN** the user presses `J` (Shift+j)
+- **THEN** the selection jumps downwards by 5 rows to row 8 and loads its detail
+- **WHEN** the cursor is on row 18 and the user presses `J`
+- **THEN** the selection halts at row 19 (the last row) without wrapping to the top
+- **WHEN** the cursor is on row 2 and the user presses `K` (Shift+k)
+- **THEN** the selection jumps upwards and halts at row 0 (the first row) without wrapping to the bottom
+- **EVIDENCE** `src/app.rs::App::handle_key`
+
+#### Scenario: Circular list traversal with j and k at boundaries
+
+- **GIVEN** the session tree contains visible rows
+- **WHEN** the selection cursor is on the last visible row and the user presses `j`
+- **THEN** the selection wraps around to the first visible row and loads its detail
+- **WHEN** the selection cursor is on the first visible row and the user presses `k`
+- **THEN** the selection wraps around to the last visible row and loads its detail
+- **WHEN** the list contains exactly 1 visible item and the user presses `j` or `k`
+- **THEN** the selection remains safely on the single item without panic or infinite oscillation
+- **EVIDENCE** `src/app.rs::App::handle_key`
+
+#### Scenario: Collapse all expanded nodes with z
+
+- **GIVEN** multiple groups and parent sessions with subagents are currently expanded in the session tree, and a nested child agent session is selected
+- **WHEN** the user presses `z` in the list panel
+- **THEN** all expanded groups and parent sessions are collapsed so that only top-level group headers remain visible, and the selection safely converges to the visible ancestor group header corresponding to the previously selected session, synchronizing the header overview and detail panel
+- **EVIDENCE** `src/app.rs::App::handle_key`
 
 ### Requirement: Support project and time grouping
 

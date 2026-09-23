@@ -784,6 +784,7 @@ impl App {
                 KeyCode::Enter => {
                     return self.handle_dashboard_enter();
                 }
+                KeyCode::Char('J') | KeyCode::Char('K') | KeyCode::Char('z') => return None,
                 _ => {}
             }
         }
@@ -865,13 +866,33 @@ impl App {
                 self.should_quit = true;
                 None
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.move_selection(1);
+            KeyCode::Down => {
+                self.move_selection(1, false);
                 self.begin_detail_request().map(AppAction::LoadDetail)
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.move_selection(-1);
+            KeyCode::Up => {
+                self.move_selection(-1, false);
                 self.begin_detail_request().map(AppAction::LoadDetail)
+            }
+            KeyCode::Char('j') => {
+                self.move_selection(1, true);
+                self.begin_detail_request().map(AppAction::LoadDetail)
+            }
+            KeyCode::Char('k') => {
+                self.move_selection(-1, true);
+                self.begin_detail_request().map(AppAction::LoadDetail)
+            }
+            KeyCode::Char('J') => {
+                self.jump_selection(5);
+                self.begin_detail_request().map(AppAction::LoadDetail)
+            }
+            KeyCode::Char('K') => {
+                self.jump_selection(-5);
+                self.begin_detail_request().map(AppAction::LoadDetail)
+            }
+            KeyCode::Char('z') if self.focused_panel == FocusedPanel::List => {
+                self.collapse_all_nodes();
+                None
             }
             KeyCode::Left if self.focused_panel == FocusedPanel::List => {
                 self.tree_state.key_left();
@@ -2312,7 +2333,7 @@ impl App {
         }
     }
 
-    fn move_selection(&mut self, delta: isize) {
+    pub(crate) fn move_selection(&mut self, delta: isize, wrap: bool) {
         self.clear_path_hint();
         let visible = self.visible_tree_identifiers();
         if visible.is_empty() {
@@ -2324,8 +2345,70 @@ impl App {
         let next_identifier = if self.tree_state.selected().is_empty() {
             if delta >= 0 {
                 self.first_leaf_identifier()
+                    .filter(|id| visible.contains(id))
+                    .or_else(|| visible.first().cloned())
             } else {
                 self.last_leaf_identifier()
+                    .filter(|id| visible.contains(id))
+                    .or_else(|| visible.last().cloned())
+            }
+        } else {
+            let current = self.tree_state.selected().to_vec();
+            let current_position = visible.iter().position(|identifier| *identifier == current);
+            let fallback = if delta >= 0 {
+                0
+            } else {
+                visible.len().saturating_sub(1)
+            };
+            let next_position = match current_position {
+                Some(position) => {
+                    if visible.len() <= 1 {
+                        0
+                    } else if delta > 0 {
+                        if wrap {
+                            (position + 1) % visible.len()
+                        } else {
+                            (position + 1).min(visible.len() - 1)
+                        }
+                    } else if delta < 0 {
+                        if position == 0 && wrap {
+                            visible.len() - 1
+                        } else {
+                            position.saturating_sub(1)
+                        }
+                    } else {
+                        position
+                    }
+                }
+                None => fallback,
+            };
+            visible.get(next_position).cloned()
+        };
+
+        if let Some(identifier) = next_identifier {
+            self.tree_state.select(identifier);
+        }
+        self.sync_tree_selection_from_tree();
+    }
+
+    pub(crate) fn jump_selection(&mut self, delta: isize) {
+        self.clear_path_hint();
+        let visible = self.visible_tree_identifiers();
+        if visible.is_empty() {
+            self.selected_index = None;
+            self.refresh_header_summary();
+            return;
+        }
+
+        let next_identifier = if self.tree_state.selected().is_empty() {
+            if delta >= 0 {
+                self.first_leaf_identifier()
+                    .filter(|id| visible.contains(id))
+                    .or_else(|| visible.first().cloned())
+            } else {
+                self.last_leaf_identifier()
+                    .filter(|id| visible.contains(id))
+                    .or_else(|| visible.last().cloned())
             }
         } else {
             let current = self.tree_state.selected().to_vec();
@@ -2347,6 +2430,32 @@ impl App {
         if let Some(identifier) = next_identifier {
             self.tree_state.select(identifier);
         }
+        self.sync_tree_selection_from_tree();
+    }
+
+    pub(crate) fn collapse_all_nodes(&mut self) {
+        self.clear_path_hint();
+        let current_selected = self.tree_state.selected().to_vec();
+        self.tree_state.close_all();
+        let visible = self.visible_tree_identifiers();
+        if visible.is_empty() {
+            self.tree_state.select(Vec::new());
+            self.sync_tree_selection_from_tree();
+            return;
+        }
+
+        let target = if let Some(group_id) = current_selected.first() {
+            let group_path = vec![group_id.clone()];
+            if visible.contains(&group_path) {
+                group_path
+            } else {
+                visible[0].clone()
+            }
+        } else {
+            visible[0].clone()
+        };
+
+        self.tree_state.select(target);
         self.sync_tree_selection_from_tree();
     }
 
@@ -5750,6 +5859,87 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_navigation_keys_do_not_reach_hidden_tree() {
+        let mut sessions = vec![item("s1"), item("s2")];
+        for session in &mut sessions {
+            session.cwd_group_label = "my-project".to_string();
+            session.cwd_path = "/workspace/my-project".to_string();
+        }
+        let mut app = App::new(&stub_catalog(sessions));
+        app.group_mode = GroupMode::ByProject;
+        app.open_all_groups();
+        let group = vec!["group:my-project".to_string()];
+        app.tree_state.select(group.clone());
+        app.sync_tree_selection_from_tree();
+        let visible = app.visible_tree_identifiers();
+        assert!(visible.len() > 1);
+
+        // D enters from a group header; the public entry point must isolate keys too.
+        app.handle_key(KeyEvent::from(KeyCode::Char('D')));
+        for direct_entry in [false, true] {
+            if direct_entry {
+                app.open_project_dashboard("group:my-project");
+            }
+            assert_eq!(app.right_panel_mode, RightPanelMode::ProjectDashboard);
+            for (key, dashboard_index) in [('j', 1), ('k', 0), ('J', 0), ('K', 0), ('z', 0)] {
+                assert!(app.handle_key(KeyEvent::from(KeyCode::Char(key))).is_none());
+                assert_eq!(
+                    app.project_dashboard_state.as_ref().unwrap().selected_index,
+                    dashboard_index
+                );
+                assert_eq!(app.tree_state.selected(), group.as_slice());
+                assert_eq!(app.visible_tree_identifiers(), visible);
+                assert_eq!(app.right_panel_mode, RightPanelMode::ProjectDashboard);
+                assert!(app.project_dashboard_state.is_some());
+            }
+            for (key, index) in [
+                (KeyCode::Down, 1),
+                (KeyCode::Down, 1),
+                (KeyCode::Up, 0),
+                (KeyCode::Up, 0),
+            ] {
+                app.handle_key(KeyEvent::from(key));
+                assert_eq!(
+                    app.project_dashboard_state.as_ref().unwrap().selected_index,
+                    index
+                );
+                assert_eq!(app.tree_state.selected(), group.as_slice());
+            }
+            app.handle_key(KeyEvent::from(KeyCode::Esc));
+            assert_eq!(app.right_panel_mode, RightPanelMode::GroupSummary);
+        }
+
+        app.handle_key(KeyEvent::from(KeyCode::Up));
+        assert_eq!(app.tree_state.selected(), group.as_slice());
+        app.tree_state.select(visible.last().unwrap().clone());
+        app.sync_tree_selection_from_tree();
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(
+            app.tree_state.selected(),
+            visible.last().unwrap().as_slice()
+        );
+        app.tree_state.select(group.clone());
+        app.sync_tree_selection_from_tree();
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_ne!(app.tree_state.selected(), group.as_slice());
+        app.handle_key(KeyEvent::from(KeyCode::Char('K')));
+        assert_eq!(app.tree_state.selected(), group.as_slice());
+        app.handle_key(KeyEvent::from(KeyCode::Char('k')));
+        assert_eq!(
+            app.tree_state.selected(),
+            visible.last().unwrap().as_slice()
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Char('J')));
+        assert_eq!(
+            app.tree_state.selected(),
+            visible.last().unwrap().as_slice()
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert_eq!(app.visible_tree_identifiers(), vec![group]);
+    }
+
+    #[test]
     fn modal_mutual_exclusivity_and_key_interception() {
         let mut app = App::new(&stub_catalog(vec![item("s1")]));
 
@@ -6011,5 +6201,347 @@ mod tests {
             30,
         );
         assert_eq!(app.tree_state.selected(), visible[5].as_slice());
+    }
+
+    #[test]
+    fn jump_selection_moves_five_rows_down_and_up() {
+        let items: Vec<SessionListItem> = (0..20).map(|i| item(&format!("sess-{i:02}"))).collect();
+        let mut app = App::new(&stub_catalog(items));
+        let visible = app.visible_tree_identifiers();
+        assert_eq!(visible.len(), 21); // 1 group header + 20 sessions
+
+        // Start on row 3 (0 is group header, 1..=20 are sessions)
+        app.tree_state.select(visible[3].clone());
+        app.sync_tree_selection_from_tree();
+        assert_eq!(app.tree_state.selected(), visible[3].as_slice());
+
+        // Press J (Shift+j) to jump downwards by 5 rows: row 3 -> row 8
+        let action = app.handle_key(KeyEvent::from(KeyCode::Char('J')));
+        assert_eq!(app.tree_state.selected(), visible[8].as_slice());
+        assert!(matches!(action, Some(AppAction::LoadDetail(_))));
+
+        // Press K (Shift+k) to jump upwards by 5 rows: row 8 -> row 3
+        let action = app.handle_key(KeyEvent::from(KeyCode::Char('K')));
+        assert_eq!(app.tree_state.selected(), visible[3].as_slice());
+        assert!(matches!(action, Some(AppAction::LoadDetail(_))));
+    }
+
+    #[test]
+    fn jump_selection_halts_at_boundaries_without_wrapping() {
+        let items: Vec<SessionListItem> = (0..20).map(|i| item(&format!("sess-{i:02}"))).collect();
+        let mut app = App::new(&stub_catalog(items));
+        let visible = app.visible_tree_identifiers();
+        assert_eq!(visible.len(), 21);
+
+        // Start near bottom at row 18
+        app.tree_state.select(visible[18].clone());
+        app.sync_tree_selection_from_tree();
+
+        // 18 + 5 = 23, clamped to 20 (the last row)
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('J')));
+        assert_eq!(app.tree_state.selected(), visible[20].as_slice());
+
+        // Pressing J again at bottom halts smoothly at row 20 without wrapping to top
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('J')));
+        assert_eq!(app.tree_state.selected(), visible[20].as_slice());
+
+        // Move near top at row 2
+        app.tree_state.select(visible[2].clone());
+        app.sync_tree_selection_from_tree();
+
+        // 2 - 5 = -3, clamped to 0 (the first row)
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('K')));
+        assert_eq!(app.tree_state.selected(), visible[0].as_slice());
+
+        // Pressing K again at top halts smoothly at row 0 without wrapping to bottom
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('K')));
+        assert_eq!(app.tree_state.selected(), visible[0].as_slice());
+    }
+
+    #[test]
+    fn jump_selection_safe_with_short_and_empty_list() {
+        // List with fewer than 5 rows (2 items -> 1 group header + 2 sessions = 3 visible rows)
+        let items: Vec<SessionListItem> = vec![item("a"), item("b")];
+        let mut app = App::new(&stub_catalog(items));
+        let visible = app.visible_tree_identifiers();
+        assert_eq!(visible.len(), 3);
+
+        app.tree_state.select(visible[0].clone());
+        app.sync_tree_selection_from_tree();
+
+        // J jumps to bottom (row 2) safely
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('J')));
+        assert_eq!(app.tree_state.selected(), visible[2].as_slice());
+
+        // K jumps to top (row 0) safely
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('K')));
+        assert_eq!(app.tree_state.selected(), visible[0].as_slice());
+
+        // Empty list
+        let mut empty_app = App::new(&stub_catalog(Vec::new()));
+        assert!(empty_app.visible_tree_identifiers().is_empty());
+
+        let action = empty_app.handle_key(KeyEvent::from(KeyCode::Char('J')));
+        assert!(action.is_none());
+        assert!(empty_app.selected_index.is_none());
+
+        let action = empty_app.handle_key(KeyEvent::from(KeyCode::Char('K')));
+        assert!(action.is_none());
+        assert!(empty_app.selected_index.is_none());
+    }
+
+    #[test]
+    fn arrow_keys_clamp_while_j_and_k_wrap() {
+        let mut app = App::new(&stub_catalog(vec![item("s1"), item("s2")]));
+        let visible = app.visible_tree_identifiers();
+        assert!(visible.len() > 1);
+
+        app.tree_state.select(visible[0].clone());
+        app.handle_key(KeyEvent::from(KeyCode::Up));
+        assert_eq!(app.tree_state.selected(), visible[0].as_slice());
+        app.handle_key(KeyEvent::from(KeyCode::Char('k')));
+        assert_eq!(
+            app.tree_state.selected(),
+            visible.last().unwrap().as_slice()
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(
+            app.tree_state.selected(),
+            visible.last().unwrap().as_slice()
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.tree_state.selected(), visible[0].as_slice());
+    }
+
+    #[test]
+    fn circular_navigation_wraps_from_bottom_to_top_with_j() {
+        let items: Vec<SessionListItem> = (0..5).map(|i| item(&format!("sess-{i}"))).collect();
+        let mut app = App::new(&stub_catalog(items));
+        let visible = app.visible_tree_identifiers();
+        assert_eq!(visible.len(), 6); // 1 group header + 5 sessions
+
+        // Position on the last row (row 5)
+        app.tree_state.select(visible[5].clone());
+        app.sync_tree_selection_from_tree();
+        assert_eq!(app.tree_state.selected(), visible[5].as_slice());
+
+        // Press j on the last row: wraps to row 0 (group header)
+        let action = app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.tree_state.selected(), visible[0].as_slice());
+        assert!(action.is_none()); // Group header does not trigger session detail request
+
+        // Press j on row 0: normal step to row 1 (session leaf)
+        let action = app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.tree_state.selected(), visible[1].as_slice());
+        assert!(matches!(action, Some(AppAction::LoadDetail(_))));
+    }
+
+    #[test]
+    fn circular_navigation_wraps_from_top_to_bottom_with_k() {
+        let items: Vec<SessionListItem> = (0..5).map(|i| item(&format!("sess-{i}"))).collect();
+        let mut app = App::new(&stub_catalog(items));
+        let visible = app.visible_tree_identifiers();
+        assert_eq!(visible.len(), 6);
+
+        // Position on the first row (row 0)
+        app.tree_state.select(visible[0].clone());
+        app.sync_tree_selection_from_tree();
+        assert_eq!(app.tree_state.selected(), visible[0].as_slice());
+
+        // Press k on row 0: wraps to row 5 (last row, session leaf)
+        let action = app.handle_key(KeyEvent::from(KeyCode::Char('k')));
+        assert_eq!(app.tree_state.selected(), visible[5].as_slice());
+        assert!(matches!(action, Some(AppAction::LoadDetail(_))));
+    }
+
+    #[test]
+    fn circular_navigation_safe_with_single_and_empty_list() {
+        // Single visible row (e.g. collapsed 1 group)
+        let items = vec![item("single")];
+        let mut app = App::new(&stub_catalog(items));
+        app.tree_state.close_all();
+        let visible = app.visible_tree_identifiers();
+        assert_eq!(visible.len(), 1); // Only 1 group header visible
+
+        app.tree_state.select(visible[0].clone());
+        app.sync_tree_selection_from_tree();
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.tree_state.selected(), visible[0].as_slice());
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('k')));
+        assert_eq!(app.tree_state.selected(), visible[0].as_slice());
+
+        // Empty list
+        let mut empty_app = App::new(&stub_catalog(Vec::new()));
+        let _ = empty_app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert!(empty_app.tree_state.selected().is_empty());
+        let _ = empty_app.handle_key(KeyEvent::from(KeyCode::Char('k')));
+        assert!(empty_app.tree_state.selected().is_empty());
+    }
+
+    #[test]
+    fn bulk_collapse_closes_all_groups_and_parent_sessions() {
+        let mut sess1 = item("sess1");
+        sess1.display_time = "2026-04-15 12:00".to_string();
+        let mut sess2 = item("sess2");
+        sess2.display_time = "2026-04-16 12:00".to_string();
+        let mut subagent = item("subagent");
+        subagent.display_time = "2026-04-16 12:00".to_string();
+        subagent.parent_session_id = Some("sess2".to_string());
+
+        let mut app = App::new(&stub_catalog(vec![sess1, sess2, subagent]));
+        // Select subagent to open its parent session
+        app.selected_index = Some(2);
+        app.sync_tree_selection_from_selected_index();
+        let visible_before = app.visible_tree_identifiers();
+        assert!(visible_before.len() >= 4);
+
+        // Press z in List panel
+        app.focused_panel = FocusedPanel::List;
+        let action = app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert!(action.is_none());
+
+        // All groups closed, only top-level groups visible
+        let visible_after = app.visible_tree_identifiers();
+        assert_eq!(visible_after.len(), 2);
+        for path in &visible_after {
+            assert_eq!(
+                path.len(),
+                1,
+                "Only group headers should be visible after bulk collapse"
+            );
+        }
+    }
+
+    #[test]
+    fn bulk_collapse_retains_selection_on_visible_ancestor_group() {
+        let mut sess1 = item("sess1");
+        sess1.display_time = "2026-04-15 12:00".to_string();
+        let mut sess2 = item("sess2");
+        sess2.display_time = "2026-04-16 12:00".to_string();
+        let mut subagent = item("subagent");
+        subagent.display_time = "2026-04-16 12:00".to_string();
+        subagent.parent_session_id = Some("sess2".to_string());
+
+        let mut app = App::new(&stub_catalog(vec![sess1, sess2, subagent]));
+        let target_group_id = "group:2026-04-16".to_string();
+
+        // Select the deep subagent
+        app.selected_index = Some(2);
+        app.sync_tree_selection_from_selected_index();
+        assert_eq!(app.tree_state.selected().len(), 3);
+
+        // Press z to collapse all
+        app.focused_panel = FocusedPanel::List;
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+
+        // Selection should converge to its ancestor group header
+        assert_eq!(app.tree_state.selected(), &[target_group_id.clone()]);
+        assert_eq!(
+            app.tree_focus_node,
+            Some(TreeFocusNode::GroupHeader(target_group_id))
+        );
+        assert_eq!(app.right_panel_mode, RightPanelMode::GroupSummary);
+    }
+
+    #[test]
+    fn bulk_collapse_updates_header_summary_and_syncs_tree_state() {
+        let items: Vec<SessionListItem> = (0..4).map(|i| item(&format!("sess-{i}"))).collect();
+        let mut app = App::new(&stub_catalog(items));
+        app.focused_panel = FocusedPanel::List;
+
+        // Select session leaf initially
+        assert_eq!(app.tree_state.selected().len(), 2);
+        assert_eq!(app.right_panel_mode, RightPanelMode::SessionDetail);
+
+        // Collapse all via z
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+
+        // Selection is now on group header
+        assert_eq!(app.tree_state.selected().len(), 1);
+        assert_eq!(app.right_panel_mode, RightPanelMode::GroupSummary);
+        assert!(app.group_summary_card.is_some());
+        assert_eq!(app.detail_state, SessionDetailState::Idle);
+    }
+
+    #[test]
+    fn navigation_and_collapse_keys_isolated_during_search_input() {
+        let items: Vec<SessionListItem> = (0..10).map(|i| item(&format!("sess-{i:02}"))).collect();
+        let mut app = App::new(&stub_catalog(items));
+        let selected_before = app.tree_state.selected().to_vec();
+        let visible_count_before = app.visible_tree_identifiers().len();
+
+        // Enter search input mode
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        assert_eq!(app.search_state.phase, SearchPhase::Input);
+
+        // Type J, K, z
+        app.handle_key(KeyEvent::from(KeyCode::Char('J')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('K')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+
+        assert_eq!(app.search_state.input, "JKz");
+        // Tree selection and visible rows MUST NOT have changed
+        assert_eq!(app.tree_state.selected(), selected_before.as_slice());
+        assert_eq!(app.visible_tree_identifiers().len(), visible_count_before);
+    }
+
+    #[test]
+    fn navigation_and_collapse_keys_isolated_in_modals() {
+        let items: Vec<SessionListItem> = (0..10).map(|i| item(&format!("sess-{i:02}"))).collect();
+        let mut app = App::new(&stub_catalog(items));
+        let selected_before = app.tree_state.selected().to_vec();
+        let visible_count_before = app.visible_tree_identifiers().len();
+
+        // 1. Delete modal
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        assert!(app.delete_modal_state.is_some());
+        app.handle_key(KeyEvent::from(KeyCode::Char('J')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('K')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert_eq!(app.tree_state.selected(), selected_before.as_slice());
+        assert_eq!(app.visible_tree_identifiers().len(), visible_count_before);
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.delete_modal_state.is_none());
+
+        // 2. Tag modal
+        app.handle_key(KeyEvent::from(KeyCode::Char('t')));
+        assert!(app.tag_modal_state.is_some());
+        app.handle_key(KeyEvent::from(KeyCode::Char('J')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('K')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        // Chars J, K, z appended to tag input, tree untouched
+        assert!(app.tag_modal_state.as_ref().unwrap().input.contains("JKz"));
+        assert_eq!(app.tree_state.selected(), selected_before.as_slice());
+        assert_eq!(app.visible_tree_identifiers().len(), visible_count_before);
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.tag_modal_state.is_none());
+
+        // 3. Export modal
+        app.export_modal_state = Some(ExportModalState {
+            group_identifier: "group:2026-04-16".to_string(),
+            group_label: "2026-04-16".to_string(),
+            session_count: 5,
+            focus: ExportModalFocus::Cancel,
+        });
+        assert!(app.export_modal_state.is_some());
+        app.handle_key(KeyEvent::from(KeyCode::Char('J')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('K')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert_eq!(app.tree_state.selected(), selected_before.as_slice());
+        assert_eq!(app.visible_tree_identifiers().len(), visible_count_before);
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.export_modal_state.is_none());
+
+        // 4. Help modal
+        app.handle_key(KeyEvent::from(KeyCode::Char('?')));
+        assert!(app.show_help_modal);
+        // Pressing J simply closes the help modal without moving the tree
+        app.handle_key(KeyEvent::from(KeyCode::Char('J')));
+        assert!(!app.show_help_modal);
+        assert_eq!(app.tree_state.selected(), selected_before.as_slice());
+        assert_eq!(app.visible_tree_identifiers().len(), visible_count_before);
     }
 }

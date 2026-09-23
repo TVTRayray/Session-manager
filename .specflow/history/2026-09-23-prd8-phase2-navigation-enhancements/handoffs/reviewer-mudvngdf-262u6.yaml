@@ -1,0 +1,24 @@
+task_id: reviewer-mudvngdf-262u6
+change_id: prd8-phase2-navigation-enhancements
+role: reviewer
+target_spec: tui-interaction
+adapter: herdr
+lease_id: lease-mudvngdf-bnarw
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/tui-interaction.md
+allowed_paths:
+  - .specflow/changes/prd8-phase2-navigation-enhancements/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden
+runtime:
+  provider: herdr
+  agent_name: reviewer-reviewer-mudvngdf-262u6
+  pane_id: wW:p27
+  state: unknown
+  approval_required: false

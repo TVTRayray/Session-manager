@@ -1,0 +1,7 @@
+task_id: reviewer-mudvngdf-262u6
+lease_id: lease-mudvngdf-bnarw
+outcome: completed
+verdict: repair
+category: implementation_defect
+qa_report: .specflow/changes/prd8-phase2-navigation-enhancements/reviews/reviewer-mudvngdf-262u6.md
+summary: "ProjectDashboard 不拦截新增 J/K/z，按键穿透并修改隐藏会话树；z 还能关闭看板视图。仅需修复该缺陷并补充回归测试。"
