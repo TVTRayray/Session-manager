@@ -1,0 +1,9 @@
+specs:
+  - id: session-catalog
+    title: Tintinweb subagent recognition and parent-child linkage
+    depends_on: []
+    delta_file: specs/session-catalog.md
+  - id: tui-interaction
+    title: Viewport offset mouse click accuracy and wide character rendering fixes
+    depends_on: [session-catalog]
+    delta_file: specs/tui-interaction.md

@@ -1,0 +1,74 @@
+change_id: prd8-phase1-interaction-bugfixes
+state: archived
+created_at: 2026-09-22T07:55:36.735Z
+updated_at: 2026-09-23T06:29:41.493Z
+specs:
+  - id: session-catalog
+    title: Tintinweb subagent recognition and parent-child linkage
+    state: qa_passed
+    depends_on: []
+    qa_attempts: 0
+    qa_report: reviews/reviewer-mudiy8su-7nakr.md
+  - id: tui-interaction
+    title: Viewport offset mouse click accuracy and wide character rendering fixes
+    state: qa_passed
+    depends_on:
+      - session-catalog
+    qa_attempts: 0
+    qa_report: reviews/reviewer-mudjuu98-uspp6.md
+leases: []
+history:
+  - at: 2026-09-22T07:55:36.735Z
+    event: change_created
+    detail: "PRDs: docs/prd-8.md"
+  - at: 2026-09-22T07:55:44.447Z
+    event: task_dispatched
+    detail: planner:planner-mucdqh1b-o2rs6:route=planner
+  - at: 2026-09-22T08:10:15.440Z
+    event: plan_submitted
+  - at: 2026-09-22T08:12:24.255Z
+    event: plan_submitted
+  - at: 2026-09-22T08:53:52.699Z
+    event: spec_ready
+    detail: session-catalog
+  - at: 2026-09-22T08:53:52.701Z
+    event: plan_approved
+  - at: 2026-09-23T02:11:08.793Z
+    event: task_dispatched
+    detail: implementer:implementer-mudgv69j-dvex3:session-catalog:route=implementer
+  - at: 2026-09-23T03:08:20.217Z
+    event: late_result_imported
+    detail: lease-mudgv69j-o76c3:implementer-mudgv69j-dvex3
+  - at: 2026-09-23T03:08:20.220Z
+    event: implementation_completed
+    detail: session-catalog
+  - at: 2026-09-23T03:09:31.279Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mudiy8su-7nakr:session-catalog:route=reviewer
+  - at: 2026-09-23T03:19:43.481Z
+    event: qa_passed
+    detail: session-catalog
+  - at: 2026-09-23T03:19:43.482Z
+    event: spec_ready
+    detail: tui-interaction
+  - at: 2026-09-23T03:19:43.507Z
+    event: task_dispatched
+    detail: implementer:implementer-mudjbd77-2fox6:tui-interaction:route=implementer
+  - at: 2026-09-23T03:33:26.038Z
+    event: implementation_completed
+    detail: tui-interaction
+  - at: 2026-09-23T03:34:52.076Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mudjuu98-uspp6:tui-interaction:route=reviewer
+  - at: 2026-09-23T03:39:47.977Z
+    event: qa_passed
+    detail: tui-interaction
+  - at: 2026-09-23T03:39:47.978Z
+    event: archive_ready
+  - at: 2026-09-23T06:29:41.493Z
+    event: archive_completed
+    detail: Merged 2 Delta Spec file(s).
+labels:
+  - prd8
+  - phase1
+  - bugfix

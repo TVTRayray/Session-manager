@@ -939,11 +939,17 @@ impl App {
 
                 if contains(layout.list_panel, event.column, event.row) {
                     self.focused_panel = FocusedPanel::List;
-                    let row = event
+                    let visible_row = event
                         .row
                         .saturating_sub(layout.list_panel.y)
                         .saturating_sub(1) as usize;
-                    if let Some(identifier) = self.visible_tree_identifiers().get(row).cloned() {
+                    let row = self.tree_state.get_offset().saturating_add(visible_row);
+                    let visible_identifiers = self.visible_tree_identifiers();
+                    if row >= visible_identifiers.len() {
+                        self.clear_path_hint();
+                        return None;
+                    }
+                    if let Some(identifier) = visible_identifiers.get(row).cloned() {
                         let was_selected = self.tree_state.selected() == identifier.as_slice();
                         if was_selected && identifier.len() == 1 {
                             self.tree_state.toggle_selected();
@@ -5826,5 +5832,184 @@ mod tests {
         assert!(app.tag_modal_state.is_some());
         app.handle_key(KeyEvent::from(KeyCode::Esc));
         assert!(app.tag_modal_state.is_none());
+    }
+
+    #[test]
+    fn mouse_click_with_scroll_offset_selects_visually_aligned_item() {
+        let items: Vec<SessionListItem> = (0..30).map(|i| item(&format!("sess-{i:02}"))).collect();
+        let mut app = App::new(&stub_catalog(items));
+        app.set_terminal_size(100, 30);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::tui::render(f, &mut app)).unwrap();
+
+        let layout = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
+        let visible = app.visible_tree_identifiers();
+        assert!(visible.len() >= 30);
+
+        // Scroll down 10 rows
+        app.tree_state.scroll_down(10);
+        assert_eq!(app.tree_state.get_offset(), 10);
+
+        // Click on visual row 3 in list_panel
+        let click_row = layout.list_panel.y + 1 + 3;
+        let action = app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: layout.list_panel.x + 2,
+                row: click_row,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+            30,
+        );
+
+        // Data index should be offset (10) + visible_row (3) = 13
+        assert_eq!(app.tree_state.selected(), visible[13].as_slice());
+        assert!(matches!(action, Some(AppAction::LoadDetail(_))));
+    }
+
+    #[test]
+    fn mouse_click_without_scroll_preserves_baseline_index() {
+        let items: Vec<SessionListItem> = (0..20).map(|i| item(&format!("sess-{i:02}"))).collect();
+        let mut app = App::new(&stub_catalog(items));
+        app.set_terminal_size(100, 30);
+        let layout = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
+        let visible = app.visible_tree_identifiers();
+        assert_eq!(app.tree_state.get_offset(), 0);
+
+        // Click visual row 5
+        let click_row = layout.list_panel.y + 1 + 5;
+        let action = app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: layout.list_panel.x + 2,
+                row: click_row,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+            30,
+        );
+
+        // Selected index should be 5
+        assert_eq!(app.tree_state.selected(), visible[5].as_slice());
+        assert!(matches!(action, Some(AppAction::LoadDetail(_))));
+    }
+
+    #[test]
+    fn mouse_click_out_of_bounds_safely_ignored() {
+        let items: Vec<SessionListItem> = vec![item("only-one")];
+        let mut app = App::new(&stub_catalog(items));
+        app.set_terminal_size(100, 30);
+        let layout = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
+
+        // Click far below visible items, but still inside list_panel
+        let click_row = layout.list_panel.y + layout.list_panel.height - 2;
+        let action = app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: layout.list_panel.x + 2,
+                row: click_row,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+            30,
+        );
+
+        assert!(action.is_none());
+        assert!(app.path_hint_state.is_none());
+    }
+
+    #[test]
+    fn mouse_alternating_scroll_and_click_has_no_drift() {
+        let items: Vec<SessionListItem> = (0..30).map(|i| item(&format!("sess-{i:02}"))).collect();
+        let mut app = App::new(&stub_catalog(items));
+        app.set_terminal_size(100, 30);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::tui::render(f, &mut app)).unwrap();
+
+        let layout = compute_layout(app.split_direction.clone(), app.panel_main_size, 100, 30);
+        let visible = app.visible_tree_identifiers();
+
+        // 1. Scroll down 3 rows via scroll event
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: layout.list_panel.x + 2,
+                row: layout.list_panel.y + 2,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+            30,
+        );
+        assert_eq!(app.tree_state.get_offset(), 3);
+
+        // 2. Click visual row 2 -> 3 + 2 = 5
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: layout.list_panel.x + 2,
+                row: layout.list_panel.y + 1 + 2,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+            30,
+        );
+        assert_eq!(app.tree_state.selected(), visible[5].as_slice());
+
+        // 3. Scroll down 3 more rows -> offset = 6
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: layout.list_panel.x + 2,
+                row: layout.list_panel.y + 2,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+            30,
+        );
+        assert_eq!(app.tree_state.get_offset(), 6);
+
+        // 4. Click visual row 1 -> 6 + 1 = 7
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: layout.list_panel.x + 2,
+                row: layout.list_panel.y + 1 + 1,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+            30,
+        );
+        assert_eq!(app.tree_state.selected(), visible[7].as_slice());
+
+        // 5. Scroll up 3 rows -> offset = 3
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: layout.list_panel.x + 2,
+                row: layout.list_panel.y + 2,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+            30,
+        );
+        assert_eq!(app.tree_state.get_offset(), 3);
+
+        // 6. Click visual row 2 -> 3 + 2 = 5
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: layout.list_panel.x + 2,
+                row: layout.list_panel.y + 1 + 2,
+                modifiers: KeyModifiers::NONE,
+            },
+            100,
+            30,
+        );
+        assert_eq!(app.tree_state.selected(), visible[5].as_slice());
     }
 }

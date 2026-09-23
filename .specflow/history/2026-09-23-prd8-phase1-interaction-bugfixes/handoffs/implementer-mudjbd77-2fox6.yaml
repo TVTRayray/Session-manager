@@ -1,0 +1,19 @@
+task_id: implementer-mudjbd77-2fox6
+change_id: prd8-phase1-interaction-bugfixes
+role: implementer
+target_spec: tui-interaction
+adapter: manual
+lease_id: lease-mudjbd77-78ofy
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/tui-interaction.md
+allowed_paths:
+  - src/**
+  - tests/**
+  - .specflow/changes/prd8-phase1-interaction-bugfixes/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden

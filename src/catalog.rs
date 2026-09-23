@@ -290,6 +290,7 @@ fn opencode_session_columns(connection: &Connection) -> Option<HashSet<String>> 
 fn scan_pi_session_dir(base_dir: &Path) -> Result<CatalogLoad, String> {
     let mut load = scan_session_dir(base_dir)?;
     apply_pi_subagent_relations(&mut load.items);
+    apply_tintinweb_relations(&mut load.items);
     Ok(load)
 }
 
@@ -468,6 +469,349 @@ fn pi_header_parent_session_path(session_path: &Path) -> Option<PathBuf> {
 
 fn normalized_session_path(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[derive(Clone, Debug)]
+struct TintinwebParentCandidate {
+    parent_session_id: String,
+    parent_abs_path: PathBuf,
+    transcript_cwd: Option<String>,
+    header_cwd: Option<String>,
+}
+
+fn apply_tintinweb_relations(items: &mut [SessionListItem]) {
+    let mut parents: HashMap<(String, String), Vec<TintinwebParentCandidate>> = HashMap::new();
+
+    for parent in items.iter() {
+        let Ok(file) = File::open(&parent.abs_path) else {
+            continue;
+        };
+        let parent_header_cwd = if parent.cwd_path != "-" {
+            Some(parent.cwd_path.clone())
+        } else {
+            None
+        };
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            if !line.contains("\"toolResult\"")
+                || (!line.contains("\"Agent\"") && !line.contains("\"subagent\""))
+            {
+                continue;
+            }
+            if !line.contains("subagentType") || !line.contains("agentId") {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let Some(message) = value.get("message") else {
+                continue;
+            };
+            let tool_name = message.get("toolName").and_then(Value::as_str);
+            if message.get("role").and_then(Value::as_str) != Some("toolResult")
+                || !matches!(tool_name, Some("Agent" | "subagent"))
+            {
+                continue;
+            }
+            let Some(details) = message.get("details") else {
+                continue;
+            };
+            let Some(agent_type) = details.get("subagentType").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(agent_id) = details.get("agentId").and_then(Value::as_str) else {
+                continue;
+            };
+            if agent_id.len() < 8 {
+                continue;
+            }
+            let id8 = &agent_id[..8];
+            if !id8.chars().all(|c| c.is_ascii_hexdigit()) {
+                continue;
+            }
+
+            let transcript_cwd = details
+                .get("recorder")
+                .and_then(|r| r.get("cwd"))
+                .and_then(Value::as_str)
+                .or_else(|| details.get("cwd").and_then(Value::as_str))
+                .or_else(|| {
+                    message
+                        .get("recorder")
+                        .and_then(|r| r.get("cwd"))
+                        .and_then(Value::as_str)
+                })
+                .or_else(|| message.get("cwd").and_then(Value::as_str))
+                .or_else(|| {
+                    value
+                        .get("recorder")
+                        .and_then(|r| r.get("cwd"))
+                        .and_then(Value::as_str)
+                })
+                .or_else(|| value.get("cwd").and_then(Value::as_str))
+                .map(ToString::to_string);
+
+            let candidate = TintinwebParentCandidate {
+                parent_session_id: parent.session_id.clone(),
+                parent_abs_path: parent.abs_path.clone(),
+                transcript_cwd,
+                header_cwd: parent_header_cwd.clone(),
+            };
+
+            let entry = parents
+                .entry((agent_type.to_string(), id8.to_ascii_lowercase()))
+                .or_default();
+            if !entry.iter().any(|c| {
+                c.parent_session_id == candidate.parent_session_id
+                    && c.parent_abs_path == candidate.parent_abs_path
+                    && c.transcript_cwd == candidate.transcript_cwd
+                    && c.header_cwd == candidate.header_cwd
+            }) {
+                entry.push(candidate);
+            }
+        }
+    }
+
+    let mut child_links = Vec::new();
+    for (index, child) in items.iter().enumerate() {
+        if child.parent_session_id.is_some() {
+            continue;
+        }
+        let Some((agent_type, id8)) = tintinweb_child_identity(&child.abs_path) else {
+            continue;
+        };
+        child_links.push((index, agent_type, id8));
+    }
+
+    for (child_index, agent_type, id8) in child_links {
+        let Some(candidates) = parents.get(&(agent_type.clone(), id8.to_ascii_lowercase())) else {
+            continue;
+        };
+        if candidates.is_empty() {
+            continue;
+        }
+
+        let expected_parent = pi_header_parent_session_path(&items[child_index].abs_path);
+        let (child_transcript_cwd, child_header_cwd) =
+            tintinweb_child_cwds(&items[child_index].abs_path, &items[child_index].cwd_path);
+        let child_effective_cwd = child_transcript_cwd.as_ref().or(child_header_cwd.as_ref());
+
+        let selected = select_tintinweb_parent(
+            candidates,
+            expected_parent.as_deref(),
+            child_transcript_cwd.as_deref(),
+            child_effective_cwd.map(|s| s.as_str()),
+        );
+
+        let Some(parent) = selected else {
+            continue;
+        };
+
+        let child = &mut items[child_index];
+        child.parent_session_id = Some(parent.parent_session_id.clone());
+        child.agent_name = Some(agent_type);
+    }
+}
+
+fn select_tintinweb_parent<'a>(
+    candidates: &'a [TintinwebParentCandidate],
+    expected_parent: Option<&Path>,
+    child_transcript_cwd: Option<&str>,
+    child_effective_cwd: Option<&str>,
+) -> Option<&'a TintinwebParentCandidate> {
+    // 1. If child specifies parentSession header, filter by expected path
+    if let Some(expected_path) = expected_parent {
+        let matching_by_path: Vec<&'a TintinwebParentCandidate> = candidates
+            .iter()
+            .filter(|c| normalized_session_path(&c.parent_abs_path) == expected_path)
+            .collect();
+
+        if !matching_by_path.is_empty() {
+            if let Some(child_cwd) = child_effective_cwd {
+                let cwd_matched: Vec<&'a TintinwebParentCandidate> = matching_by_path
+                    .iter()
+                    .filter(|c| {
+                        let c_eff = c.transcript_cwd.as_deref().or(c.header_cwd.as_deref());
+                        c_eff.map_or(true, |c_cwd| cwd_matches(child_cwd, c_cwd))
+                    })
+                    .copied()
+                    .collect();
+                if !cwd_matched.is_empty() {
+                    return unambiguous_candidate(&cwd_matched);
+                }
+            }
+            return unambiguous_candidate(&matching_by_path);
+        }
+    }
+
+    // 2. Dual-source working directory disambiguation:
+    // 2a. First, try matching runtime/recorder working directory if present on child
+    if let Some(child_cwd) = child_transcript_cwd {
+        let transcript_matched: Vec<&'a TintinwebParentCandidate> = candidates
+            .iter()
+            .filter(|c| {
+                let c_eff = c.transcript_cwd.as_deref().or(c.header_cwd.as_deref());
+                c_eff.map_or(false, |c_cwd| cwd_matches(child_cwd, c_cwd))
+            })
+            .collect();
+        if !transcript_matched.is_empty() {
+            return unambiguous_candidate(&transcript_matched);
+        }
+    }
+
+    // 2b. Fallback to child effective cwd (including header cwd) matching candidate cwd
+    if let Some(child_cwd) = child_effective_cwd {
+        let transcript_matched: Vec<&'a TintinwebParentCandidate> = candidates
+            .iter()
+            .filter(|c| {
+                c.transcript_cwd
+                    .as_deref()
+                    .map_or(false, |c_cwd| cwd_matches(child_cwd, c_cwd))
+            })
+            .collect();
+        if !transcript_matched.is_empty() {
+            return unambiguous_candidate(&transcript_matched);
+        }
+
+        let effective_matched: Vec<&'a TintinwebParentCandidate> = candidates
+            .iter()
+            .filter(|c| {
+                let c_eff = c.transcript_cwd.as_deref().or(c.header_cwd.as_deref());
+                c_eff.map_or(false, |c_cwd| cwd_matches(child_cwd, c_cwd))
+            })
+            .collect();
+        if !effective_matched.is_empty() {
+            return unambiguous_candidate(&effective_matched);
+        }
+    }
+
+    // 3. Fallback: If no candidate matched cwd (or child has no cwd), check if all candidates
+    // point to the same parent session and none contradict child cwd
+    if let Some(child_cwd) = child_effective_cwd {
+        let non_contradicting: Vec<&'a TintinwebParentCandidate> = candidates
+            .iter()
+            .filter(|c| {
+                let c_eff = c.transcript_cwd.as_deref().or(c.header_cwd.as_deref());
+                c_eff.map_or(true, |c_cwd| cwd_matches(child_cwd, c_cwd))
+            })
+            .collect();
+        if !non_contradicting.is_empty() {
+            return unambiguous_candidate(&non_contradicting);
+        }
+    } else {
+        let all: Vec<&'a TintinwebParentCandidate> = candidates.iter().collect();
+        return unambiguous_candidate(&all);
+    }
+
+    None
+}
+
+fn unambiguous_candidate<'a>(
+    candidates: &[&'a TintinwebParentCandidate],
+) -> Option<&'a TintinwebParentCandidate> {
+    let first = *candidates.first()?;
+    if candidates
+        .iter()
+        .all(|c| c.parent_session_id == first.parent_session_id)
+    {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+fn cwd_matches(a: &str, b: &str) -> bool {
+    let a_clean = a.trim_end_matches(std::path::is_separator);
+    let b_clean = b.trim_end_matches(std::path::is_separator);
+    if a_clean == b_clean {
+        return true;
+    }
+    let p_a = Path::new(a);
+    let p_b = Path::new(b);
+    if p_a == p_b {
+        return true;
+    }
+    if let (Ok(ca), Ok(cb)) = (fs::canonicalize(p_a), fs::canonicalize(p_b)) {
+        return ca == cb;
+    }
+    false
+}
+
+fn tintinweb_child_identity(path: &Path) -> Option<(String, String)> {
+    let file = File::open(path).ok()?;
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        if !line.contains("\"session_info\"") {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("session_info") {
+            continue;
+        }
+        let Some(name) = value.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some((agent_type, id8)) = name.rsplit_once('#') else {
+            continue;
+        };
+        let is_id8 = id8.len() == 8 && id8.chars().all(|c| c.is_ascii_hexdigit());
+        if is_id8 && !agent_type.is_empty() {
+            return Some((agent_type.to_string(), id8.to_string()));
+        }
+    }
+    None
+}
+
+fn tintinweb_child_cwds(
+    session_path: &Path,
+    child_header_cwd: &str,
+) -> (Option<String>, Option<String>) {
+    let header_cwd = if child_header_cwd != "-" {
+        Some(child_header_cwd.to_string())
+    } else {
+        None
+    };
+
+    let mut transcript_cwd = None;
+    if let Ok(file) = File::open(session_path) {
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            if !line.contains("\"cwd\"") {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let msg_type = value.get("type").and_then(Value::as_str);
+            let has_recorder_cwd = value
+                .get("recorder")
+                .and_then(|r| r.get("cwd"))
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    value
+                        .get("message")
+                        .and_then(|m| m.get("recorder"))
+                        .and_then(|r| r.get("cwd"))
+                        .and_then(Value::as_str)
+                });
+            if let Some(cwd) = has_recorder_cwd {
+                transcript_cwd = Some(cwd.to_string());
+                break;
+            }
+            if msg_type != Some("session") {
+                if let Some(cwd) = value
+                    .get("message")
+                    .and_then(|m| m.get("cwd"))
+                    .and_then(Value::as_str)
+                    .or_else(|| value.get("cwd").and_then(Value::as_str))
+                {
+                    transcript_cwd = Some(cwd.to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    (transcript_cwd, header_cwd)
 }
 
 pub fn scan_session_dir(base_dir: &Path) -> Result<CatalogLoad, String> {
@@ -1349,6 +1693,551 @@ mod tests {
             assert_eq!(item.parent_session_id, None);
             assert_eq!(item.agent_name, None);
         }
+    }
+
+    #[test]
+    fn tintinweb_persisted_children_link_via_agent_id_prefix() {
+        let dir = must(tempdir());
+        let parent_path = dir.path().join("parent.jsonl");
+        let child_path = dir.path().join("child.jsonl");
+        let tool_result = serde_json::json!({
+            "type": "message",
+            "message": {
+                "role": "toolResult",
+                "toolName": "Agent",
+                "details": {
+                    "displayName": "Explore",
+                    "subagentType": "Explore",
+                    "agentId": "ab12cd34-0000-0000-0000-000000000000",
+                    "status": "completed"
+                }
+            }
+        });
+        must(fs::write(
+            &parent_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "parent-id",
+                    "cwd": "/workspace/demo"
+                }),
+                tool_result
+            ),
+        ));
+        must(fs::write(
+            &child_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "child-id",
+                    "cwd": "/workspace/demo",
+                    "parentSession": parent_path.to_string_lossy()
+                }),
+                serde_json::json!({
+                    "type": "session_info",
+                    "name": "Explore#ab12cd34"
+                })
+            ),
+        ));
+
+        let load = must(scan_pi_session_dir(dir.path()));
+        let child = load
+            .items
+            .iter()
+            .find(|item| item.session_id == "child-id")
+            .expect("child session");
+
+        assert_eq!(child.parent_session_id.as_deref(), Some("parent-id"));
+        assert_eq!(child.agent_name.as_deref(), Some("Explore"));
+    }
+
+    #[test]
+    fn tintinweb_preserves_existing_native_subagent_link() {
+        let dir = must(tempdir());
+        let native_parent_path = dir.path().join("native_parent.jsonl");
+        let tintinweb_parent_path = dir.path().join("tintinweb_parent.jsonl");
+        let child_path = dir.path().join("child.jsonl");
+
+        let native_tool_result = serde_json::json!({
+            "type": "message",
+            "message": {
+                "role": "toolResult",
+                "toolName": "subagent",
+                "details": {
+                    "results": [{
+                        "agent": "native-worker",
+                        "sessionFile": child_path.to_string_lossy()
+                    }]
+                }
+            }
+        });
+        must(fs::write(
+            &native_parent_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "native-parent-id",
+                    "cwd": "/workspace/demo"
+                }),
+                native_tool_result
+            ),
+        ));
+
+        let tintin_tool_result = serde_json::json!({
+            "type": "message",
+            "message": {
+                "role": "toolResult",
+                "toolName": "Agent",
+                "details": {
+                    "subagentType": "Explore",
+                    "agentId": "ab12cd34-1111-2222-3333-444444444444"
+                }
+            }
+        });
+        must(fs::write(
+            &tintinweb_parent_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "tintinweb-parent-id",
+                    "cwd": "/workspace/demo"
+                }),
+                tintin_tool_result
+            ),
+        ));
+
+        must(fs::write(
+            &child_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "child-id",
+                    "cwd": "/workspace/demo"
+                }),
+                serde_json::json!({
+                    "type": "session_info",
+                    "name": "Explore#ab12cd34"
+                })
+            ),
+        ));
+
+        let load = must(scan_pi_session_dir(dir.path()));
+        let child = load
+            .items
+            .iter()
+            .find(|item| item.session_id == "child-id")
+            .expect("child session");
+
+        assert_eq!(child.parent_session_id.as_deref(), Some("native-parent-id"));
+        assert_eq!(child.agent_name.as_deref(), Some("native-worker"));
+    }
+
+    #[test]
+    fn tintinweb_leaves_unmatched_subagent_as_independent_root() {
+        let dir = must(tempdir());
+        let ghost_path = dir.path().join("ghost.jsonl");
+        must(fs::write(
+            &ghost_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "ghost-id",
+                    "cwd": "/workspace/demo"
+                }),
+                serde_json::json!({
+                    "type": "session_info",
+                    "name": "Plan#deadbeef"
+                })
+            ),
+        ));
+
+        let load = must(scan_pi_session_dir(dir.path()));
+        let ghost = load
+            .items
+            .iter()
+            .find(|item| item.session_id == "ghost-id")
+            .expect("ghost session");
+
+        assert_eq!(ghost.parent_session_id, None);
+        assert_eq!(ghost.agent_name, None);
+    }
+
+    #[test]
+    fn tintinweb_forked_sessions_disambiguated_by_parent_path_and_cwd() {
+        let dir = must(tempdir());
+        let parent_path = dir.path().join("parent.jsonl");
+        let fork_path = dir.path().join("fork.jsonl");
+        let child_path = dir.path().join("child.jsonl");
+        let child_no_ps_path = dir.path().join("child_no_ps.jsonl");
+
+        let tool_result = serde_json::json!({
+            "type": "message",
+            "message": {
+                "role": "toolResult",
+                "toolName": "Agent",
+                "details": {
+                    "subagentType": "Explore",
+                    "agentId": "ab12cd34-9999-8888-7777-666655554444"
+                }
+            }
+        });
+
+        must(fs::write(
+            &parent_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "parent-id",
+                    "cwd": "/workspace/original"
+                }),
+                tool_result
+            ),
+        ));
+
+        must(fs::write(
+            &fork_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "fork-id",
+                    "cwd": "/workspace/forked",
+                    "parentSession": parent_path.to_string_lossy()
+                }),
+                tool_result
+            ),
+        ));
+
+        // Child with parentSession pointing to parent_path
+        must(fs::write(
+            &child_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "child-id",
+                    "cwd": "/workspace/original",
+                    "parentSession": parent_path.to_string_lossy()
+                }),
+                serde_json::json!({
+                    "type": "session_info",
+                    "name": "Explore#ab12cd34"
+                })
+            ),
+        ));
+
+        // Child without parentSession, disambiguated by matching cwd with parent
+        must(fs::write(
+            &child_no_ps_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "child-no-ps-id",
+                    "cwd": "/workspace/original"
+                }),
+                serde_json::json!({
+                    "type": "session_info",
+                    "name": "Explore#ab12cd34"
+                })
+            ),
+        ));
+
+        let load = must(scan_pi_session_dir(dir.path()));
+        let child = load
+            .items
+            .iter()
+            .find(|item| item.session_id == "child-id")
+            .expect("child session");
+        let child_no_ps = load
+            .items
+            .iter()
+            .find(|item| item.session_id == "child-no-ps-id")
+            .expect("child without parentSession");
+        let fork = load
+            .items
+            .iter()
+            .find(|item| item.session_id == "fork-id")
+            .expect("fork session");
+
+        assert_eq!(child.parent_session_id.as_deref(), Some("parent-id"));
+        assert_eq!(child.agent_name.as_deref(), Some("Explore"));
+        assert_eq!(child_no_ps.parent_session_id.as_deref(), Some("parent-id"));
+        assert_eq!(child_no_ps.agent_name.as_deref(), Some("Explore"));
+        assert_eq!(fork.parent_session_id, None);
+    }
+
+    #[test]
+    fn tintinweb_recorder_and_header_cwd_dual_source_matching_and_fallback() {
+        let dir = must(tempdir());
+
+        // Case A: recorder.cwd in toolResult details overrides parent header cwd
+        let parent_a_path = dir.path().join("parent_a.jsonl");
+        let child_a_path = dir.path().join("child_a.jsonl");
+        let tool_result_with_recorder = serde_json::json!({
+            "type": "message",
+            "message": {
+                "role": "toolResult",
+                "toolName": "Agent",
+                "details": {
+                    "subagentType": "Coder",
+                    "agentId": "11223344-0000-0000-0000-000000000000",
+                    "recorder": {
+                        "cwd": "/workspace/runtime-work"
+                    }
+                }
+            }
+        });
+        must(fs::write(
+            &parent_a_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "parent-a-id",
+                    "cwd": "/workspace/header-work"
+                }),
+                tool_result_with_recorder
+            ),
+        ));
+        must(fs::write(
+            &child_a_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "child-a-id",
+                    "cwd": "/workspace/runtime-work"
+                }),
+                serde_json::json!({
+                    "type": "session_info",
+                    "name": "Coder#11223344"
+                })
+            ),
+        ));
+
+        // Case B: No recorder.cwd in toolResult; falls back to parent header cwd
+        let parent_b_path = dir.path().join("parent_b.jsonl");
+        let child_b_path = dir.path().join("child_b.jsonl");
+        let tool_result_without_recorder = serde_json::json!({
+            "type": "message",
+            "message": {
+                "role": "toolResult",
+                "toolName": "subagent",
+                "details": {
+                    "subagentType": "Tester",
+                    "agentId": "55667788-0000-0000-0000-000000000000"
+                }
+            }
+        });
+        must(fs::write(
+            &parent_b_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "parent-b-id",
+                    "cwd": "/workspace/fallback-header"
+                }),
+                tool_result_without_recorder
+            ),
+        ));
+        must(fs::write(
+            &child_b_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "child-b-id",
+                    "cwd": "/workspace/fallback-header"
+                }),
+                serde_json::json!({
+                    "type": "session_info",
+                    "name": "Tester#55667788"
+                })
+            ),
+        ));
+
+        let load = must(scan_pi_session_dir(dir.path()));
+        let child_a = load
+            .items
+            .iter()
+            .find(|item| item.session_id == "child-a-id")
+            .expect("child A session");
+        let child_b = load
+            .items
+            .iter()
+            .find(|item| item.session_id == "child-b-id")
+            .expect("child B session");
+
+        assert_eq!(child_a.parent_session_id.as_deref(), Some("parent-a-id"));
+        assert_eq!(child_a.agent_name.as_deref(), Some("Coder"));
+        assert_eq!(child_b.parent_session_id.as_deref(), Some("parent-b-id"));
+        assert_eq!(child_b.agent_name.as_deref(), Some("Tester"));
+    }
+
+    #[test]
+    fn tintinweb_ambiguous_parents_remain_independent_root() {
+        let dir = must(tempdir());
+        let parent_1 = dir.path().join("parent1.jsonl");
+        let parent_2 = dir.path().join("parent2.jsonl");
+        let child = dir.path().join("child.jsonl");
+
+        let tool_result = serde_json::json!({
+            "type": "message",
+            "message": {
+                "role": "toolResult",
+                "toolName": "Agent",
+                "details": {
+                    "subagentType": "Explore",
+                    "agentId": "aabbccdd-1234-5678-90ab-cdef12345678"
+                }
+            }
+        });
+
+        must(fs::write(
+            &parent_1,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "parent-1",
+                    "cwd": "/workspace/demo"
+                }),
+                tool_result
+            ),
+        ));
+        must(fs::write(
+            &parent_2,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "parent-2",
+                    "cwd": "/workspace/demo"
+                }),
+                tool_result
+            ),
+        ));
+        must(fs::write(
+            &child,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "child",
+                    "cwd": "/workspace/demo"
+                }),
+                serde_json::json!({
+                    "type": "session_info",
+                    "name": "Explore#aabbccdd"
+                })
+            ),
+        ));
+
+        let load = must(scan_pi_session_dir(dir.path()));
+        let child_item = load
+            .items
+            .iter()
+            .find(|item| item.session_id == "child")
+            .expect("child item");
+
+        assert_eq!(child_item.parent_session_id, None);
+        assert_eq!(child_item.agent_name, None);
+    }
+
+    #[test]
+    fn tintinweb_normal_sessions_not_misidentified() {
+        let dir = must(tempdir());
+        let normal_path = dir.path().join("normal.jsonl");
+        let non_hex_path = dir.path().join("non_hex.jsonl");
+        let short_id_path = dir.path().join("short_id.jsonl");
+
+        must(fs::write(
+            &normal_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "normal-id",
+                    "cwd": "/workspace/demo"
+                }),
+                serde_json::json!({
+                    "type": "session_info",
+                    "name": "Ordinary Task #42"
+                })
+            ),
+        ));
+        must(fs::write(
+            &non_hex_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "non-hex-id",
+                    "cwd": "/workspace/demo"
+                }),
+                serde_json::json!({
+                    "type": "session_info",
+                    "name": "Explore#xyz12345"
+                })
+            ),
+        ));
+        must(fs::write(
+            &short_id_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "id": "short-id",
+                    "cwd": "/workspace/demo"
+                }),
+                serde_json::json!({
+                    "type": "session_info",
+                    "name": "Explore#1234"
+                })
+            ),
+        ));
+
+        let load = must(scan_pi_session_dir(dir.path()));
+        assert_eq!(tintinweb_child_identity(&normal_path), None);
+        assert_eq!(tintinweb_child_identity(&non_hex_path), None);
+        assert_eq!(tintinweb_child_identity(&short_id_path), None);
+
+        for item in &load.items {
+            assert_eq!(item.parent_session_id, None);
+            assert_eq!(item.agent_name, None);
+        }
+    }
+
+    #[test]
+    fn tintinweb_malformed_metadata_and_session_info_does_not_panic() {
+        let dir = must(tempdir());
+        let broken_path = dir.path().join("broken.jsonl");
+        let partial_tool_path = dir.path().join("partial_tool.jsonl");
+
+        must(fs::write(
+            &broken_path,
+            "{\"type\":\"session\",\"id\":\"broken\",\"cwd\":\"/tmp\"}\n{not valid json\n{\"type\":\"session_info\"}\n{\"type\":\"session_info\",\"name\":null}\n",
+        ));
+
+        must(fs::write(
+            &partial_tool_path,
+            "{\"type\":\"session\",\"id\":\"partial\",\"cwd\":\"/tmp\"}\n{\"type\":\"message\",\"message\":{\"role\":\"toolResult\",\"toolName\":\"Agent\",\"details\":{}}}\n",
+        ));
+
+        let load = must(scan_pi_session_dir(dir.path()));
+        assert!(load.items.iter().any(|item| item.session_id == "broken"));
+        assert!(load.items.iter().any(|item| item.session_id == "partial"));
+        assert_eq!(tintinweb_child_identity(&broken_path), None);
+        assert_eq!(tintinweb_child_identity(&partial_tool_path), None);
     }
 
     #[test]

@@ -1,0 +1,28 @@
+task_id: implementer-mudjbd77-2fox6
+lease_id: lease-mudjbd77-78ofy
+outcome: completed
+summary: "Implemented canonical tui-interaction / PRD-8 F2 and F3 bugfixes: (1) In src/app.rs::handle_mouse, compensated list panel left clicks with tree_state.get_offset() using visible_row = event.row - list_panel.y - 1 and target row = offset + visible_row, with safe out-of-bounds no-op protection and identical baseline behavior when offset == 0; (2) In src/tui.rs::display_char_width, treated Unicode variation selectors (0xfe00..=0xfe0f, 0xe0100..=0xe01ef) and combining marks (0x0300..=0x036f, 0x1ab0..=0x1aff, 0x1dc0..=0x1dff, 0x20d0..=0x20ff, 0xfe20..=0xfe2f) as 0 width, ensuring emoji + VS sequences like '🏷️' measure 2 columns; (3) In src/tui.rs, implemented cluster-based safe truncation for truncate_summary and truncate_tail_to_width respecting terminal display column width rather than raw character counts, keeping combining mark sequences like 'e\\u{301}' intact at boundaries without isolated marks, and providing safe 0/1/2 column narrow bounds without panic or glyph splitting; (4) Normalized group_text and render_styled_session_line spans with stable boundaries for favorite star '★' and '🏷️ 未分类' group header so that selection toggles preserve text completely with zero character loss; (5) Added comprehensive automated unit tests covering all F2 and F3 scenarios in src/app.rs and src/tui.rs."
+evidence:
+  changed_files:
+    - src/app.rs
+    - src/tui.rs
+    - .specflow/changes/prd8-phase1-interaction-bugfixes/tasks.md
+    - .specflow/changes/prd8-phase1-interaction-bugfixes/handoffs/implementer-mudjbd77-2fox6.result.yaml
+  test_results:
+    - command: "cargo fmt --check"
+      status: "passed"
+    - command: "cargo check --all-targets"
+      status: "passed"
+    - command: "cargo test --lib app::tests"
+      status: "passed"
+      details: "101 passed, 0 failed"
+    - command: "cargo test --lib tui::tests"
+      status: "passed"
+      details: "43 passed, 0 failed"
+    - command: "cargo test"
+      status: "passed"
+      details: "283 lib tests + 7 integration tests passed (290 total passed, 0 failed)"
+    - command: "git diff --check"
+      status: "passed"
+unresolved_issues: []
+requested_transition: reviewing

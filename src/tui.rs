@@ -325,32 +325,72 @@ fn search_prompt_parts(app: &App, width: u16) -> (String, String) {
     )
 }
 
-fn truncate_tail_to_width(text: &str, max_width: usize) -> String {
-    let mut width = 0;
-    let mut chars = Vec::new();
-    for ch in text.chars().rev() {
-        let next = display_char_width(ch);
-        if width + next > max_width {
-            break;
-        }
-        width += next;
-        chars.push(ch);
-    }
-    chars.into_iter().rev().collect()
+fn is_combining_mark_or_vs(ch: char) -> bool {
+    let code = ch as u32;
+    (0x0300..=0x036f).contains(&code)
+        || (0x1ab0..=0x1aff).contains(&code)
+        || (0x1dc0..=0x1dff).contains(&code)
+        || (0x20d0..=0x20ff).contains(&code)
+        || (0xfe00..=0xfe0f).contains(&code)
+        || (0xfe20..=0xfe2f).contains(&code)
+        || (0xe0100..=0xe01ef).contains(&code)
 }
 
-fn display_width(text: &str) -> usize {
+#[derive(Clone, Debug)]
+struct CharCluster {
+    text: String,
+    width: usize,
+}
+
+fn to_char_clusters(text: &str) -> Vec<CharCluster> {
+    let mut clusters: Vec<CharCluster> = Vec::new();
+    for ch in text.chars() {
+        if is_combining_mark_or_vs(ch) {
+            if let Some(last) = clusters.last_mut() {
+                last.text.push(ch);
+                continue;
+            }
+        }
+        let w = display_char_width(ch);
+        clusters.push(CharCluster {
+            text: ch.to_string(),
+            width: w,
+        });
+    }
+    clusters
+}
+
+pub(crate) fn truncate_tail_to_width(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let clusters = to_char_clusters(text);
+    let mut width = 0;
+    let mut taken: Vec<&CharCluster> = Vec::new();
+    for cluster in clusters.iter().rev() {
+        if width + cluster.width > max_width {
+            break;
+        }
+        width += cluster.width;
+        taken.push(cluster);
+    }
+    taken.into_iter().rev().map(|c| c.text.as_str()).collect()
+}
+
+pub(crate) fn display_width(text: &str) -> usize {
     text.chars().map(display_char_width).sum()
 }
 
-fn display_char_width(ch: char) -> usize {
+pub(crate) fn display_char_width(ch: char) -> usize {
     let code = ch as u32;
     if ch.is_control()
         || (0x0300..=0x036f).contains(&code)
         || (0x1ab0..=0x1aff).contains(&code)
         || (0x1dc0..=0x1dff).contains(&code)
         || (0x20d0..=0x20ff).contains(&code)
+        || (0xfe00..=0xfe0f).contains(&code)
         || (0xfe20..=0xfe2f).contains(&code)
+        || (0xe0100..=0xe01ef).contains(&code)
     {
         0
     } else if (0x1100..=0x115f).contains(&code)
@@ -1108,21 +1148,31 @@ fn build_session_item(
     }
 }
 
-fn render_styled_session_line(
+pub(crate) fn render_styled_session_line(
     node: &crate::app::SessionTreeNode,
     node_text: &str,
 ) -> Line<'static> {
     let mut spans = Vec::new();
     let mut rest = node_text;
 
-    if node.is_favorite && rest.starts_with("★ ") {
-        spans.push(Span::styled(
-            "★ ",
-            Style::default()
-                .fg(Color::Rgb(249, 226, 175))
-                .add_modifier(Modifier::BOLD),
-        ));
-        rest = &rest["★ ".len()..];
+    if node.is_favorite {
+        if rest.starts_with("★ ") {
+            spans.push(Span::styled(
+                "★ ",
+                Style::default()
+                    .fg(Color::Rgb(249, 226, 175))
+                    .add_modifier(Modifier::BOLD),
+            ));
+            rest = &rest["★ ".len()..];
+        } else if rest.starts_with('★') {
+            spans.push(Span::styled(
+                "★",
+                Style::default()
+                    .fg(Color::Rgb(249, 226, 175))
+                    .add_modifier(Modifier::BOLD),
+            ));
+            rest = &rest['★'.len_utf8()..];
+        }
     }
 
     if !node.tags.is_empty() {
@@ -1267,7 +1317,7 @@ fn chars_eq_ignore_ascii_case(left: &[char], right: &[char]) -> bool {
         .all(|(left, right)| left.eq_ignore_ascii_case(right))
 }
 
-fn group_text(
+pub(crate) fn group_text(
     label: &str,
     root_count: usize,
     subagent_count: usize,
@@ -1407,17 +1457,43 @@ fn short_time(display_time: &str) -> String {
     }
 }
 
-fn truncate_name(name: &str, max_chars: usize) -> String {
-    truncate_summary(name, max_chars)
+fn truncate_name(name: &str, max_width: usize) -> String {
+    truncate_summary(name, max_width)
 }
 
-fn truncate_summary(summary: &str, max_chars: usize) -> String {
-    let count = summary.chars().count();
-    if count <= max_chars {
+pub(crate) fn truncate_summary(summary: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if display_width(summary) <= max_width {
         return summary.to_string();
     }
-    let truncated: String = summary.chars().take(max_chars.saturating_sub(3)).collect();
-    format!("{truncated}...")
+    if max_width < 3 {
+        let mut result = String::new();
+        let mut current_width = 0;
+        for cluster in to_char_clusters(summary) {
+            if current_width + cluster.width <= max_width {
+                current_width += cluster.width;
+                result.push_str(&cluster.text);
+            } else {
+                break;
+            }
+        }
+        return result;
+    }
+    let target_width = max_width - 3;
+    let mut result = String::new();
+    let mut current_width = 0;
+    for cluster in to_char_clusters(summary) {
+        if current_width + cluster.width <= target_width {
+            current_width += cluster.width;
+            result.push_str(&cluster.text);
+        } else {
+            break;
+        }
+    }
+    result.push_str("...");
+    result
 }
 
 fn tab_span(engine: SessionEngine, active_engine: SessionEngine) -> Span<'static> {
@@ -2356,5 +2432,141 @@ mod tests {
             selected_index: 0,
         });
         terminal.draw(|f| render(f, &mut app)).unwrap();
+    }
+
+    #[test]
+    fn display_char_width_treats_variation_selector_as_zero_width() {
+        assert_eq!(display_char_width('\u{fe0f}'), 0);
+        assert_eq!(display_char_width('\u{fe00}'), 0);
+        assert_eq!(display_char_width('\u{0300}'), 0);
+        assert_eq!(display_char_width('\u{0301}'), 0);
+        assert_eq!(display_char_width('\u{036f}'), 0);
+        // Emoji + variation selector has total display width 2
+        assert_eq!(display_width("🏷️"), 2);
+        // Base char + combining acute has total display width 1
+        assert_eq!(display_width("e\u{0301}"), 1);
+    }
+
+    #[test]
+    fn truncate_summary_preserves_combining_mark_sequences_at_boundary() {
+        // "Cafe\u{0301} latte": 'C'(1)+'a'(1)+'f'(1)+"e\u{301}"(1) = 4 width
+        // With max_width 7: 7 - 3 = 4 budget -> exactly fits "Cafe\u{0301}" + "..."
+        let truncated = truncate_summary("Cafe\u{0301} latte", 7);
+        assert_eq!(truncated, "Cafe\u{0301}...");
+        assert!(display_width(&truncated) <= 7);
+
+        // With max_width 6: 6 - 3 = 3 budget -> "Cafe\u{0301}" cannot fit, only "Caf" fits
+        // combining mark \u{0301} MUST NOT be left isolated!
+        let truncated2 = truncate_summary("Cafe\u{0301} latte", 6);
+        assert_eq!(truncated2, "Caf...");
+        assert!(!truncated2.contains('\u{0301}'));
+        assert!(display_width(&truncated2) <= 6);
+
+        // In reverse: truncate_tail_to_width preserves combining sequence
+        assert_eq!(truncate_tail_to_width("Cafe\u{0301}", 1), "e\u{0301}");
+        assert_eq!(truncate_tail_to_width("Cafe\u{0301}", 0), "");
+    }
+
+    #[test]
+    fn truncate_summary_handles_mixed_cjk_ascii_and_emoji() {
+        let text = "🏷️ 会话 Alpha 123";
+        let truncated = truncate_summary(text, 10);
+        assert!(display_width(&truncated) <= 10);
+        assert!(truncated.ends_with("..."));
+
+        // Wide char is not cut in half
+        let cjk_text = "未分类会话记录";
+        let cjk_trunc = truncate_summary(cjk_text, 8);
+        assert!(display_width(&cjk_trunc) <= 8);
+        assert_eq!(cjk_trunc, "未分...");
+    }
+
+    #[test]
+    fn truncate_summary_safe_at_zero_one_two_column_limits() {
+        // Zero width -> always empty string
+        assert_eq!(truncate_summary("未分类", 0), "");
+        assert_eq!(truncate_summary("abc", 0), "");
+        assert_eq!(truncate_summary("🏷️", 0), "");
+
+        // 1 column width -> 2-column CJK or emoji cannot fit, safely empty (no panic, width <= 1)
+        assert_eq!(truncate_summary("未分类", 1), "");
+        assert_eq!(truncate_summary("🏷️", 1), "");
+        assert_eq!(truncate_summary("abc", 1), "a");
+        assert!(display_width(&truncate_summary("未分类", 1)) <= 1);
+        assert!(display_width(&truncate_summary("abc", 1)) <= 1);
+
+        // 2 column width -> can fit one 2-column character or two 1-column characters
+        assert_eq!(truncate_summary("未分类", 2), "未");
+        assert_eq!(truncate_summary("🏷️标签", 2), "🏷️");
+        assert_eq!(truncate_summary("abc", 2), "ab");
+        assert!(display_width(&truncate_summary("未分类", 2)) <= 2);
+        assert!(display_width(&truncate_summary("🏷️标签", 2)) <= 2);
+    }
+
+    #[test]
+    fn group_text_uncategorized_roundtrip_selection_preserves_characters() {
+        use ratatui::widgets::StatefulWidget;
+        use tui_tree_widget::TreeState;
+
+        let initial_text = group_text("未分类", 1, 0, &GroupMode::ByTag);
+        let initial_string = initial_text.to_string();
+        assert!(initial_string.contains("🏷️ 未分类"));
+        assert!(initial_string.contains("未分类"));
+
+        let item = TreeItem::new_leaf("g:未分类".to_string(), initial_text);
+        let items = [item];
+        let tree = Tree::new(&items).unwrap().highlight_style(
+            Style::default()
+                .fg(THEME_TEXT)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        );
+
+        let area = Rect::new(0, 0, 40, 1);
+        let mut state = TreeState::default();
+
+        // 1. Initial render (unselected)
+        let mut buf1 = Buffer::empty(area);
+        StatefulWidget::render(tree.clone(), area, &mut buf1, &mut state);
+
+        // 2. Select and render (reversed highlight)
+        state.select(vec!["g:未分类".to_string()]);
+        let mut buf2 = Buffer::empty(area);
+        StatefulWidget::render(tree.clone(), area, &mut buf2, &mut state);
+
+        // 3. Deselect and render
+        state.select(Vec::<String>::new());
+        let mut buf3 = Buffer::empty(area);
+        StatefulWidget::render(tree, area, &mut buf3, &mut state);
+
+        // Re-generate text across lifecycle
+        let restored_text = group_text("未分类", 1, 0, &GroupMode::ByTag);
+        let restored_string = restored_text.to_string();
+        assert_eq!(initial_string, restored_string);
+        assert!(restored_string.contains("未分类"));
+    }
+
+    #[test]
+    fn favorite_star_rendered_completely_in_selected_state() {
+        let node = crate::app::SessionTreeNode {
+            identifier: "fav-sess".to_string(),
+            session_index: 0,
+            session_id: "fav-sess".to_string(),
+            name: "Favorited Session".to_string(),
+            display_time: "2026-04-29 12:00".to_string(),
+            cwd_tail: "demo".to_string(),
+            file_health: FileHealth::Healthy,
+            is_detached: false,
+            is_favorite: true,
+            tags: Vec::new(),
+            agent_name: None,
+            children: Vec::new(),
+        };
+
+        let line = render_styled_session_line(&node, "★ [demo] Favorited Session");
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[0].content, "★ ");
+        assert_eq!(line.spans[0].style.fg, Some(Color::Rgb(249, 226, 175)));
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(line.spans[1].content, "[demo] Favorited Session");
     }
 }

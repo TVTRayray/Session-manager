@@ -1,0 +1,18 @@
+task_id: reviewer-mudiy8su-7nakr
+change_id: prd8-phase1-interaction-bugfixes
+role: reviewer
+target_spec: session-catalog
+adapter: manual
+lease_id: lease-mudiy8su-o99wy
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/session-catalog.md
+allowed_paths:
+  - .specflow/changes/prd8-phase1-interaction-bugfixes/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

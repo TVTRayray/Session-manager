@@ -1,0 +1,14 @@
+task_id: planner-mucdqh1b-o2rs6
+change_id: prd8-phase1-interaction-bugfixes
+role: planner
+adapter: manual
+lease_id: lease-mucdqh1b-0nbzi
+inputs:
+  - proposal.md
+allowed_paths:
+  - .specflow/changes/prd8-phase1-interaction-bugfixes/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

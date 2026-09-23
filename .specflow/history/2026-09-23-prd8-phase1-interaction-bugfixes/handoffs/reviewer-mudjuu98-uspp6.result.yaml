@@ -1,0 +1,25 @@
+task_id: reviewer-mudjuu98-uspp6
+lease_id: lease-mudjuu98-ih6pu
+outcome: completed
+verdict: pass
+summary: "Completed rigorous adversarial read-only review of tui-interaction / PRD-8 F2 and F3 bugfixes against specs/tui-interaction.md. Verified that: (1) In src/app.rs::handle_mouse, mouse left-clicks in list_panel accurately compensate for tree_state.get_offset() using visible_row = event.row.saturating_sub(layout.list_panel.y).saturating_sub(1) and row = offset + visible_row; (2) clicking outside valid items or below the list safely no-ops without panics or corrupt state; (3) baseline behavior at offset == 0 is 100% preserved and alternating scroll/click sequences introduce zero cumulative drift; (4) variation selectors (VS1..VS16, VS17..VS256) and combining marks are correctly identified with 0 width in src/tui.rs, allowing emoji sequences like '🏷️' to accurately measure 2 columns; (5) cluster-based truncation in truncate_summary and truncate_tail_to_width keeps combining marks and variation selectors bound to their base characters, eliminating isolated combining marks at boundaries and guaranteeing safe zero/one/two-column limits without panic or overflow; (6) '★' and '🏷️ 未分类' maintain stable span boundaries and complete character retention across selection highlights and Modifier::REVERSED transitions in TestBackend Buffer renders; (7) all automated checks (cargo fmt --check, cargo check --all-targets, cargo test --lib app::tests, cargo test --lib tui::tests, cargo test, git diff --check) pass with 100% success and zero regressions."
+evidence:
+  qa_report: .specflow/changes/prd8-phase1-interaction-bugfixes/reviews/reviewer-mudjuu98-uspp6.md
+  test_results:
+    - command: "cargo fmt --check"
+      status: "passed"
+    - command: "cargo check --all-targets"
+      status: "passed"
+    - command: "cargo test --lib app::tests"
+      status: "passed"
+      details: "101 passed, 0 failed"
+    - command: "cargo test --lib tui::tests"
+      status: "passed"
+      details: "43 passed, 0 failed"
+    - command: "cargo test"
+      status: "passed"
+      details: "283 lib tests + 7 integration tests passed (290 total passed, 0 failed)"
+    - command: "git diff --check"
+      status: "passed"
+unresolved_issues: []
+requested_transition: ready

@@ -1,0 +1,17 @@
+task_id: planner-mucdqh1b-o2rs6
+lease_id: lease-mucdqh1b-0nbzi
+outcome: completed
+summary: "Completed precise SpecFlow planning strictly scoped to PRD-8 Phase 1 interaction bugfixes: F1 (tintinweb subagent recognition and dual cwd parent-child linkage in session-catalog), F2 (mouse click viewport offset compensation using tree_state.get_offset() in tui-interaction), and F3 (wide character rendering, emoji variation selector calculation, and uncategorized group header text restoration in tui-interaction). Corrected state.yaml specs schema to full SpecFlow object list format with id, title, state, depends_on, qa_attempts, and qa_report. Zero inclusion or pre-embedding of Phase 2 or Phase 3 features. Delivered proposal.md, ux-design.md, design.md, spec-plan.yaml, delta specs (specs/session-catalog.md, specs/tui-interaction.md), and tasks.md with manual TUI acceptance protocol."
+evidence:
+  changed_files:
+    - .specflow/changes/prd8-phase1-interaction-bugfixes/proposal.md
+    - .specflow/changes/prd8-phase1-interaction-bugfixes/ux-design.md
+    - .specflow/changes/prd8-phase1-interaction-bugfixes/design.md
+    - .specflow/changes/prd8-phase1-interaction-bugfixes/spec-plan.yaml
+    - .specflow/changes/prd8-phase1-interaction-bugfixes/specs/session-catalog.md
+    - .specflow/changes/prd8-phase1-interaction-bugfixes/specs/tui-interaction.md
+    - .specflow/changes/prd8-phase1-interaction-bugfixes/tasks.md
+    - .specflow/changes/prd8-phase1-interaction-bugfixes/state.yaml
+    - .specflow/changes/prd8-phase1-interaction-bugfixes/handoffs/planner-mucdqh1b-o2rs6.result.yaml
+unresolved_issues: []
+requested_transition: awaiting_plan_approval
