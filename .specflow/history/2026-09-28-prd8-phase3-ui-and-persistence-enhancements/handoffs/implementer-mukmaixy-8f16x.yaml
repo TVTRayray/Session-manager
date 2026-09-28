@@ -1,0 +1,24 @@
+task_id: implementer-mukmaixy-8f16x
+change_id: prd8-phase3-ui-and-persistence-enhancements
+role: implementer
+target_spec: tui-interaction
+adapter: herdr
+lease_id: lease-mukmaixy-w7es5
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/tui-interaction.md
+allowed_paths:
+  - src/**
+  - tests/**
+  - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden
+runtime:
+  provider: herdr
+  agent_name: implementer-implementer-mukmaixy
+  pane_id: wW:p2J
+  state: working

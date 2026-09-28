@@ -1,0 +1,19 @@
+task_id: implementer-mukv71bq-uruhc
+lease_id: lease-mukv71bq-4st75
+outcome: completed
+summary: "Each PTY probe runs with a fresh temporary state.db scoped to the child lifetime; a regression verifies that a separate project-grouped parent state cannot change the child's default ByTime navigation. No production files changed."
+evidence:
+  changed_files:
+    - tests/pty_shortcuts.rs
+  test_results:
+    - "SESSION_MANAGER_STATE_DB unset for every check; no user state modified"
+    - "cargo fmt --check: passed"
+    - "cargo check --all-targets: passed"
+    - "cargo test --test pty_shortcuts: 8 passed, 0 failed"
+    - "cargo test --lib app::tests: 125 passed, 0 failed"
+    - "cargo test --lib state::tests: 23 passed, 0 failed"
+    - "cargo test --lib tui::tests: 47 passed, 0 failed"
+    - "cargo test: 329 passed, 0 failed (318 lib, 3 integration, 8 PTY; 0 in binary/doc targets)"
+    - "cargo test --test pty_shortcuts (rerun): 8 passed, 0 failed"
+    - "git diff --check: passed"
+blockers: []

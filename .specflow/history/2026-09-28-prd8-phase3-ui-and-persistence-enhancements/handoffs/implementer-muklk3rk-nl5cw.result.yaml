@@ -1,0 +1,34 @@
+task_id: implementer-muklk3rk-nl5cw
+lease_id: lease-muklk3rk-f7tl5
+outcome: completed
+summary: "Implemented persisted-state requirements for PRD-8 Phase 3: (1) Added Schema v3 migration logic in src/state.rs creating the `settings` table `(key TEXT PRIMARY KEY, value TEXT NOT NULL)` and bumping `user_version` to 3, supporting smooth upgrade from v0, v1, and v2 (both FTS5-enabled and disabled) while fully preserving existing records in `session_meta`, `index_meta`, and `session_content_fts`; (2) Implemented `StateStore::get_setting` and `StateStore::set_setting`, strictly returning `StateError::Degraded` when in-memory/degraded and returning permission/readonly error on read-only databases without crash; (3) Added `KEY_GROUP_BY = \"group_by\"` and deterministic mapping functions/methods between `GroupMode` and storage identifiers (`\"time\"`, `\"project\"`, `\"tag\"`) with safe fallback to `GroupMode::ByTime` on unrecognized/corrupted values; (4) Added `App::set_group_mode_and_persist` and wired `g` key handling to persist selection and warn on status line if operating in degraded/read-only mode; (5) Restored persisted `group_by` preference during app startup across both normal catalog load and fallback error branches; (6) Added comprehensive unit tests in `src/state.rs` and `src/app.rs` covering all migration paths, settings CRUD, degraded/read-only fallback, and startup restart recovery."
+evidence:
+  changed_files:
+    - src/state.rs
+    - src/app.rs
+    - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/tasks.md
+    - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/handoffs/implementer-muklk3rk-nl5cw.result.yaml
+  test_results:
+    - command: "cargo fmt --check"
+      status: "passed"
+    - command: "cargo check --all-targets"
+      status: "passed"
+    - command: "cargo test --lib state::tests"
+      status: "passed"
+      details: "23 passed, 0 failed"
+    - command: "cargo test --lib test_schema_migration"
+      status: "passed"
+      details: "4 passed, 0 failed"
+    - command: "cargo test --lib test_group_by"
+      status: "passed"
+      details: "3 passed, 0 failed"
+    - command: "cargo test --lib app::tests"
+      status: "passed"
+      details: "116 passed, 0 failed"
+    - command: "cargo test"
+      status: "passed"
+      details: "306 lib tests + 3 main tests + 7 integration tests passed (316 total passed, 0 failed)"
+    - command: "git diff --check"
+      status: "passed"
+unresolved_issues: []
+requested_transition: reviewing

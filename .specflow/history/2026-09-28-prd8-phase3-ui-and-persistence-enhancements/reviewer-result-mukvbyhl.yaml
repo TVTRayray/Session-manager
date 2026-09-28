@@ -1,0 +1,9 @@
+task_id: reviewer-mukvbyhl-5q8ud
+lease_id: lease-mukvbyhl-982xd
+outcome: completed
+verdict: pass
+category: regression
+qa_report: .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/reviews/reviewer-mukvbyhl-5q8ud.md
+summary: "Per-child PTY state.db isolation preserves existing assertions and passes the default, unset-environment full cargo suite and repeat PTY regression; human acceptance remains FAILED / PENDING RECHECK."
+unresolved_issues:
+  - "Human/manual acceptance remains FAILED / PENDING RECHECK; no manual terminal recheck was performed."

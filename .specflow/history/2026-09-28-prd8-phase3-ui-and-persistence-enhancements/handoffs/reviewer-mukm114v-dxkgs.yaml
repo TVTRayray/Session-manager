@@ -1,0 +1,23 @@
+task_id: reviewer-mukm114v-dxkgs
+change_id: prd8-phase3-ui-and-persistence-enhancements
+role: reviewer
+target_spec: persisted-state
+adapter: herdr
+lease_id: lease-mukm114v-jhwa7
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/persisted-state.md
+allowed_paths:
+  - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden
+runtime:
+  provider: herdr
+  agent_name: reviewer-reviewer-mukm114v-dxkgs
+  pane_id: wW:p2H
+  state: working

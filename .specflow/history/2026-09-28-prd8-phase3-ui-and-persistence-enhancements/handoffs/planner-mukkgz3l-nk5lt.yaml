@@ -1,0 +1,19 @@
+task_id: planner-mukkgz3l-nk5lt
+change_id: prd8-phase3-ui-and-persistence-enhancements
+role: planner
+adapter: herdr
+lease_id: lease-mukkgz3l-xy25e
+inputs:
+  - proposal.md
+allowed_paths:
+  - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden
+runtime:
+  provider: herdr
+  agent_name: planner-planner-mukkgz3l-nk5lt
+  pane_id: wW:p2E
+  state: working

@@ -12,6 +12,8 @@ where
     K: AsRef<OsStr>,
     V: AsRef<OsStr>,
 {
+    let state_dir = tempfile::tempdir().expect("probe state tempdir");
+    let state_db = state_dir.path().join("state.db");
     let probe = env!("CARGO_BIN_EXE_shortcut_probe");
     let mut command = Command::new("/usr/bin/script");
     command
@@ -22,6 +24,8 @@ where
     for (key, value) in envs {
         command.env(key, value);
     }
+    // Override inherited user state (and any caller-provided state path) per probe.
+    command.env("SESSION_MANAGER_STATE_DB", &state_db);
     let mut child = command
         .spawn()
         .unwrap_or_else(|err| panic!("failed to spawn PTY probe: {err}"));
@@ -52,6 +56,33 @@ where
 
     String::from_utf8(output.stdout)
         .unwrap_or_else(|err| panic!("probe stdout is not valid UTF-8: {err}"))
+}
+
+#[test]
+fn pty_probe_ignores_parent_project_grouping() {
+    let parent_dir = tempfile::tempdir().expect("parent state tempdir");
+    let parent_db = parent_dir.path().join("state.db");
+    let parent_store = sessions_manager::state::StateStore::open_at(&parent_db);
+    parent_store.set_setting("group_by", "project").unwrap();
+    assert_eq!(
+        parent_store.get_setting("group_by").unwrap().as_deref(),
+        Some("project")
+    );
+
+    let transcript = run_probe_with_env(
+        &[b"j", b"q"],
+        &[("SESSION_MANAGER_STATE_DB", parent_db.as_os_str())],
+    );
+    assert!(
+        transcript.contains(
+            "step=1 event=key:char(j) mods=KeyModifiers(0x0) action=LoadDetail(offset=0)"
+        ),
+        "parent project grouping influenced fresh ByTime probe:\n{transcript}"
+    );
+    assert_eq!(
+        parent_store.get_setting("group_by").unwrap().as_deref(),
+        Some("project")
+    );
 }
 
 #[test]

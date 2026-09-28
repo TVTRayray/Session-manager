@@ -1,0 +1,10 @@
+task_id: reviewer-mukuvtmw-kp9v8
+lease_id: lease-mukuvtmw-ablxm
+outcome: completed
+verdict: pass
+category: regression
+qa_report: .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/reviews/reviewer-mukuvtmw-kp9v8.md
+summary: "Scoped Detail-focus z collapse passes parent/child, ancestor-selection, all grouping modes, modal/Dashboard/engine transitions, and focused tests. Manual acceptance FAILED/PENDING RECHECK. Default cargo test fails one unrelated, state-dependent PTY assertion; fresh isolated state database passes entire suite."
+unresolved_issues:
+  - "Default cargo test fails tests/pty_shortcuts.rs:102 when ~/.session-manager/state.db persists group_by=project: j selects a group header instead of emitting LoadDetail. No z in PTY sequence. Repeated standalone default run fails; fresh SESSION_MANAGER_STATE_DB passes both standalone and full suite. PTY fixture needs separate state isolation or mode-independent expectation."
+  - "Prior human manual acceptance remains FAILED / PENDING RECHECK; no real-terminal visual/manual recheck performed."

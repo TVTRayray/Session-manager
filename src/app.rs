@@ -191,7 +191,7 @@ pub enum FocusedPanel {
     Detail,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GroupMode {
     ByTime,
     ByProject,
@@ -212,6 +212,23 @@ impl GroupMode {
             Self::ByTime => Self::ByProject,
             Self::ByProject => Self::ByTag,
             Self::ByTag => Self::ByTime,
+        }
+    }
+
+    pub fn as_storage_str(&self) -> &'static str {
+        match self {
+            Self::ByTime => "time",
+            Self::ByProject => "project",
+            Self::ByTag => "tag",
+        }
+    }
+
+    pub fn from_storage_str(raw: &str) -> Self {
+        match raw {
+            "time" => Self::ByTime,
+            "project" => Self::ByProject,
+            "tag" => Self::ByTag,
+            _ => Self::ByTime,
         }
     }
 }
@@ -445,6 +462,7 @@ impl App {
                 file_health_map,
             }) => {
                 let default_engine = SessionEngine::default_engine();
+                let restored_group_mode = state_store.load_group_mode();
                 let meta_map = state_store.load_all_meta();
                 for item in &mut session_list {
                     if let Some(meta) = meta_map.get(&(default_engine, item.session_id.clone())) {
@@ -491,7 +509,7 @@ impl App {
                     catalog_loading_state: CatalogLoadingState::Idle,
                     split_direction: SplitDirection::Horizontal,
                     focused_panel: FocusedPanel::List,
-                    group_mode: GroupMode::ByTime,
+                    group_mode: restored_group_mode,
                     tree_state: TreeState::default(),
                     tree_focus_node: None,
                     right_panel_mode: RightPanelMode::SessionDetail,
@@ -532,63 +550,69 @@ impl App {
                 }
                 app
             }
-            Err(err) => Self {
-                active_engine: SessionEngine::default_engine(),
-                session_list: Vec::new(),
-                selected_index: None,
-                detail_state: SessionDetailState::Error("No sessions found.".to_string()),
-                status_message: with_status_message(None, Some(err.as_str())),
-                should_quit: false,
-                show_help_modal: false,
-                delete_modal_state: None,
-                tag_modal_state: None,
-                state_store,
-                pending_delete_target: None,
-                pending_bulk_delete_target: None,
-                delete_result_message: None,
-                bulk_delete_result_summary: None,
-                file_health_map: HashMap::new(),
-                path_hint_state: None,
-                detail_viewport_state: DetailViewportState {
-                    scroll_offset: 0,
-                    viewport_height: DEFAULT_VIEWPORT_HEIGHT,
-                },
-                parse_cancellation_token: 0,
-                catalog_loading_state: CatalogLoadingState::Idle,
-                split_direction: SplitDirection::Horizontal,
-                focused_panel: FocusedPanel::List,
-                group_mode: GroupMode::ByTime,
-                tree_state: TreeState::default(),
-                tree_focus_node: None,
-                right_panel_mode: RightPanelMode::SessionDetail,
-                group_summary_card: None,
-                panel_main_size: None,
-                header_summary: empty_header_summary(),
-                layout_tree_version: 0,
-                resume_state: ResumeState::Idle,
-                resume_engine: None,
-                resume_result_message: None,
-                engine_status_messages: HashMap::from([(
-                    SessionEngine::default_engine(),
-                    with_status_message(None, Some(err.as_str())),
-                )]),
-                search_state: SearchState::default(),
-                search_notice: None,
-                export_modal_state: None,
-                search_overlay_state: None,
-                project_dashboard_state: None,
-                export_config: crate::config::load_export_config(),
-                display_config: crate::config::load_config(),
-                indexing_coordinator: IndexingCoordinator::new(),
-                index_progress: None,
-                catalog_cache: HashMap::new(),
-                pending_search_jump: None,
-                pending_action: None,
-                tick_count: 0,
-                pending_full_redraw: false,
-                terminal_size: default_terminal_size(),
-                catalog_request_token: 0,
-            },
+            Err(err) => {
+                let restored_group_mode = state_store.load_group_mode();
+                let mut app = Self {
+                    active_engine: SessionEngine::default_engine(),
+                    session_list: Vec::new(),
+                    selected_index: None,
+                    detail_state: SessionDetailState::Error("No sessions found.".to_string()),
+                    status_message: with_status_message(None, Some(err.as_str())),
+                    should_quit: false,
+                    show_help_modal: false,
+                    delete_modal_state: None,
+                    tag_modal_state: None,
+                    state_store,
+                    pending_delete_target: None,
+                    pending_bulk_delete_target: None,
+                    delete_result_message: None,
+                    bulk_delete_result_summary: None,
+                    file_health_map: HashMap::new(),
+                    path_hint_state: None,
+                    detail_viewport_state: DetailViewportState {
+                        scroll_offset: 0,
+                        viewport_height: DEFAULT_VIEWPORT_HEIGHT,
+                    },
+                    parse_cancellation_token: 0,
+                    catalog_loading_state: CatalogLoadingState::Idle,
+                    split_direction: SplitDirection::Horizontal,
+                    focused_panel: FocusedPanel::List,
+                    group_mode: restored_group_mode,
+                    tree_state: TreeState::default(),
+                    tree_focus_node: None,
+                    right_panel_mode: RightPanelMode::SessionDetail,
+                    group_summary_card: None,
+                    panel_main_size: None,
+                    header_summary: empty_header_summary(),
+                    layout_tree_version: 0,
+                    resume_state: ResumeState::Idle,
+                    resume_engine: None,
+                    resume_result_message: None,
+                    engine_status_messages: HashMap::from([(
+                        SessionEngine::default_engine(),
+                        with_status_message(None, Some(err.as_str())),
+                    )]),
+                    search_state: SearchState::default(),
+                    search_notice: None,
+                    export_modal_state: None,
+                    search_overlay_state: None,
+                    project_dashboard_state: None,
+                    export_config: crate::config::load_export_config(),
+                    display_config: crate::config::load_config(),
+                    indexing_coordinator: IndexingCoordinator::new(),
+                    index_progress: None,
+                    catalog_cache: HashMap::new(),
+                    pending_search_jump: None,
+                    pending_action: None,
+                    tick_count: 0,
+                    pending_full_redraw: false,
+                    terminal_size: default_terminal_size(),
+                    catalog_request_token: 0,
+                };
+                app.open_all_groups();
+                app.sync_tree_selection_from_selected_index();
+                app
+            }
         }
     }
 
@@ -654,6 +678,18 @@ impl App {
 
     pub fn set_terminal_size(&mut self, width: u16, height: u16) {
         self.terminal_size = TerminalSizeState { width, height };
+    }
+
+    pub fn set_group_mode_and_persist(&mut self, new_mode: GroupMode) {
+        self.group_mode = new_mode;
+        self.tree_state = TreeState::default();
+        self.open_all_groups();
+        self.sync_tree_selection_from_selected_index();
+        self.pending_full_redraw = true;
+
+        if let Err(_err) = self.state_store.save_group_mode(&self.group_mode) {
+            self.status_message = "警告: 分组模式仅在内存生效，未持久化".to_string();
+        }
     }
 
     pub fn consume_full_redraw(&mut self) -> bool {
@@ -828,11 +864,7 @@ impl App {
             return Some(AppAction::LoadCatalog(self.switch_engine(false)));
         }
         if event.code == KeyCode::Char('g') {
-            self.group_mode = self.group_mode.toggle();
-            self.tree_state = TreeState::default();
-            self.open_all_groups();
-            self.sync_tree_selection_from_selected_index();
-            self.pending_full_redraw = true;
+            self.set_group_mode_and_persist(self.group_mode.toggle());
             return None;
         }
 
@@ -890,7 +922,7 @@ impl App {
                 self.jump_selection(-5);
                 self.begin_detail_request().map(AppAction::LoadDetail)
             }
-            KeyCode::Char('z') if self.focused_panel == FocusedPanel::List => {
+            KeyCode::Char('z') => {
                 self.collapse_all_nodes();
                 None
             }
@@ -953,6 +985,30 @@ impl App {
 
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                if event.row == 0 {
+                    let header_layout = crate::tui::compute_header_layout(terminal_width);
+                    for (engine, hitbox) in header_layout.engine_tabs {
+                        if hitbox.contains(event.column) {
+                            self.clear_path_hint();
+                            if engine != self.active_engine {
+                                return Some(AppAction::LoadCatalog(self.switch_to_engine(engine)));
+                            }
+                            return None;
+                        }
+                    }
+                    for (mode, hitbox) in header_layout.group_buttons {
+                        if hitbox.contains(event.column) {
+                            self.clear_path_hint();
+                            if mode != self.group_mode {
+                                self.set_group_mode_and_persist(mode);
+                            }
+                            return None;
+                        }
+                    }
+                    self.clear_path_hint();
+                    return None;
+                }
+
                 if event.row == status_row {
                     self.clear_path_hint();
                     return None;
@@ -2564,13 +2620,18 @@ impl App {
         self.parse_cancellation_token = self.parse_cancellation_token.saturating_add(1);
     }
 
+    pub fn switch_to_engine(&mut self, target_engine: SessionEngine) -> CatalogRequest {
+        self.active_engine = target_engine;
+        self.begin_catalog_request()
+    }
+
     fn switch_engine(&mut self, forward: bool) -> CatalogRequest {
-        self.active_engine = if forward {
+        let target = if forward {
             self.active_engine.next()
         } else {
             self.active_engine.previous()
         };
-        self.begin_catalog_request()
+        self.switch_to_engine(target)
     }
 
     fn begin_catalog_request(&mut self) -> CatalogRequest {
@@ -3606,6 +3667,82 @@ mod tests {
 
         let _ = app.handle_key(KeyEvent::from(KeyCode::Char('g')));
         assert_eq!(app.group_mode, GroupMode::ByTime);
+    }
+
+    #[test]
+    fn test_group_by_persistence_restart_recovery() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("restart_group.db");
+
+        // 1. Initial start with empty db -> ByTime
+        {
+            let store = StateStore::open_at(&db_path);
+            let mut app = App::new_with_state_store(&stub_catalog(vec![item("one")]), store);
+            assert_eq!(app.group_mode, GroupMode::ByTime);
+
+            // Switch to ByProject via mouse click on row 0 (width 130, ByProject is cols 103..117)
+            let _ = app.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 105,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                },
+                130,
+                30,
+            );
+            assert_eq!(app.group_mode, GroupMode::ByProject);
+        }
+
+        // 2. Restart app with the same database -> ByProject restored
+        {
+            let store = StateStore::open_at(&db_path);
+            let mut app = App::new_with_state_store(&stub_catalog(vec![item("one")]), store);
+            assert_eq!(app.group_mode, GroupMode::ByProject);
+
+            // Toggle to ByTag via 'g'
+            let _ = app.handle_key(KeyEvent::from(KeyCode::Char('g')));
+            assert_eq!(app.group_mode, GroupMode::ByTag);
+        }
+
+        // 3. Restart app again -> ByTag restored
+        {
+            let store = StateStore::open_at(&db_path);
+            let app = App::new_with_state_store(&stub_catalog(vec![item("one")]), store);
+            assert_eq!(app.group_mode, GroupMode::ByTag);
+        }
+
+        // 4. Restart under error fallback catalog branch -> ByTag still restored
+        {
+            struct FailingCatalog;
+            impl SessionCatalogReader for FailingCatalog {
+                fn load_sessions(&self) -> Result<CatalogLoad, String> {
+                    Err("Failed to read sessions".to_string())
+                }
+            }
+
+            let store = Arc::new(StateStore::open_at(&db_path));
+            let app = App::new_with_arc_state_store(&FailingCatalog, store);
+            assert_eq!(app.group_mode, GroupMode::ByTag);
+        }
+    }
+
+    #[test]
+    fn test_group_by_degraded_memory_only_notice() {
+        let store = Arc::new(StateStore::open_at(std::path::Path::new(
+            "/dev/null/state.db",
+        )));
+        assert!(store.is_degraded());
+
+        let mut app = App::new_with_arc_state_store(&stub_catalog(vec![item("one")]), store);
+        assert_eq!(app.group_mode, GroupMode::ByTime);
+
+        // Toggle via 'g'
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char('g')));
+        assert_eq!(app.group_mode, GroupMode::ByProject);
+        assert!(app.status_message.contains("仅在内存生效，未持久化"));
     }
 
     #[test]
@@ -6467,6 +6604,123 @@ mod tests {
     }
 
     #[test]
+    fn detail_focus_z_collapses_parent_and_child_to_their_group_in_every_mode() {
+        for mode in [GroupMode::ByTime, GroupMode::ByProject, GroupMode::ByTag] {
+            for selected in [0, 1] {
+                let mut parent = item("parent");
+                parent.tags = vec!["shared".to_string()];
+                let mut child = item("child");
+                child.parent_session_id = Some("parent".to_string());
+                child.tags = vec!["shared".to_string()];
+                let mut other = item("other");
+                other.cwd_group_label = "other-project".to_string();
+                other.tags = vec!["other".to_string()];
+                other.display_time = "2026-04-15 12:00".to_string();
+                let mut app = App::new(&stub_catalog(vec![parent, child, other]));
+                app.set_group_mode_and_persist(mode);
+                app.selected_index = Some(selected);
+                app.sync_tree_selection_from_selected_index();
+                let ancestor = app.tree_state.selected()[0].clone();
+                assert_eq!(app.tree_state.selected().len(), selected + 2);
+                app.detail_state = SessionDetailState::Ready(ready_viewport());
+                assert!(app.scroll_detail(3).is_some());
+                assert_eq!(app.focused_panel, FocusedPanel::Detail);
+
+                assert_eq!(app.handle_key(KeyEvent::from(KeyCode::Char('z'))), None);
+                assert!(app.tree_state.opened().is_empty());
+                assert!(
+                    app.visible_tree_identifiers()
+                        .iter()
+                        .all(|path| path.len() == 1)
+                );
+                assert_eq!(app.tree_state.selected(), &[ancestor.clone()]);
+                assert_eq!(
+                    app.tree_focus_node,
+                    Some(TreeFocusNode::GroupHeader(ancestor))
+                );
+                assert_eq!(app.selected_index, None);
+                assert_eq!(app.right_panel_mode, RightPanelMode::GroupSummary);
+                assert!(app.group_summary_card.is_some());
+                assert_eq!(app.detail_state, SessionDetailState::Idle);
+                assert_eq!(app.detail_viewport_state.scroll_offset, 0);
+                assert_eq!(app.focused_panel, FocusedPanel::Detail);
+            }
+        }
+    }
+
+    #[test]
+    fn detail_focus_z_respects_overlays_and_resumes_after_closing() {
+        let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        app.focused_panel = FocusedPanel::Detail;
+        let visible = app.visible_tree_identifiers();
+        let selected = app.tree_state.selected().to_vec();
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert_eq!(app.search_state.input, "z");
+        assert_eq!(app.visible_tree_identifiers(), visible);
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert!(app.search_overlay_state.is_some());
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert_eq!(app.visible_tree_identifiers(), visible);
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('?')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert!(!app.show_help_modal);
+        assert_eq!(app.tree_state.selected(), selected.as_slice());
+        assert_eq!(app.visible_tree_identifiers(), visible);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert_eq!(app.tree_state.selected().len(), 1);
+        assert_eq!(app.visible_tree_identifiers().len(), 1);
+        assert_eq!(app.handle_key(KeyEvent::from(KeyCode::Char('j'))), None);
+        assert_eq!(
+            app.tree_focus_node,
+            Some(TreeFocusNode::GroupHeader(
+                app.tree_state.selected()[0].clone()
+            ))
+        );
+    }
+
+    #[test]
+    fn detail_focus_z_after_dashboard_and_engine_switch() {
+        let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        app.set_group_mode_and_persist(GroupMode::ByProject);
+        let group = app.tree_state.selected()[0].clone();
+        app.tree_state.select(vec![group.clone()]);
+        app.sync_tree_selection_from_tree();
+        app.handle_key(KeyEvent::from(KeyCode::Char('D')));
+        assert_eq!(app.right_panel_mode, RightPanelMode::ProjectDashboard);
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert!(!app.tree_state.opened().is_empty());
+        app.handle_key(KeyEvent::from(KeyCode::Char('D')));
+        app.selected_index = Some(0);
+        app.sync_tree_selection_from_selected_index();
+        app.focused_panel = FocusedPanel::Detail;
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert!(app.tree_state.opened().is_empty());
+
+        let request = switch_to_engine(&mut app, SessionEngine::Codex);
+        app.apply_catalog_result(catalog_result(
+            request.request_id,
+            request.engine,
+            vec![item("codex")],
+        ));
+        app.set_group_mode_and_persist(GroupMode::ByTag);
+        app.selected_index = Some(0);
+        app.sync_tree_selection_from_selected_index();
+        app.focused_panel = FocusedPanel::Detail;
+        assert_eq!(app.selected_index, Some(0));
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert!(app.tree_state.opened().is_empty());
+        assert_eq!(app.selected_index, None);
+        assert_eq!(app.right_panel_mode, RightPanelMode::GroupSummary);
+    }
+
+    #[test]
     fn navigation_and_collapse_keys_isolated_during_search_input() {
         let items: Vec<SessionListItem> = (0..10).map(|i| item(&format!("sess-{i:02}"))).collect();
         let mut app = App::new(&stub_catalog(items));
@@ -6543,5 +6797,491 @@ mod tests {
         assert!(!app.show_help_modal);
         assert_eq!(app.tree_state.selected(), selected_before.as_slice());
         assert_eq!(app.visible_tree_identifiers().len(), visible_count_before);
+    }
+
+    #[test]
+    fn test_header_mouse_click_all_engines() {
+        let items: Vec<SessionListItem> = (0..5).map(|i| item(&format!("sess-{i:02}"))).collect();
+        let mut app = App::new(&stub_catalog(items));
+        app.set_terminal_size(130, 30);
+        assert_eq!(app.active_engine, SessionEngine::Pi);
+        assert_eq!(app.selected_index, Some(0));
+
+        let layout = crate::tui::compute_header_layout(130);
+        let pi_box = layout
+            .engine_tabs
+            .iter()
+            .find(|(e, _)| *e == SessionEngine::Pi)
+            .unwrap()
+            .1;
+        let opencode_box = layout
+            .engine_tabs
+            .iter()
+            .find(|(e, _)| *e == SessionEngine::OpenCode)
+            .unwrap()
+            .1;
+        let codex_box = layout
+            .engine_tabs
+            .iter()
+            .find(|(e, _)| *e == SessionEngine::Codex)
+            .unwrap()
+            .1;
+        let claude_box = layout
+            .engine_tabs
+            .iter()
+            .find(|(e, _)| *e == SessionEngine::Claude)
+            .unwrap()
+            .1;
+
+        assert_eq!((pi_box.start_col, pi_box.end_col), (0, 6));
+        assert_eq!((opencode_box.start_col, opencode_box.end_col), (9, 21));
+        assert_eq!((codex_box.start_col, codex_box.end_col), (24, 33));
+        assert_eq!((claude_box.start_col, claude_box.end_col), (36, 46));
+
+        // 1. Click OpenCode left boundary (col 9)
+        let action = app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: opencode_box.start_col,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+            130,
+            30,
+        );
+        assert!(
+            matches!(action, Some(AppAction::LoadCatalog(req)) if req.engine == SessionEngine::OpenCode)
+        );
+        assert_eq!(app.active_engine, SessionEngine::OpenCode);
+        assert!(app.session_list.is_empty());
+        assert_eq!(app.selected_index, None);
+
+        // 2. Click Codex center (col 28)
+        let action = app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: (codex_box.start_col + codex_box.end_col) / 2,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+            130,
+            30,
+        );
+        assert!(
+            matches!(action, Some(AppAction::LoadCatalog(req)) if req.engine == SessionEngine::Codex)
+        );
+        assert_eq!(app.active_engine, SessionEngine::Codex);
+        assert!(app.session_list.is_empty());
+
+        // 3. Click Claude right boundary (col 45)
+        let action = app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: claude_box.end_col - 1,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+            130,
+            30,
+        );
+        assert!(
+            matches!(action, Some(AppAction::LoadCatalog(req)) if req.engine == SessionEngine::Claude)
+        );
+        assert_eq!(app.active_engine, SessionEngine::Claude);
+
+        // 4. Click Pi center (col 3)
+        let action = app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: (pi_box.start_col + pi_box.end_col) / 2,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+            130,
+            30,
+        );
+        assert!(
+            matches!(action, Some(AppAction::LoadCatalog(req)) if req.engine == SessionEngine::Pi)
+        );
+        assert_eq!(app.active_engine, SessionEngine::Pi);
+
+        // 5. Click Pi again while active -> No-op (None)
+        let action = app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: pi_box.start_col,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+            130,
+            30,
+        );
+        assert!(action.is_none());
+        assert_eq!(app.active_engine, SessionEngine::Pi);
+    }
+
+    #[test]
+    fn test_header_mouse_click_separators_and_boundary() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        app.set_terminal_size(130, 30);
+        assert_eq!(app.active_engine, SessionEngine::Pi);
+        assert_eq!(app.group_mode, GroupMode::ByTime);
+
+        // Separator between Pi and OpenCode: cols 6, 7, 8
+        for col in 6..9 {
+            let action = app.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: col,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                },
+                130,
+                30,
+            );
+            assert!(action.is_none());
+            assert_eq!(app.active_engine, SessionEngine::Pi);
+        }
+
+        // Separator between OpenCode and Codex: cols 21..24
+        for col in 21..24 {
+            let action = app.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: col,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                },
+                130,
+                30,
+            );
+            assert!(action.is_none());
+            assert_eq!(app.active_engine, SessionEngine::Pi);
+        }
+
+        // Gap area between left tabs (end 46) and right buttons (start 89)
+        for col in [46, 50, 65, 88] {
+            let action = app.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: col,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                },
+                130,
+                30,
+            );
+            assert!(action.is_none());
+            assert_eq!(app.active_engine, SessionEngine::Pi);
+            assert_eq!(app.group_mode, GroupMode::ByTime);
+        }
+
+        // Out of boundary columns: col 130, 150
+        for col in [130, 150] {
+            let action = app.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: col,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                },
+                130,
+                30,
+            );
+            assert!(action.is_none());
+        }
+
+        // Already active group button (ByTime is cols 89..100)
+        let action = app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 95,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+            130,
+            30,
+        );
+        assert!(action.is_none());
+        assert_eq!(app.group_mode, GroupMode::ByTime);
+    }
+
+    #[test]
+    fn test_header_mouse_click_empty_catalog() {
+        let mut app = App::new(&stub_catalog(vec![]));
+        app.set_terminal_size(130, 30);
+        assert_eq!(app.active_engine, SessionEngine::Pi);
+        assert!(app.session_list.is_empty());
+
+        // Click Claude (col 40)
+        let action = app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 40,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+            130,
+            30,
+        );
+        assert!(
+            matches!(action, Some(AppAction::LoadCatalog(req)) if req.engine == SessionEngine::Claude)
+        );
+        assert_eq!(app.active_engine, SessionEngine::Claude);
+
+        // Apply empty result
+        app.apply_catalog_result(CatalogLoadResult {
+            request_id: app.catalog_request_token,
+            engine: SessionEngine::Claude,
+            result: Ok(CatalogLoad {
+                items: Vec::new(),
+                warnings: Vec::new(),
+                file_health_map: HashMap::new(),
+            }),
+        });
+        assert_eq!(app.catalog_loading_state, CatalogLoadingState::Idle);
+        assert!(app.session_list.is_empty());
+    }
+
+    #[test]
+    fn test_header_dynamic_width_just_fits() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        // threshold = 46 (left) + 1 (gap) + 41 (right) = 88
+        let width = 88;
+        app.set_terminal_size(width, 30);
+        let layout = crate::tui::compute_header_layout(width);
+
+        assert_eq!(layout.left_width, 46);
+        assert_eq!(layout.right_width, 41);
+        assert_eq!(layout.engine_tabs.len(), 4);
+        assert_eq!(layout.group_buttons.len(), 3);
+
+        // Right buttons start at 88 - 41 = 47
+        let by_time = layout
+            .group_buttons
+            .iter()
+            .find(|(m, _)| *m == GroupMode::ByTime)
+            .unwrap()
+            .1;
+        let by_project = layout
+            .group_buttons
+            .iter()
+            .find(|(m, _)| *m == GroupMode::ByProject)
+            .unwrap()
+            .1;
+        let by_tag = layout
+            .group_buttons
+            .iter()
+            .find(|(m, _)| *m == GroupMode::ByTag)
+            .unwrap()
+            .1;
+
+        assert_eq!((by_time.start_col, by_time.end_col), (47, 58));
+        assert_eq!((by_project.start_col, by_project.end_col), (61, 75));
+        assert_eq!((by_tag.start_col, by_tag.end_col), (78, 88));
+
+        // Click right boundary of Claude (col 45) -> switches engine
+        let action = app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 45,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+            width,
+            30,
+        );
+        assert!(
+            matches!(action, Some(AppAction::LoadCatalog(req)) if req.engine == SessionEngine::Claude)
+        );
+
+        // Click col 46 (1-char gap) -> No-op
+        let action = app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 46,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+            width,
+            30,
+        );
+        assert!(action.is_none());
+
+        // Click ByProject (col 65) -> switches group mode
+        let action = app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 65,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+            width,
+            30,
+        );
+        assert!(action.is_none());
+        assert_eq!(app.group_mode, GroupMode::ByProject);
+
+        // Click ByTag right edge (col 87) -> switches to ByTag
+        let action = app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 87,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+            width,
+            30,
+        );
+        assert!(action.is_none());
+        assert_eq!(app.group_mode, GroupMode::ByTag);
+    }
+
+    #[test]
+    fn test_header_dynamic_width_just_collides() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        // threshold - 1 = 87
+        let width = 87;
+        app.set_terminal_size(width, 30);
+        let layout = crate::tui::compute_header_layout(width);
+
+        assert_eq!(layout.engine_tabs.len(), 4);
+        assert!(layout.group_buttons.is_empty());
+
+        // Click right boundary of Claude (col 45) -> switches engine
+        let action = app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 45,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
+            width,
+            30,
+        );
+        assert!(
+            matches!(action, Some(AppAction::LoadCatalog(req)) if req.engine == SessionEngine::Claude)
+        );
+
+        // Clicks on right side cols (47, 65, 80) -> completely ignored, no group mode change
+        for col in [47, 65, 80] {
+            let action = app.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: col,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                },
+                width,
+                30,
+            );
+            assert!(action.is_none());
+            assert_eq!(app.group_mode, GroupMode::ByTime);
+        }
+    }
+
+    #[test]
+    fn test_header_extreme_constrained_widths() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+
+        // 1. 40x12: Right buttons hidden, Claude clipped (width 40 < 46)
+        {
+            let layout = crate::tui::compute_header_layout(40);
+            assert_eq!(layout.engine_tabs.len(), 3); // Pi, OpenCode, Codex fit, Claude cut off
+            assert!(layout.group_buttons.is_empty());
+
+            // Click Codex center (col 28) -> switches
+            let action = app.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 28,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                },
+                40,
+                12,
+            );
+            assert!(
+                matches!(action, Some(AppAction::LoadCatalog(req)) if req.engine == SessionEngine::Codex)
+            );
+
+            // Click col 38 (partially visible Claude) -> suppressed, no panic
+            let action = app.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 38,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                },
+                40,
+                12,
+            );
+            assert!(action.is_none());
+
+            // Render does not panic
+            let line = crate::tui::render_header_line(&app, 40);
+            assert!(!line.spans.is_empty());
+        }
+
+        // 2. 2x5: Extreme narrow
+        {
+            let layout = crate::tui::compute_header_layout(2);
+            assert!(layout.engine_tabs.is_empty());
+            assert!(layout.group_buttons.is_empty());
+
+            let action = app.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 1,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                },
+                2,
+                5,
+            );
+            assert!(action.is_none());
+            let line = crate::tui::render_header_line(&app, 2);
+            assert!(!line.spans.is_empty());
+        }
+
+        // 3. 1x1: Extreme narrow
+        {
+            let layout = crate::tui::compute_header_layout(1);
+            assert!(layout.engine_tabs.is_empty());
+            assert!(layout.group_buttons.is_empty());
+            let action = app.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 0,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                },
+                1,
+                1,
+            );
+            assert!(action.is_none());
+            let line = crate::tui::render_header_line(&app, 1);
+            assert!(!line.spans.is_empty());
+        }
+
+        // 4. 0x0: Zero width
+        {
+            let layout = crate::tui::compute_header_layout(0);
+            assert!(layout.engine_tabs.is_empty());
+            assert!(layout.group_buttons.is_empty());
+            let action = app.handle_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 0,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                },
+                0,
+                0,
+            );
+            assert!(action.is_none());
+            let line = crate::tui::render_header_line(&app, 0);
+            assert!(line.spans.is_empty());
+        }
     }
 }

@@ -1,0 +1,17 @@
+task_id: subagent-mukox3hf-07ozj
+change_id: prd8-phase3-ui-and-persistence-enhancements
+role: subagent
+target_spec: tui-interaction
+subagent_role: independent_reviewer
+adapter: manual
+lease_id: lease-mukox3hf-489ri
+inputs:
+  - proposal.md
+  - specs/tui-interaction.md
+  - tasks.md
+allowed_paths: []
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: report
+subagents: orchestrator_only

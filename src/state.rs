@@ -7,7 +7,18 @@ use std::sync::Mutex;
 use chrono::Utc;
 use rusqlite::{Connection, OpenFlags, params};
 
+use crate::app::GroupMode;
 use crate::catalog::SessionEngine;
+
+pub const KEY_GROUP_BY: &str = "group_by";
+
+pub fn group_mode_to_str(mode: &GroupMode) -> &'static str {
+    mode.as_storage_str()
+}
+
+pub fn group_mode_from_str(s: &str) -> GroupMode {
+    GroupMode::from_storage_str(s)
+}
 
 /// Status of SQLite FTS5 full-text search availability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,6 +399,18 @@ impl StateStore {
             FtsAvailability::Disabled("FTS5 module not available in SQLite runtime")
         };
 
+        if current_version < 3 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS settings (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                PRAGMA user_version = 3;",
+            )?;
+            tx.commit()?;
+        }
+
         Ok(fts_status)
     }
 
@@ -540,6 +563,66 @@ impl StateStore {
                 Ok(())
             }
         }
+    }
+
+    /// Retrieves a persistent configuration setting by key.
+    ///
+    /// Returns `Ok(None)` if the key does not exist or if operating in degraded in-memory mode.
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>, StateError> {
+        let guard = match self.backend.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        match &*guard {
+            StateBackend::InMemory(_) => Ok(None),
+            StateBackend::Sqlite(conn) => {
+                let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
+                let mut rows = stmt.query(params![key])?;
+                if let Some(row) = rows.next()? {
+                    let val: String = row.get(0)?;
+                    Ok(Some(val))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    /// Stores or overwrites a persistent configuration setting by key.
+    ///
+    /// If the store is operating in degraded in-memory mode or read-only mode,
+    /// returns an error to indicate that the change is effective in memory only and not persisted.
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), StateError> {
+        let mut guard = match self.backend.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        match &mut *guard {
+            StateBackend::InMemory(_) => Err(StateError::Degraded(
+                "cannot persist settings in in-memory or degraded mode".to_string(),
+            )),
+            StateBackend::Sqlite(conn) => {
+                let sql = "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                           ON CONFLICT(key) DO UPDATE SET value = excluded.value;";
+                conn.execute(sql, params![key, value])?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Loads the stored group-by mode preference, falling back safely to `GroupMode::ByTime`.
+    pub fn load_group_mode(&self) -> GroupMode {
+        match self.get_setting(KEY_GROUP_BY) {
+            Ok(Some(raw)) => group_mode_from_str(&raw),
+            _ => GroupMode::ByTime,
+        }
+    }
+
+    /// Persists the group-by mode preference.
+    pub fn save_group_mode(&self, mode: &GroupMode) -> Result<(), StateError> {
+        self.set_setting(KEY_GROUP_BY, group_mode_to_str(mode))
     }
 
     /// Atomically replaces indexed transcript blocks and updates index_meta for a session.
@@ -886,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_migration_initializes_v2_table_and_user_version() {
+    fn schema_migration_initializes_v3_table_and_user_version() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("state.db");
 
@@ -899,7 +982,7 @@ mod tests {
         let version: i32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
 
         let meta_count: i64 = conn
             .query_row(
@@ -927,6 +1010,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fts_count, 1);
+
+        let settings_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='settings'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(settings_count, 1);
     }
 
     #[test]
@@ -1187,17 +1279,17 @@ mod tests {
             .unwrap();
         }
 
-        // Open with StateStore which triggers v1 -> v2 migration
+        // Open with StateStore which triggers v1 -> v2 -> v3 migration
         let store = StateStore::open_at(&db_path);
         assert!(!store.is_degraded());
         assert_eq!(store.fts_status(), FtsAvailability::Ready);
 
-        // Verify user_version is now 2
+        // Verify user_version is now 3
         let conn = Connection::open(&db_path).unwrap();
         let version: i32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
 
         // Verify index_meta and session_content_fts were created
         let index_meta_exists: bool = conn
@@ -1270,7 +1362,7 @@ mod tests {
             let version: i32 = conn
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 2);
+            assert_eq!(version, 3);
 
             let all_meta = store.load_all_meta();
             let item = all_meta
@@ -1667,5 +1759,377 @@ mod tests {
             .unwrap();
         assert_eq!(all_stats.0, 5); // 4 + 1 = 5 messages
         assert_eq!(all_stats.1, 18 + 5); // 23 chars
+    }
+
+    #[test]
+    fn test_schema_migration_from_v0_reaches_v3() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("v0_to_v3.db");
+
+        // Fresh empty database with user_version = 0
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let v: i32 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(v, 0);
+        }
+
+        let store = StateStore::open_at(&db_path);
+        assert!(!store.is_degraded());
+
+        let conn = Connection::open(&db_path).unwrap();
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+
+        // Verify session_meta, index_meta, session_content_fts, settings tables exist
+        for table in &[
+            "session_meta",
+            "index_meta",
+            "session_content_fts",
+            "settings",
+        ] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE type in ('table', 'view') AND name = ?1",
+                    params![table],
+                    |r| r.get::<_, i32>(0),
+                )
+                .map(|v| v == 1)
+                .unwrap_or(false);
+            assert!(exists, "Table {table} must exist after v0 -> v3 migration");
+        }
+    }
+
+    #[test]
+    fn test_schema_migration_v1_to_v3() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("v1_to_v3.db");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session_meta (
+                    engine       TEXT    NOT NULL,
+                    session_id   TEXT    NOT NULL,
+                    is_favorite  INTEGER NOT NULL DEFAULT 0,
+                    tags         TEXT    NOT NULL DEFAULT '',
+                    updated_at   INTEGER NOT NULL,
+                    PRIMARY KEY (engine, session_id)
+                );
+                CREATE INDEX idx_session_meta_fav ON session_meta(is_favorite);
+                INSERT INTO session_meta VALUES ('pi', 'sess-v1', 1, '[\"v1tag\"]', 12345);
+                PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+
+        let store = StateStore::open_at(&db_path);
+        assert!(!store.is_degraded());
+
+        let conn = Connection::open(&db_path).unwrap();
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+
+        // Verify settings table exists
+        let settings_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'",
+                [],
+                |r| r.get::<_, i32>(0),
+            )
+            .map(|v| v == 1)
+            .unwrap_or(false);
+        assert!(settings_exists);
+
+        // Verify existing v1 data intact
+        let meta = store.load_all_meta();
+        let item = meta
+            .get(&(SessionEngine::Pi, "sess-v1".to_string()))
+            .expect("v1 session must exist");
+        assert!(item.is_favorite);
+        assert_eq!(item.tags, vec!["v1tag"]);
+        assert_eq!(item.updated_at, 12345);
+    }
+
+    #[test]
+    fn test_schema_migration_v2_to_v3_with_fts() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("v2_to_v3_fts.db");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session_meta (
+                    engine       TEXT    NOT NULL,
+                    session_id   TEXT    NOT NULL,
+                    is_favorite  INTEGER NOT NULL DEFAULT 0,
+                    tags         TEXT    NOT NULL DEFAULT '',
+                    updated_at   INTEGER NOT NULL,
+                    PRIMARY KEY (engine, session_id)
+                );
+                CREATE INDEX idx_session_meta_fav ON session_meta(is_favorite);
+                CREATE TABLE index_meta (
+                    engine        TEXT    NOT NULL,
+                    session_id    TEXT    NOT NULL,
+                    indexed_mtime INTEGER NOT NULL,
+                    indexed_size  INTEGER NOT NULL,
+                    PRIMARY KEY (engine, session_id)
+                );
+                CREATE VIRTUAL TABLE session_content_fts USING fts5(
+                    engine,
+                    session_id,
+                    block_index UNINDEXED,
+                    role,
+                    content,
+                    tokenize = 'unicode61'
+                );
+                INSERT INTO session_meta VALUES ('claude', 'sess-v2', 1, '[\"fts_tag\"]', 9999);
+                INSERT INTO index_meta VALUES ('claude', 'sess-v2', 500, 1000);
+                INSERT INTO session_content_fts (engine, session_id, block_index, role, content)
+                    VALUES ('claude', 'sess-v2', 0, 'user', 'rust sqlite migration test');
+                PRAGMA user_version = 2;",
+            )
+            .unwrap();
+        }
+
+        let store = StateStore::open_at(&db_path);
+        assert!(!store.is_degraded());
+
+        let conn = Connection::open(&db_path).unwrap();
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+
+        // Verify settings table exists
+        let settings_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'",
+                [],
+                |r| r.get::<_, i32>(0),
+            )
+            .map(|v| v == 1)
+            .unwrap_or(false);
+        assert!(settings_exists);
+
+        // Verify session_meta intact
+        let meta = store.load_all_meta();
+        let item = meta
+            .get(&(SessionEngine::Claude, "sess-v2".to_string()))
+            .expect("v2 session must exist");
+        assert!(item.is_favorite);
+        assert_eq!(item.tags, vec!["fts_tag"]);
+
+        // Verify index_meta intact
+        let idx = store.get_indexed_metadata().unwrap();
+        assert_eq!(
+            idx.get(&(SessionEngine::Claude, "sess-v2".to_string())),
+            Some(&(500, 1000))
+        );
+
+        // Verify FTS5 virtual table intact and searchable
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM session_content_fts WHERE session_content_fts MATCH 'migration'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_schema_migration_v2_to_v3_without_fts() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("v2_to_v3_no_fts.db");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session_meta (
+                    engine       TEXT    NOT NULL,
+                    session_id   TEXT    NOT NULL,
+                    is_favorite  INTEGER NOT NULL DEFAULT 0,
+                    tags         TEXT    NOT NULL DEFAULT '',
+                    updated_at   INTEGER NOT NULL,
+                    PRIMARY KEY (engine, session_id)
+                );
+                CREATE INDEX idx_session_meta_fav ON session_meta(is_favorite);
+                CREATE TABLE index_meta (
+                    engine        TEXT    NOT NULL,
+                    session_id    TEXT    NOT NULL,
+                    indexed_mtime INTEGER NOT NULL,
+                    indexed_size  INTEGER NOT NULL,
+                    PRIMARY KEY (engine, session_id)
+                );
+                INSERT INTO session_meta VALUES ('opencode', 'sess-no-fts', 0, '[\"no_fts\"]', 7777);
+                INSERT INTO index_meta VALUES ('opencode', 'sess-no-fts', 100, 200);
+                PRAGMA user_version = 2;",
+            )
+            .unwrap();
+        }
+
+        let store = StateStore::open_at_with_fts_override(&db_path, Some(false));
+        assert!(!store.is_degraded());
+        assert_eq!(
+            store.fts_status(),
+            FtsAvailability::Disabled("FTS5 module not available in SQLite runtime")
+        );
+
+        let conn = Connection::open(&db_path).unwrap();
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+
+        // Verify settings table exists and functions
+        let settings_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'",
+                [],
+                |r| r.get::<_, i32>(0),
+            )
+            .map(|v| v == 1)
+            .unwrap_or(false);
+        assert!(settings_exists);
+
+        store.set_setting(KEY_GROUP_BY, "tag").unwrap();
+        assert_eq!(
+            store.get_setting(KEY_GROUP_BY).unwrap(),
+            Some("tag".to_string())
+        );
+
+        // Verify existing data intact
+        let meta = store.load_all_meta();
+        let item = meta
+            .get(&(SessionEngine::OpenCode, "sess-no-fts".to_string()))
+            .unwrap();
+        assert_eq!(item.tags, vec!["no_fts"]);
+    }
+
+    #[test]
+    fn test_settings_read_write_and_overwrite() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("settings_rw.db");
+        let store = StateStore::open_at(&db_path);
+
+        // Non-existent key returns None
+        assert_eq!(store.get_setting("non_existent").unwrap(), None);
+
+        // Write and read
+        store.set_setting("group_by", "project").unwrap();
+        assert_eq!(
+            store.get_setting("group_by").unwrap(),
+            Some("project".to_string())
+        );
+
+        // Overwrite
+        store.set_setting("group_by", "tag").unwrap();
+        assert_eq!(
+            store.get_setting("group_by").unwrap(),
+            Some("tag".to_string())
+        );
+
+        // Write second key
+        store.set_setting("theme", "dark").unwrap();
+        assert_eq!(
+            store.get_setting("theme").unwrap(),
+            Some("dark".to_string())
+        );
+        assert_eq!(
+            store.get_setting("group_by").unwrap(),
+            Some("tag".to_string())
+        );
+    }
+
+    #[test]
+    fn test_group_by_unknown_or_illegal_value_fallback() {
+        // Test deterministic mapping
+        assert_eq!(group_mode_to_str(&GroupMode::ByTime), "time");
+        assert_eq!(group_mode_to_str(&GroupMode::ByProject), "project");
+        assert_eq!(group_mode_to_str(&GroupMode::ByTag), "tag");
+
+        assert_eq!(group_mode_from_str("time"), GroupMode::ByTime);
+        assert_eq!(group_mode_from_str("project"), GroupMode::ByProject);
+        assert_eq!(group_mode_from_str("tag"), GroupMode::ByTag);
+
+        // Unknown or illegal values must safely fall back to GroupMode::ByTime
+        assert_eq!(group_mode_from_str("by_priority"), GroupMode::ByTime);
+        assert_eq!(group_mode_from_str(""), GroupMode::ByTime);
+        assert_eq!(group_mode_from_str("invalid\0unicode"), GroupMode::ByTime);
+        assert_eq!(group_mode_from_str("PROJECT"), GroupMode::ByTime);
+        assert_eq!(group_mode_from_str("Time"), GroupMode::ByTime);
+
+        // Database-backed test
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("group_fallback.db");
+        let store = StateStore::open_at(&db_path);
+
+        // Store invalid value
+        store.set_setting(KEY_GROUP_BY, "by_priority").unwrap();
+        assert_eq!(store.load_group_mode(), GroupMode::ByTime);
+
+        // Store empty string
+        store.set_setting(KEY_GROUP_BY, "").unwrap();
+        assert_eq!(store.load_group_mode(), GroupMode::ByTime);
+
+        // Store valid value
+        store.save_group_mode(&GroupMode::ByProject).unwrap();
+        assert_eq!(store.load_group_mode(), GroupMode::ByProject);
+    }
+
+    #[test]
+    fn test_settings_read_write_failure_and_degraded_fallback() {
+        // 1. In-memory / degraded mode
+        let degraded_store = StateStore {
+            backend: Mutex::new(StateBackend::InMemory(HashMap::new())),
+            is_degraded: true,
+            db_path: None,
+            fts_availability: FtsAvailability::Disabled("degraded"),
+        };
+        // Reading in memory mode returns Ok(None) without crash
+        assert_eq!(degraded_store.get_setting("group_by").unwrap(), None);
+        assert_eq!(degraded_store.load_group_mode(), GroupMode::ByTime);
+
+        // Writing in memory mode returns StateError::Degraded
+        let err = degraded_store
+            .set_setting("group_by", "project")
+            .unwrap_err();
+        assert!(matches!(err, StateError::Degraded(_)));
+        assert_eq!(
+            err.to_string(),
+            "state degraded: cannot persist settings in in-memory or degraded mode"
+        );
+
+        // 2. Read-only filesystem / connection
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("readonly_settings.db");
+        {
+            let _store = StateStore::open_at(&db_path);
+        }
+
+        let ro_conn =
+            Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let ro_store = StateStore {
+            backend: Mutex::new(StateBackend::Sqlite(ro_conn)),
+            is_degraded: false,
+            db_path: Some(db_path),
+            fts_availability: FtsAvailability::Ready,
+        };
+
+        // Reading works on read-only connection
+        assert_eq!(ro_store.get_setting("group_by").unwrap(), None);
+
+        // Writing returns error (PermissionDenied or Sqlite readonly)
+        let ro_err = ro_store.set_setting("group_by", "project").unwrap_err();
+        match ro_err {
+            StateError::PermissionDenied(_) | StateError::Sqlite(_) => {}
+            other => panic!("Expected permission or sqlite readonly error, got: {other:?}"),
+        }
     }
 }

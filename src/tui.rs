@@ -34,7 +34,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         ])
         .split(frame.area());
 
-    let header = Paragraph::new(render_header_line(app)).style(
+    let header = Paragraph::new(render_header_line(app, outer[0].width)).style(
         Style::default()
             .fg(THEME_TEXT)
             .bg(THEME_HEADER_BG)
@@ -596,6 +596,7 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
             .selected_index
             .saturating_sub(visible_items.saturating_sub(1));
 
+        let available_w = chunks[2].width as usize;
         let mut lines = Vec::new();
         for (i, hit) in overlay
             .results
@@ -605,16 +606,22 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
             .take(visible_items)
         {
             let is_selected = i == overlay.selected_index;
-            let pointer = if is_selected { "▸ " } else { "  " };
+            let card_bg = if is_selected {
+                THEME_HEADER_BG
+            } else {
+                THEME_BG
+            };
 
+            let pointer = if is_selected { "▸ " } else { "  " };
             let pointer_span = Span::styled(
                 pointer,
                 if is_selected {
                     Style::default()
                         .fg(THEME_HIGHLIGHT)
+                        .bg(card_bg)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(THEME_BORDER)
+                    Style::default().fg(THEME_BORDER).bg(card_bg)
                 },
             );
 
@@ -668,36 +675,81 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
                 })
                 .unwrap_or_else(|| "-".to_string());
 
-            let header_text = format!("[{}] {}", project, truncate_summary(title, 34));
+            let meta_text = format!("{} · {}", hit.engine.label(), time);
+            let meta_w = display_width(&meta_text);
+
+            let max_header_w = available_w.saturating_sub(2 + meta_w + 1);
+            let header_raw = format!("[{}] {}", project, title);
+            let truncated_header = truncate_summary(&header_raw, max_header_w);
+            let header_w = display_width(&truncated_header);
+            let pad = available_w.saturating_sub(2 + header_w + meta_w);
+
             let header_span = Span::styled(
-                format!("{:<42}", header_text),
+                truncated_header,
                 if is_selected {
-                    Style::default().fg(THEME_TEXT).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(THEME_TEXT)
+                        .bg(card_bg)
+                        .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(THEME_TEXT)
+                    Style::default().fg(THEME_TEXT).bg(card_bg)
                 },
             );
+            let pad_span = Span::styled(" ".repeat(pad), Style::default().bg(card_bg));
             let meta_span = Span::styled(
-                format!("{} · {}", hit.engine.label(), time),
-                Style::default().fg(THEME_BORDER),
+                meta_text,
+                if is_selected {
+                    Style::default()
+                        .fg(THEME_TEXT)
+                        .bg(card_bg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(THEME_BORDER).bg(card_bg)
+                },
             );
 
-            lines.push(Line::from(vec![pointer_span, header_span, meta_span]));
+            lines.push(
+                Line::from(vec![pointer_span, header_span, pad_span, meta_span])
+                    .style(Style::default().bg(card_bg)),
+            );
 
-            let mut snippet_spans = vec![Span::raw("    \"...")];
-            render_highlighted_snippet(&hit.snippet, &mut snippet_spans);
-            snippet_spans.push(Span::raw("...\""));
+            let mut snippet_spans = vec![Span::styled(
+                "    \"...",
+                Style::default().fg(THEME_TEXT).bg(card_bg),
+            )];
+            render_highlighted_snippet_with_bg(&hit.snippet, card_bg, &mut snippet_spans);
+            snippet_spans.push(Span::styled(
+                "...\"",
+                Style::default().fg(THEME_TEXT).bg(card_bg),
+            ));
             if hit.extra_matches() > 0 {
                 snippet_spans.push(Span::styled(
                     format!(" ({} more matches in this session)", hit.extra_matches()),
-                    Style::default().fg(THEME_BORDER),
+                    Style::default().fg(THEME_BORDER).bg(card_bg),
                 ));
             }
-            lines.push(Line::from(snippet_spans));
-            lines.push(Line::from(""));
+
+            let snippet_total_w: usize = snippet_spans
+                .iter()
+                .map(|s| display_width(&s.content))
+                .sum();
+            let snippet_pad = available_w.saturating_sub(snippet_total_w);
+            if snippet_pad > 0 {
+                snippet_spans.push(Span::styled(
+                    " ".repeat(snippet_pad),
+                    Style::default().bg(card_bg),
+                ));
+            }
+            lines.push(Line::from(snippet_spans).style(Style::default().bg(card_bg)));
+
+            let divider_span = Span::styled(
+                "─".repeat(available_w),
+                Style::default().fg(THEME_BORDER).bg(THEME_BG),
+            );
+            lines.push(Line::from(vec![divider_span]));
         }
 
-        let results_widget = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        let results_widget = Paragraph::new(Text::from(lines));
         frame.render_widget(results_widget, chunks[2]);
     }
 
@@ -751,13 +803,22 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
     frame.render_widget(Paragraph::new(footer_line), chunks[4]);
 }
 
+#[allow(dead_code)]
 fn render_highlighted_snippet(snippet: &str, spans: &mut Vec<Span<'static>>) {
+    render_highlighted_snippet_with_bg(snippet, THEME_BG, spans);
+}
+
+fn render_highlighted_snippet_with_bg(
+    snippet: &str,
+    card_bg: Color,
+    spans: &mut Vec<Span<'static>>,
+) {
     let mut rest = snippet;
     while let Some(start_idx) = rest.find("<<") {
         if start_idx > 0 {
             spans.push(Span::styled(
                 rest[..start_idx].to_string(),
-                Style::default().fg(THEME_TEXT),
+                Style::default().fg(THEME_TEXT).bg(card_bg),
             ));
         }
         let after_start = &rest[start_idx + 2..];
@@ -765,13 +826,19 @@ fn render_highlighted_snippet(snippet: &str, spans: &mut Vec<Span<'static>>) {
             let matched = &after_start[..end_idx];
             spans.push(Span::styled(
                 matched.to_string(),
-                Style::default().fg(THEME_WARN).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(THEME_SEARCH_FG)
+                    .bg(THEME_SEARCH_BG)
+                    .add_modifier(Modifier::BOLD),
             ));
             rest = &after_start[end_idx + 2..];
         } else {
             spans.push(Span::styled(
                 after_start.to_string(),
-                Style::default().fg(THEME_WARN).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(THEME_SEARCH_FG)
+                    .bg(THEME_SEARCH_BG)
+                    .add_modifier(Modifier::BOLD),
             ));
             rest = "";
             break;
@@ -780,7 +847,7 @@ fn render_highlighted_snippet(snippet: &str, spans: &mut Vec<Span<'static>>) {
     if !rest.is_empty() {
         spans.push(Span::styled(
             rest.to_string(),
-            Style::default().fg(THEME_TEXT),
+            Style::default().fg(THEME_TEXT).bg(card_bg),
         ));
     }
 }
@@ -1057,7 +1124,100 @@ fn panel_block(title: &str, focused: bool) -> Block<'static> {
         .border_style(border_style)
 }
 
-fn render_header_line(app: &App) -> Line<'static> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeaderHitbox {
+    pub start_col: u16,
+    pub end_col: u16,
+}
+
+impl HeaderHitbox {
+    pub fn new(start_col: u16, end_col: u16) -> Self {
+        Self { start_col, end_col }
+    }
+
+    pub fn contains(&self, col: u16) -> bool {
+        col >= self.start_col && col < self.end_col
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeaderLayout {
+    pub terminal_width: u16,
+    pub left_width: u16,
+    pub right_width: u16,
+    pub engine_tabs: Vec<(SessionEngine, HeaderHitbox)>,
+    pub group_buttons: Vec<(GroupMode, HeaderHitbox)>,
+}
+
+pub fn compute_header_layout(terminal_width: u16) -> HeaderLayout {
+    let sep_w = 3u16;
+    let min_gap = 1u16;
+
+    let mut left_width = 0u16;
+    let mut left_items = Vec::new();
+    for (i, &engine) in SessionEngine::tab_order().iter().enumerate() {
+        if i > 0 {
+            left_width = left_width.saturating_add(sep_w);
+        }
+        let label = format!("  {}  ", engine.label());
+        let tab_w = display_width(&label) as u16;
+        let start = left_width;
+        let end = start.saturating_add(tab_w);
+        left_items.push((engine, start, end));
+        left_width = end;
+    }
+
+    let mut engine_tabs = Vec::new();
+    for (engine, start, end) in left_items {
+        if end <= terminal_width {
+            engine_tabs.push((engine, HeaderHitbox::new(start, end)));
+        }
+    }
+
+    let group_modes = [GroupMode::ByTime, GroupMode::ByProject, GroupMode::ByTag];
+    let mut right_width = 0u16;
+    let mut group_widths = Vec::new();
+    for (i, &mode) in group_modes.iter().enumerate() {
+        if i > 0 {
+            right_width = right_width.saturating_add(sep_w);
+        }
+        let label = format!("  {}  ", mode.label());
+        let btn_w = display_width(&label) as u16;
+        group_widths.push((mode, btn_w));
+        right_width = right_width.saturating_add(btn_w);
+    }
+
+    let mut group_buttons = Vec::new();
+    let threshold = left_width
+        .saturating_add(min_gap)
+        .saturating_add(right_width);
+    if terminal_width >= threshold {
+        let mut r_col = terminal_width.saturating_sub(right_width);
+        for (i, (mode, btn_w)) in group_widths.into_iter().enumerate() {
+            if i > 0 {
+                r_col = r_col.saturating_add(sep_w);
+            }
+            let start = r_col;
+            let end = start.saturating_add(btn_w);
+            group_buttons.push((mode, HeaderHitbox::new(start, end)));
+            r_col = end;
+        }
+    }
+
+    HeaderLayout {
+        terminal_width,
+        left_width,
+        right_width,
+        engine_tabs,
+        group_buttons,
+    }
+}
+
+pub fn render_header_line(app: &App, terminal_width: u16) -> Line<'static> {
+    if terminal_width == 0 {
+        return Line::from("");
+    }
+    let layout = compute_header_layout(terminal_width);
     let mut spans = Vec::new();
     for (index, &engine) in SessionEngine::tab_order().iter().enumerate() {
         if index > 0 {
@@ -1068,7 +1228,52 @@ fn render_header_line(app: &App) -> Line<'static> {
         }
         spans.push(tab_span(engine, app.active_engine));
     }
+
+    if !layout.group_buttons.is_empty() {
+        let pad_len = terminal_width
+            .saturating_sub(layout.left_width)
+            .saturating_sub(layout.right_width);
+        if pad_len > 0 {
+            spans.push(Span::styled(
+                " ".repeat(pad_len as usize),
+                Style::default().bg(THEME_HEADER_BG),
+            ));
+        }
+        for (index, &mode) in [GroupMode::ByTime, GroupMode::ByProject, GroupMode::ByTag]
+            .iter()
+            .enumerate()
+        {
+            if index > 0 {
+                spans.push(Span::styled(
+                    " | ",
+                    Style::default().fg(THEME_BORDER).bg(THEME_HEADER_BG),
+                ));
+            }
+            spans.push(group_mode_span(mode, app.group_mode));
+        }
+    }
+
     Line::from(spans)
+}
+
+fn group_mode_span(mode: GroupMode, active_mode: GroupMode) -> Span<'static> {
+    let label = format!("  {}  ", mode.label());
+    if mode == active_mode {
+        Span::styled(
+            label,
+            Style::default()
+                .fg(THEME_BG)
+                .bg(THEME_HIGHLIGHT)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            label,
+            Style::default()
+                .fg(THEME_BORDER)
+                .add_modifier(Modifier::BOLD),
+        )
+    }
 }
 
 fn build_session_tree_items(app: &App) -> Vec<TreeItem<'static, String>> {
@@ -1533,6 +1738,7 @@ mod tests {
     use super::*;
     use crate::app::{GroupMode, SearchOverlayState, compute_layout};
     use crate::catalog::{CatalogLoad, SessionCatalogReader, SessionListItem};
+    use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::buffer::Buffer;
     use ratatui::widgets::Widget;
     use std::collections::HashMap;
@@ -1595,7 +1801,7 @@ mod tests {
     #[test]
     fn header_shows_engine_tabs_and_active_highlight_changes() {
         let mut app = App::new(&StubCatalog);
-        let pi = render_header_line(&app);
+        let pi = render_header_line(&app, 130);
         let tabs: String = pi.spans.iter().map(|span| span.content.as_ref()).collect();
         assert!(tabs.contains("Pi"));
         assert!(tabs.contains("OpenCode"));
@@ -1604,7 +1810,7 @@ mod tests {
         assert_eq!(pi.spans[0].style.bg, Some(THEME_HIGHLIGHT));
 
         app.active_engine = SessionEngine::Claude;
-        let claude = render_header_line(&app);
+        let claude = render_header_line(&app, 130);
         assert_eq!(claude.spans[6].style.bg, Some(THEME_HIGHLIGHT));
     }
 
@@ -2592,5 +2798,350 @@ mod tests {
         assert_eq!(line.spans[0].style.fg, Some(Color::Rgb(249, 226, 175)));
         assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(line.spans[1].content, "[demo] Favorited Session");
+    }
+
+    #[test]
+    fn test_search_overlay_full_state_matrix() {
+        let mut app = App::new(&StubCatalog);
+
+        // State 1: Query empty -> Prompt
+        app.search_overlay_state = Some(SearchOverlayState {
+            query: "   ".to_string(),
+            cursor_position: 3,
+            is_loading: false,
+            error_message: None,
+            results: Vec::new(),
+            selected_index: 0,
+            scroll_offset: 0,
+            debounce_ticks: 0,
+            last_searched_query: String::new(),
+        });
+        {
+            let backend = ratatui::backend::TestBackend::new(100, 28);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal.draw(|f| render(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let rendered: String = (0..28)
+                .map(|y| {
+                    (0..100)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(rendered.contains("Type keywords to search session transcripts..."));
+        }
+
+        // State 2: Loading
+        app.search_overlay_state = Some(SearchOverlayState {
+            query: "query".to_string(),
+            cursor_position: 5,
+            is_loading: true,
+            error_message: None,
+            results: Vec::new(),
+            selected_index: 0,
+            scroll_offset: 0,
+            debounce_ticks: 0,
+            last_searched_query: String::new(),
+        });
+        {
+            let backend = ratatui::backend::TestBackend::new(100, 28);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal.draw(|f| render(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let rendered: String = (0..28)
+                .map(|y| {
+                    (0..100)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let normalized = rendered.replace(' ', "");
+            assert!(normalized.contains("搜索中..."));
+        }
+
+        // State 3: Empty results
+        app.search_overlay_state = Some(SearchOverlayState {
+            query: "no_match_here".to_string(),
+            cursor_position: 13,
+            is_loading: false,
+            error_message: None,
+            results: Vec::new(),
+            selected_index: 0,
+            scroll_offset: 0,
+            debounce_ticks: 0,
+            last_searched_query: "no_match_here".to_string(),
+        });
+        {
+            let backend = ratatui::backend::TestBackend::new(100, 28);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal.draw(|f| render(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let rendered: String = (0..28)
+                .map(|y| {
+                    (0..100)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(rendered.contains("No matching sessions found."));
+        }
+
+        // State 4: Error message
+        app.search_overlay_state = Some(SearchOverlayState {
+            query: "error_trigger".to_string(),
+            cursor_position: 13,
+            is_loading: false,
+            error_message: Some("database lock timeout".to_string()),
+            results: Vec::new(),
+            selected_index: 0,
+            scroll_offset: 0,
+            debounce_ticks: 0,
+            last_searched_query: "error_trigger".to_string(),
+        });
+        {
+            let backend = ratatui::backend::TestBackend::new(100, 28);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal.draw(|f| render(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let rendered: String = (0..28)
+                .map(|y| {
+                    (0..100)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(rendered.contains("database lock timeout"));
+            assert!(rendered.contains("⚠️"));
+        }
+
+        // State 5: Indexing in progress (partial index)
+        app.index_progress = Some(crate::search::IndexProgress {
+            indexed_count: 50,
+            total_count: 100,
+            is_complete: false,
+        });
+        app.search_overlay_state = Some(SearchOverlayState {
+            query: "match".to_string(),
+            cursor_position: 5,
+            is_loading: false,
+            error_message: None,
+            results: vec![crate::search::SearchHit::new(
+                SessionEngine::Pi,
+                "sess-1",
+                0,
+                "found <<match>> in transcript",
+                1.0,
+                1,
+            )],
+            selected_index: 0,
+            scroll_offset: 0,
+            debounce_ticks: 0,
+            last_searched_query: "match".to_string(),
+        });
+        {
+            let backend = ratatui::backend::TestBackend::new(100, 28);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal.draw(|f| render(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let rendered: String = (0..28)
+                .map(|y| {
+                    (0..100)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let normalized = rendered.replace(' ', "");
+            assert!(normalized.contains("50/100"));
+            assert!(normalized.contains("索引构建中"));
+            assert!(rendered.contains("sess-1"));
+        }
+
+        // State 6: Completed indexing
+        app.index_progress = Some(crate::search::IndexProgress {
+            indexed_count: 100,
+            total_count: 100,
+            is_complete: true,
+        });
+        {
+            let backend = ratatui::backend::TestBackend::new(100, 28);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal.draw(|f| render(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let rendered: String = (0..28)
+                .map(|y| {
+                    (0..100)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let normalized = rendered.replace(' ', "");
+            assert!(normalized.contains("索引状态：已完成100/100会话"));
+        }
+
+        // State 7: FTS5 disabled notice
+        {
+            let disabled_store = std::sync::Arc::new(
+                crate::state::StateStore::open_in_memory_with_fts_override(Some(false)),
+            );
+            let mut disabled_app = App::new_with_arc_state_store(&StubCatalog, disabled_store);
+            disabled_app.search_overlay_state = Some(SearchOverlayState {
+                query: "test".to_string(),
+                cursor_position: 4,
+                is_loading: false,
+                error_message: None,
+                results: Vec::new(),
+                selected_index: 0,
+                scroll_offset: 0,
+                debounce_ticks: 0,
+                last_searched_query: "test".to_string(),
+            });
+            let backend = ratatui::backend::TestBackend::new(100, 28);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal.draw(|f| render(f, &mut disabled_app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let rendered: String = (0..28)
+                .map(|y| {
+                    (0..100)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let normalized = rendered.replace(' ', "");
+            assert!(normalized.contains("⚠️全文搜索不可用：当前SQLite环境未启用FTS5扩展组件"));
+            assert!(normalized.contains("索引状态：已禁用"));
+        }
+    }
+
+    #[test]
+    fn test_search_overlay_selected_card_style() {
+        let mut app = App::new(&StubCatalog);
+        let overlay = SearchOverlayState {
+            query: "keyword".to_string(),
+            cursor_position: 7,
+            is_loading: false,
+            error_message: None,
+            results: vec![
+                crate::search::SearchHit::new(
+                    SessionEngine::Pi,
+                    "sess-card-0",
+                    0,
+                    "first snippet with <<keyword>> highlighted",
+                    1.5,
+                    0,
+                ),
+                crate::search::SearchHit::new(
+                    SessionEngine::Pi,
+                    "sess-card-1",
+                    0,
+                    "second snippet with <<keyword>> highlighted",
+                    1.2,
+                    0,
+                ),
+            ],
+            selected_index: 0,
+            scroll_offset: 0,
+            debounce_ticks: 0,
+            last_searched_query: "keyword".to_string(),
+        };
+        app.search_overlay_state = Some(overlay);
+
+        let backend = ratatui::backend::TestBackend::new(100, 28);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        // 1. Initially selected_index = 0
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer1 = terminal.backend().buffer().clone();
+        let rendered1: String = (0..28)
+            .map(|y| {
+                (0..100)
+                    .map(|x| buffer1[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered1.contains("▸ [-] sess-card-0"));
+        assert!(rendered1.contains("  [-] sess-card-1"));
+        assert!(rendered1.contains("───")); // Divider line between cards
+
+        // 2. Navigate Down -> selected_index = 1
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(app.search_overlay_state.as_ref().unwrap().selected_index, 1);
+
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer2 = terminal.backend().buffer().clone();
+        let rendered2: String = (0..28)
+            .map(|y| {
+                (0..100)
+                    .map(|x| buffer2[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered2.contains("  [-] sess-card-0"));
+        assert!(rendered2.contains("▸ [-] sess-card-1"));
+
+        // 3. Navigate Up -> selected_index = 0
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Up));
+        assert_eq!(app.search_overlay_state.as_ref().unwrap().selected_index, 0);
+
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer3 = terminal.backend().buffer().clone();
+        let rendered3: String = (0..28)
+            .map(|y| {
+                (0..100)
+                    .map(|x| buffer3[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered3.contains("▸ [-] sess-card-0"));
+        assert!(rendered3.contains("  [-] sess-card-1"));
+    }
+
+    #[test]
+    fn test_search_overlay_cjk_emoji_narrow_safety() {
+        let mut app = App::new(&StubCatalog);
+        let overlay = SearchOverlayState {
+            query: "登录态".to_string(),
+            cursor_position: 3,
+            is_loading: false,
+            error_message: None,
+            results: vec![
+                crate::search::SearchHit::new(
+                    SessionEngine::Pi,
+                    "sess-cjk-emoji-1",
+                    0,
+                    "排查发现 <<登录态>> 已经过期 ⚠️ 必须重新授权 🐛 [BUG] 🚀",
+                    2.0,
+                    5,
+                ),
+                crate::search::SearchHit::new(
+                    SessionEngine::OpenCode,
+                    "sess-cjk-emoji-2",
+                    0,
+                    "新彭楠-备煤日进及消费情况分析报告 <<登录态>> 验证失败 🔥🔥🔥",
+                    1.8,
+                    2,
+                ),
+            ],
+            selected_index: 0,
+            scroll_offset: 0,
+            debounce_ticks: 0,
+            last_searched_query: "登录态".to_string(),
+        };
+        app.search_overlay_state = Some(overlay);
+
+        for width in [120, 80, 50, 40, 30, 20, 10, 5, 2, 1] {
+            let backend = ratatui::backend::TestBackend::new(width, 24);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal.draw(|f| render(f, &mut app)).unwrap();
+        }
     }
 }

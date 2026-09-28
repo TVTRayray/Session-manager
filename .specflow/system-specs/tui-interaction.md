@@ -4,7 +4,7 @@
 
 ### Requirement: Navigate engines and session trees
 
-The TUI MUST start in the engine provided by `SessionEngine::default_engine()` (Pi) and cycle engines dynamically using `SessionEngine::tab_order()` with Tab/Shift+Tab (Pi → OpenCode → Codex → Claude), requesting the selected engine's catalog and clearing stale selection, detail, delete, and search context. Engine tabs MUST be rendered dynamically by iterating `SessionEngine::tab_order()`. Arrow keys or `j`/`k` MUST move through visible recursive tree rows; Left/Right and Space MUST collapse or expand groups and parent sessions. Uppercase `J` and `K` MUST jump downwards or upwards by 5 visible rows, halting at the upper or lower boundary without wraparound. Lowercase `j` and `k` MUST traverse rows with circular wraparound at list boundaries (pressing `j` at the last visible row wraps to the first row, and pressing `k` at the first visible row wraps to the last row). Pressing `z` MUST collapse all currently expanded group and parent session nodes (`tree_state.close_all()`), safely retaining selection on the closest visible ancestor node or the first item and synchronizing the header overview. All modal dialogs and search inputs MUST isolate and intercept navigation keys from the session tree. Child sessions MUST appear beneath their unique parent with Agent labels; unresolved, duplicate-parent, or cyclic relationships MUST remain visible as detached roots without crashing or infinite loops. Selecting a search match MUST automatically expand all ancestor nodes to reveal the target session. Favorite sessions MUST prepend a star icon (`★`) to their summary, and sessions with tags MUST append muted tag badges (`#tag`) to the summary, truncating cleanly under constrained widths. Child agent nodes MUST be excluded from separate favorite and tag badges to maintain uncluttered subagent rows.
+The TUI MUST start in the engine provided by `SessionEngine::default_engine()` (Pi) and cycle engines dynamically using `SessionEngine::tab_order()` with Tab/Shift+Tab (Pi → OpenCode → Codex → Claude), requesting the selected engine's catalog and clearing stale selection, detail, delete, and search context. Engine tabs MUST be rendered dynamically by iterating `SessionEngine::tab_order()`. Arrow keys or `j`/`k` MUST move through visible recursive tree rows; Left/Right and Space MUST collapse or expand groups and parent sessions. Uppercase `J` and `K` MUST jump downwards or upwards by 5 visible rows, halting at the upper or lower boundary without wraparound. Lowercase `j` and `k` MUST traverse rows with circular wraparound at list boundaries (pressing `j` at the last visible row wraps to the first row, and pressing `k` at the first visible row wraps to the last row). Pressing `z` MUST collapse all currently expanded group and parent session nodes (`tree_state.close_all()`), safely retaining selection on the closest visible ancestor node or the first item and synchronizing the header overview. All modal dialogs and search inputs MUST isolate and intercept navigation keys from the session tree. Child sessions MUST appear beneath their unique parent with Agent labels; unresolved, duplicate-parent, or cyclic relationships MUST remain visible as detached roots without crashing or infinite loops. Selecting a search match MUST automatically expand all ancestor nodes to reveal the target session. Favorite sessions MUST prepend a star icon (`★`) to their summary, and sessions with tags MUST append muted tag badges (`#tag`) to the summary, truncating cleanly under constrained widths. Child agent nodes MUST be excluded from separate favorite and tag badges to maintain uncluttered subagent rows. In addition, the engine tabs on the left side of the header line MUST support direct selection via mouse left-click, switching the active engine and triggering catalog retrieval with context invalidation identical to keyboard Tab navigation, while remaining strictly non-persistent across application restarts.
 
 #### Scenario: Cycle through engines
 
@@ -79,9 +79,23 @@ The TUI MUST start in the engine provided by `SessionEngine::default_engine()` (
 - **THEN** all expanded groups and parent sessions are collapsed so that only top-level group headers remain visible, and the selection safely converges to the visible ancestor group header corresponding to the previously selected session, synchronizing the header overview and detail panel
 - **EVIDENCE** `src/app.rs::App::handle_key`
 
+#### Scenario: Switch engine by clicking header tab with mouse
+
+- **GIVEN** the TUI is running with Pi as the active engine and mouse support enabled
+- **WHEN** the user left-clicks within the bounding box of the `Claude` tab on the header line
+- **THEN** the active engine switches to Claude, catalog loading is initiated, and previous selection, detail, and search contexts are cleared, matching the behavior of keyboard Tab switching
+
+#### Scenario: Protect engine tab mouse hitbox and handle clicks outside tabs or under constrained width
+
+- **GIVEN** the header line is rendered with engine tabs
+- **WHEN** the user left-clicks on separator characters (` | `), beyond the rendered tab range, or in empty space between the left and right header sections
+- **THEN** the click event is safely ignored without switching engines, modifying selection, or panicking
+
+---
+
 ### Requirement: Support project and time grouping
 
-The TUI MUST toggle grouping modes using `g` through a three-way cycle: `By Time → By Project → By Tag → By Time`. In `By Time` and `By Project` modes, sessions MUST be grouped under time period or project directory headers, and child subagents MUST remain recursively nested under their root main session within that root's group. In `By Tag` mode, sessions MUST be grouped under tag headers prefixed with `🏷️`, uncategorized sessions without tags MUST appear under a dedicated `🏷️ 未分类` header, and multi-tagged sessions MUST appear under every matching tag group. Group headers MUST display root and subagent counts, and group actions (such as group deletion) MUST recursively include all descendant sessions exactly once. Switching between any grouping modes MUST preserve the currently selected session and automatically expand all ancestor nodes leading to it.
+The TUI MUST toggle grouping modes using `g` through a three-way cycle: `By Time → By Project → By Tag → By Time`. In `By Time` and `By Project` modes, sessions MUST be grouped under time period or project directory headers, and child subagents MUST remain recursively nested under their root main session within that root's group. In `By Tag` mode, sessions MUST be grouped under tag headers prefixed with `🏷️`, uncategorized sessions without tags MUST appear under a dedicated `🏷️ 未分类` header, and multi-tagged sessions MUST appear under every matching tag group. Group headers MUST display root and subagent counts, and group actions (such as group deletion) MUST recursively include all descendant sessions exactly once. Switching between any grouping modes MUST preserve the currently selected session and automatically expand all ancestor nodes leading to it. In addition, the right side of the header line MUST render group-by mode selection buttons displaying `By Time | By Project | By Tag`, with visual styling consistent with the left-hand engine tabs (highlighting the currently active mode). Clicking any group-by button with the mouse left button MUST switch the grouping mode accordingly. The group-by mode chosen by mouse or keyboard (`g`) MUST be persisted to `state.db` and restored upon next startup.
 
 #### Scenario: Group sessions by project and time
 
@@ -119,6 +133,26 @@ The TUI MUST toggle grouping modes using `g` through a three-way cycle: `By Time
 - **GIVEN** a group contains main sessions with single or multi-level descendant subagents
 - **WHEN** a group action (such as group deletion confirmation) is invoked
 - **THEN** the target collection recursively gathers every main session and descendant subagent under that group exactly once without duplication
+
+#### Scenario: Render and switch group-by mode with clickable header buttons
+
+- **GIVEN** the TUI header displays `By Time | By Project | By Tag` on the right side with `By Time` highlighted
+- **WHEN** the user clicks with the left mouse button on `By Tag`
+- **THEN** the grouping mode immediately switches to By Tag, the session tree rebuilds, `By Tag` receives the active highlight style, and the selection is recorded in `state.db`
+
+#### Scenario: Highlight active group-by button and prevent overlap with engine tabs
+
+- **GIVEN** the application renders the top header bar across varying terminal widths
+- **WHEN** available terminal width is constrained
+- **THEN** the right-hand group-by buttons are prevented from visually overlapping the left-hand engine tabs by enforcing strict layout boundaries, and mouse clicks in collision zones do not trigger conflicting actions
+
+#### Scenario: Persist group-by mode across keyboard and mouse interactions
+
+- **GIVEN** the user switches grouping mode via mouse click on a header button or by pressing `g`
+- **WHEN** the application is exited and relaunched
+- **THEN** the application restores the last selected grouping mode from `state.db` instead of defaulting unconditionally to `By Time`
+
+---
 
 ### Requirement: Operate list and detail panels by keyboard and mouse
 
@@ -360,7 +394,7 @@ The TUI MUST trigger Markdown export via the `e` shortcut. When a session leaf i
 
 ### Requirement: Search full-text content via interactive overlay
 
-The TUI MUST provide a global full-text search overlay triggered by pressing `Ctrl+F`. The overlay MUST render centered on the screen and contain an input prompt with debounce query execution, a scrollable list of matching session snippets with keyword highlighting, a status footer showing background index progress, and keybinding navigation hints. The user MUST be able to navigate results using Up/Down arrows and jump to the target session and transcript block by pressing `Enter`. Pressing `Esc` MUST close the overlay and restore focus to the prior state. When the FTS5 extension is unavailable or disabled in configuration, the overlay MUST display an informative disabled banner.
+The TUI MUST provide a global full-text search overlay triggered by pressing `Ctrl+F`. The overlay MUST render centered on the screen and contain an input prompt with debounce query execution, a scrollable list of matching session snippets with keyword highlighting, a status footer showing background index progress, and keybinding navigation hints. The user MUST be able to navigate results using Up/Down arrows and jump to the target session and transcript block by pressing `Enter`. Pressing `Esc` MUST close the overlay and restore focus to the prior state. When the FTS5 extension is unavailable or disabled in configuration, the overlay MUST display an informative disabled banner. The results list MUST render each search match as a visually distinct card with subtle background contrast and clear visual separators between adjacent results. When navigating with arrow keys, the currently selected result card MUST receive a prominent full-card selection highlight clearly distinguishable from the `▸` prefix indicator, and returning or moving away MUST immediately restore standard card contrast without artifacts.
 
 #### Scenario: Open full-text search overlay with Ctrl+F and close with Esc
 
@@ -391,6 +425,24 @@ The TUI MUST provide a global full-text search overlay triggered by pressing `Ct
 - **GIVEN** the search query matches zero indexed conversation blocks
 - **WHEN** search execution finishes
 - **THEN** the result area displays a centered notice `No matching sessions found.` without blanking out the overlay
+
+#### Scenario: Render search results with card background and visual separation
+
+- **GIVEN** the search overlay has multiple search result matches
+- **WHEN** the results list is rendered
+- **THEN** each result card has a distinguishable background shade from the dialog interior, and adjacent results are separated by horizontal divider lines or spacing
+
+#### Scenario: Highlight entire selected search card with prominent background during navigation
+
+- **GIVEN** multiple search results are rendered in the overlay and the first card is active
+- **WHEN** the user presses the Down arrow key to navigate to the second result
+- **THEN** the second card receives an emphasized full-card highlight style, the first card reverts to standard card background styling, and keyword highlighting within snippets remains legible
+
+#### Scenario: Preserve search overlay state under narrow width and CJK emoji without regression
+
+- **GIVEN** the search results contain wide CJK characters or emoji in project names or conversation snippets, and the terminal width is constrained
+- **WHEN** the user navigates and scrolls through the results
+- **THEN** rendering completes without slice panic, text clipping maintains proper character boundaries, and the keyword highlight spans (`<<...>>`) remain accurately positioned
 
 ---
 

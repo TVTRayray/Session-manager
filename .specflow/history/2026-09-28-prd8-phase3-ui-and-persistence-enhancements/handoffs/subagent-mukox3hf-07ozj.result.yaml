@@ -1,0 +1,38 @@
+task_id: subagent-mukox3hf-07ozj
+lease_id: lease-mukox3hf-489ri
+outcome: completed
+verdict: fail
+reproduction:
+  environment: "Linux x86_64, cargo test, ratatui 0.30.0, crossterm 0.29.0, PTY probe"
+  steps:
+    - "1. 启动 sessions-manager 并在真实终端加载会话目录。"
+    - "2. 鼠标点击右侧详情区域（或通过鼠标滚轮在详情面板滚动，或按 PageDown/PageUp 查看会话转录），触发 `app.focused_panel = FocusedPanel::Detail`（见 `src/app.rs:1047`、`1068`、`1081`、`2693`）。"
+    - "3. 随后用户使用键盘 `j`/`k` 或 `J`/`K` 在会话列表树中上下移动光标浏览会话（或通过鼠标点击顶栏切换引擎/分组，`src/app.rs:985-1015`）。由于列表移动按键（`src/app.rs:900-924`）无焦点检查且未恢复 List 焦点，会话树光标正常移动、详情正常刷新，用户直觉认为当前处于会话列表正常操作态。"
+    - "4. 用户按下 `z` 键尝试一键折叠所有展开的分组和父会话。"
+  expected: "会话树所有已展开的分组和父会话瞬间全部折叠，仅保留顶层组头，选区收敛到当前会话所在的祖先组节点。"
+  actual: "按下 `z` 键毫无反应（静默失效）。会话树完全保持展开，选区未变，折叠功能彻底失效。"
+  exact_code_locations:
+    - file: "src/app.rs"
+      line: 925
+      reason: "`KeyCode::Char('z') if self.focused_panel == FocusedPanel::List =>` 分支带有针对 `FocusedPanel::List` 的强条件守卫，当应用因前置交互处于 `FocusedPanel::Detail` 时被完全跳过，落入 `_ => None`。"
+    - file: "src/app.rs"
+      lines: "900-924"
+      reason: "`j`/`k`/`J`/`K`/`Down`/`Up` 在处理列表移动时未同步恢复 `self.focused_panel = FocusedPanel::List`，导致列表导航正常工作但焦点残留为 Detail，掩盖了焦点漂移状态。"
+    - file: "src/app.rs"
+      lines: "985-1015"
+      reason: "Phase 3 新增的顶栏鼠标点击（引擎 Tab 切换与分组切换）未将 `focused_panel` 重置为 `FocusedPanel::List`，导致跨引擎/分组后仍继承残留的 Detail 焦点。"
+root_cause_analysis: |
+  1. 状态守卫不对称与焦点漂移掩盖：
+     整个 `handle_key` 列表导航按键体系中，`Down`/`Up`/`j`/`k`/`J`/`K`/`Enter` 均未施加 `self.focused_panel == FocusedPanel::List` 守卫，它们在任何焦点状态下均能正常控制底层会话树移动。然而，同为会话树基础操作的 `z`（以及 `Left`/`Right`/`Space`）却硬编码了 `if self.focused_panel == FocusedPanel::List` 守卫。
+  2. 交互流转未闭环重置焦点：
+     在 Phase 3 人工验收过程中，用户必然会测试详情查看、滚轮滚动或顶栏鼠标点击。一旦右侧面板获得焦点（`FocusedPanel::Detail`），不论后续是通过 `j`/`k` 键盘导航列表，还是点击顶栏引擎 Tab / 分组按钮切换视图，`focused_panel` 都不会自动恢复为 `List`。由于 `j`/`k` 依然能平稳移动左侧光标，用户完全无法察觉焦点滞留在 Detail，进而认为按 `z` 无效是 `z` 键本身损坏。
+  3. 缺乏业务冲突：
+     右侧 Detail 面板为纯只读展示面板，本身不存在任何针对 `z` 字符的独立按键绑定或文本输入需求。在此处施加 `focused_panel == List` 守卫纯属过度防御，反而造成功能失效。
+regression_vs_c49873d: |
+  在 Phase 2 (c49873d) 中已有该守卫，但 Phase 2 主要进行纯键盘测试（且 PTY probe 默认显式重置 `focused_panel = FocusedPanel::List`），因此未暴露。
+  Phase 3 引入了顶栏鼠标点击、分组持久化与全文搜索浮层卡片验收，用户在真实终端执行 Visual QA Checklist 时，高频使用鼠标点击详情/滚动右侧视口，随后使用 `j`/`k` 浏览会话并按 `z` 验证折叠，从而稳定触发此失效。
+remediation_recommendations:
+  - "建议 1（根治失效）：修改 `src/app.rs:925`，放宽 `KeyCode::Char('z')` 限制，移除 `if self.focused_panel == FocusedPanel::List`（或在触发 `z` 时自动重置 `self.focused_panel = FocusedPanel::List`），并在 `collapse_all_nodes()` 中确保选区收敛至组头后激活列表焦点。"
+  - "建议 2（焦点一致性）：在 `move_selection` / `jump_selection` 以及顶部 Tab 切换（`switch_to_engine` / `set_group_mode_and_persist`）中显式维护 `self.focused_panel = FocusedPanel::List`，使键盘/鼠标操控列表的任何动作都能自洽恢复列表焦点。"
+  - "建议 3（补全测试）：在 `tests/pty_shortcuts.rs` 和 `src/app.rs` 中增加‘聚焦详情面板后按 j/k 移动并按 z 一键折叠’以及‘顶栏点击切换后按 z’的集成回归测试。"
+summary: "成功对抗性复现用户报告的 `z` 键失效缺陷。根因系 `src/app.rs:925` 对 `z` 键施加了 `self.focused_panel == FocusedPanel::List` 严格守卫，而人工验收中因点击/滚轮查看右侧详情使焦点变为 Detail 后，`j`/`k` 移动会话树并不会重置列表焦点（且顶栏鼠标切换引擎/分组也未重置焦点），导致用户在视觉上正常浏览会话树时按下 `z` 被静默丢弃。已提供精确定位与最小修复建议。"

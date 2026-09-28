@@ -1,0 +1,19 @@
+task_id: implementer-mukv71bq-uruhc
+change_id: prd8-phase3-ui-and-persistence-enhancements
+role: implementer
+target_spec: persisted-state
+adapter: manual
+lease_id: lease-mukv71bq-4st75
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/persisted-state.md
+allowed_paths:
+  - src/**
+  - tests/**
+  - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden
