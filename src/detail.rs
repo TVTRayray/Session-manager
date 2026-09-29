@@ -1619,6 +1619,53 @@ mod tests {
     }
 
     #[test]
+    fn tail_viewport_reader_returns_latest_rendered_lines() {
+        let viewport = must(parse_viewport_reader(
+            Cursor::new(fixture(&[
+                r#"{"type":"session_meta","payload":{"id":"session-1","timestamp":"2026-04-16T01:02:03Z","cwd":"/tmp/demo"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"line-1\nline-2\nline-3\nline-4"}]}}"#,
+            ])),
+            TAIL_VIEWPORT_OFFSET,
+            2,
+            &DisplayConfig::show_all(),
+        ));
+
+        assert_eq!(
+            viewport.rendered_lines,
+            vec!["line-4".to_string(), "".to_string()]
+        );
+        assert_eq!(viewport.requested_offset, 8);
+        assert!(viewport.has_more_before);
+        assert!(!viewport.has_more_after);
+    }
+
+    #[test]
+    fn tail_viewport_reader_starts_at_latest_user_block() {
+        let viewport = must(parse_viewport_reader(
+            Cursor::new(fixture(&[
+                r#"{"type":"session_meta","payload":{"id":"session-1","timestamp":"2026-04-16T01:02:03Z","cwd":"/tmp/demo"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"older user"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"older answer"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"latest user"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"latest answer"}]}}"#,
+            ])),
+            TAIL_VIEWPORT_OFFSET,
+            6,
+            &DisplayConfig::show_all(),
+        ));
+
+        assert_eq!(viewport.rendered_lines[0], "🧑 User".to_string());
+        assert_eq!(viewport.rendered_lines[1], "latest user".to_string());
+        assert!(
+            !viewport
+                .rendered_lines
+                .iter()
+                .any(|line| line.text.contains("older user"))
+        );
+        assert!(viewport.has_more_before);
+    }
+
+    #[test]
     fn opencode_detail_is_read_only_parameterized_and_viewport_scoped() {
         let home = must(tempdir());
         let opencode_root = home.path().join(".local").join("share").join("opencode");

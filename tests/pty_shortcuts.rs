@@ -75,7 +75,7 @@ fn pty_probe_ignores_parent_project_grouping() {
     );
     assert!(
         transcript.contains(
-            "step=1 event=key:char(j) mods=KeyModifiers(0x0) action=LoadDetail(offset=0)"
+            "step=1 event=key:char(j) mods=KeyModifiers(0x0) action=LoadDetail(offset=tail)"
         ),
         "parent project grouping influenced fresh ByTime probe:\n{transcript}"
     );
@@ -132,7 +132,7 @@ fn pty_probe_covers_text_input_enter_and_mouse_focus() {
     let transcript = run_probe(&[b"j", b"\x1b[13u", b"\x1b[<0;70;10M", b"q"]);
     assert!(
         transcript.contains(
-            "step=1 event=key:char(j) mods=KeyModifiers(0x0) action=LoadDetail(offset=0)"
+            "step=1 event=key:char(j) mods=KeyModifiers(0x0) action=LoadDetail(offset=tail)"
         ),
         "unexpected transcript:\n{transcript}"
     );
@@ -213,7 +213,7 @@ fn pty_probe_covers_four_engine_cycle_and_claude_resume() {
         );
     }
     assert!(
-        transcript.contains("step=4 event=mouse:Down(Left)@2,3 action=LoadDetail(offset=0) split=Horizontal focus=List"),
+        transcript.contains("step=4 event=mouse:Down(Left)@2,3 action=LoadDetail(offset=tail) split=Horizontal focus=List"),
         "unexpected transcript:\n{transcript}"
     );
     assert!(
@@ -231,14 +231,14 @@ fn pty_probe_covers_live_search_commit_and_match_navigation() {
     assert!(transcript.contains("search=Input search_input=\"\""));
     assert!(transcript.contains("search=Input search_input=\"inspect\" search_matches=1"));
     assert!(
-        transcript.contains("event=key:Enter mods=KeyModifiers(0x0) action=LoadDetail(offset=0)")
+        transcript.contains("event=key:Enter mods=KeyModifiers(0x0) action=LoadDetail(offset=tail)")
     );
     assert!(
-        transcript.contains("event=key:char(n) mods=KeyModifiers(0x0) action=LoadDetail(offset=0)")
+        transcript.contains("event=key:char(n) mods=KeyModifiers(0x0) action=LoadDetail(offset=tail)")
     );
     assert!(
         transcript
-            .contains("event=key:char(N) mods=KeyModifiers(SHIFT) action=LoadDetail(offset=0)")
+            .contains("event=key:char(N) mods=KeyModifiers(SHIFT) action=LoadDetail(offset=tail)")
     );
 }
 

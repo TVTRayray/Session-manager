@@ -13,7 +13,9 @@ use crate::catalog::{
 };
 use crate::config::{DisplayConfig, ExportConfig};
 use crate::delete::DeleteRequest;
-use crate::detail::{DetailViewport, SessionDetailLoader, load_detail_for_engine};
+use crate::detail::{
+    DetailViewport, SessionDetailLoader, TAIL_VIEWPORT_OFFSET, load_detail_for_engine,
+};
 use crate::export::{export_group_sessions, export_single_session};
 use crate::resume::{NewSessionRequest, ResumeSessionRequest};
 use crate::search::{
@@ -1102,6 +1104,7 @@ impl App {
                 {
                     return;
                 }
+                self.detail_viewport_state.scroll_offset = viewport.requested_offset;
                 SessionDetailState::Ready(viewport)
             }
             Err(err) => {
@@ -2027,7 +2030,7 @@ impl App {
 
         self.parse_cancellation_token = self.parse_cancellation_token.saturating_add(1);
         self.detail_state = SessionDetailState::Loading;
-        self.detail_viewport_state.scroll_offset = offset;
+        self.detail_viewport_state.scroll_offset = if offset == TAIL_VIEWPORT_OFFSET { 0 } else { offset };
         self.right_panel_mode = RightPanelMode::SessionDetail;
         self.group_summary_card = None;
 
@@ -2516,7 +2519,7 @@ impl App {
     }
 
     fn begin_detail_request(&mut self) -> Option<DetailRequest> {
-        self.begin_detail_request_with_offset(0)
+        self.begin_detail_request_with_offset(TAIL_VIEWPORT_OFFSET)
     }
 
     fn begin_resume_request(&mut self) -> Option<ResumeSessionRequest> {
@@ -3631,6 +3634,13 @@ mod tests {
     }
 
     #[test]
+    fn initial_detail_request_loads_tail_viewport() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        let request = app.initial_detail_request().expect("detail request");
+        assert_eq!(request.offset, TAIL_VIEWPORT_OFFSET);
+    }
+
+    #[test]
     fn default_startup_enters_pi_tab() {
         let app = App::new(&stub_catalog(vec![item("one")]));
         assert_eq!(app.active_engine, SessionEngine::Pi);
@@ -4423,7 +4433,7 @@ mod tests {
             Some(AppAction::LoadDetail(request)) => {
                 assert_eq!(request.engine, SessionEngine::Claude);
                 assert_eq!(request.path, PathBuf::from("/tmp/claude-one.jsonl"));
-                assert_eq!(request.offset, 0);
+                assert_eq!(request.offset, TAIL_VIEWPORT_OFFSET);
             }
             other => panic!("expected detail load request, got {other:?}"),
         }

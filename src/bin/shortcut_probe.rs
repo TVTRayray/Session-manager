@@ -19,6 +19,7 @@ use sessions_manager::app::{
 use sessions_manager::catalog::{
     CatalogLoad, FileHealth, SessionCatalogReader, SessionEngine, SessionListItem,
 };
+use sessions_manager::detail::TAIL_VIEWPORT_OFFSET;
 
 const PROBE_TERMINAL_WIDTH: u16 = 100;
 const PROBE_TERMINAL_HEIGHT: u16 = 30;
@@ -324,6 +325,9 @@ fn format_action(action: Option<&AppAction>) -> String {
                 "LoadCatalog(engine={:?},request_id={})",
                 request.engine, request.request_id
             )
+        }
+        Some(AppAction::LoadDetail(request)) if request.offset == TAIL_VIEWPORT_OFFSET => {
+            "LoadDetail(offset=tail)".to_string()
         }
         Some(AppAction::LoadDetail(request)) => format!("LoadDetail(offset={})", request.offset),
         Some(AppAction::Delete(request)) => format!("Delete(session_id={})", request.session_id),
