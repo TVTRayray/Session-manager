@@ -203,7 +203,7 @@ fn pty_probe_logs_resize_boundaries_and_trace_file_output() {
 
 #[test]
 fn pty_probe_covers_four_engine_cycle_and_claude_resume() {
-    let transcript = run_probe(&[b"\t", b"\t", b"\t", b"\x1b[<0;3;4M", b"\x1b[13u", b"q"]);
+    let transcript = run_probe(&[b"\t", b"\t", b"\t", b"\x1b[<0;3;5M", b"\x1b[13u", b"q"]);
     for (step, engine) in [(1, "OpenCode"), (2, "Codex"), (3, "Claude")] {
         assert!(
             transcript.contains(&format!(
@@ -213,7 +213,7 @@ fn pty_probe_covers_four_engine_cycle_and_claude_resume() {
         );
     }
     assert!(
-        transcript.contains("step=4 event=mouse:Down(Left)@2,3 action=LoadDetail(offset=tail) split=Horizontal focus=List"),
+        transcript.contains("step=4 event=mouse:Down(Left)@2,4 action=LoadDetail(offset=tail) split=Horizontal focus=List"),
         "unexpected transcript:\n{transcript}"
     );
     assert!(

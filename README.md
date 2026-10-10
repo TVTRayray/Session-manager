@@ -14,8 +14,8 @@
 ## ✨ 核心特性
 
 - 🚀 **四引擎会话**: 支持 Pi、OpenCode、Codex、Claude，默认进入 Pi；`Tab` 按 Pi → OpenCode → Codex → Claude 循环切换。
-- 🖥️ **交互式双面板**: 基于 `ratatui` 构建，左侧列表快速筛选，右侧详情实时预览。
-- 🎨 **智能内容过滤**: 支持通过配置文件自定义隐藏 `[tool]`、`[tool-output]` 等噪音，聚焦核心对话逻辑。
+- 🖥️ **自适应布局**: 基于 `ratatui` 构建。终端宽度 ≥ 140 列时为三栏（导航栏 | 表格式会话列表 | 对话详情），导航栏可鼠标点击切换引擎、分组模式或跳转到项目；更窄时自动回退为两栏（紧凑列表 | 详情）。
+- 🎨 **智能内容过滤**: 支持通过配置文件自定义隐藏工具调用（`⏺`）、工具输出（`⎿`）等噪音，聚焦核心对话逻辑。
 - 📏 **动态布局引擎**: 支持横向/纵向分栏一键切换，面板比例可自由调节，完美适配各种终端窗口。
 - ⌨️ **跨平台快捷键**: 针对 Windows Terminal 进行了深度适配，完美解决 `Ctrl+Alt` 修饰符冲突问题。
 - 🔄 **无缝会话恢复**: 一键回到历史对话场景。
@@ -60,6 +60,16 @@ Sessions Manager 支持高度自定义的内容显示策略。配置文件路径
 # 会话头部信息 (Session ID, Started Time, CWD) 始终显示
 visible_blocks = ["user", "assistant", "tool_call"]
 ```
+
+### 主题
+
+```toml
+[theme]
+# "claude-light"（默认，象牙白底 + Clay 强调色）或 "mocha"（原 Catppuccin Mocha 深色）
+name = "claude-light"
+```
+
+> 主题使用 24-bit 真彩色，并会绘制整屏背景；请在支持 truecolor 的终端中使用（Windows Terminal、kitty、WezTerm、iTerm2 等）。
 
 > **注意**: 如果配置文件不存在，系统将默认仅显示 `user` 和 `assistant` 的内容。
 

@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::theme::ThemeName;
+
 /// Which kind of transcript block this represents, used as the filtering key.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum BlockKind {
@@ -61,6 +63,14 @@ pub struct ConfigFile {
     pub display: DisplaySection,
     #[serde(default)]
     pub export: Option<ExportSection>,
+    #[serde(default)]
+    pub theme: Option<ThemeSection>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ThemeSection {
+    /// Recognised values: "claude-light" (default), "mocha".
+    pub name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -235,6 +245,28 @@ pub fn load_export_config_from_path(path: &std::path::Path) -> ExportConfig {
     parse_app_config_content(&content).1
 }
 
+/// Loads the UI theme from `~/.session-manager/config.toml`, defaulting to
+/// Claude light when the file, the `[theme]` section or the name is missing.
+pub fn load_theme_name() -> ThemeName {
+    config_path()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .map(|content| parse_theme_name(&content))
+        .unwrap_or_default()
+}
+
+pub fn parse_theme_name(content: &str) -> ThemeName {
+    let Ok(config_file) = toml::from_str::<ConfigFile>(content) else {
+        return ThemeName::default();
+    };
+    let Some(name) = config_file.theme.and_then(|section| section.name) else {
+        return ThemeName::default();
+    };
+    ThemeName::parse(&name).unwrap_or_else(|| {
+        eprintln!("[session-manager] Warning: unknown theme \"{name}\" in config, using default.");
+        ThemeName::default()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +414,12 @@ output_dir = "   "
 "#;
         let (_, export) = parse_app_config_content(content);
         assert_eq!(export.output_dir, default_export_root());
+    }
+
+    #[test]
+    fn parses_theme_section_and_falls_back_to_default() {
+        assert_eq!(parse_theme_name("[theme]\nname = \"mocha\"\n"), ThemeName::Mocha);
+        assert_eq!(parse_theme_name("[theme]\nname = \"nope\"\n"), ThemeName::ClaudeLight);
+        assert_eq!(parse_theme_name("[display]\nvisible_blocks = []\n"), ThemeName::ClaudeLight);
     }
 }

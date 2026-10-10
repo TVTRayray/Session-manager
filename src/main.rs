@@ -36,6 +36,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let resume_executor = EngineAwareResumeExecutor::new();
     let new_session_executor = EngineAwareNewSessionExecutor::new();
     let display_config = config::load_config();
+    sessions_manager::theme::init(config::load_theme_name());
     let (catalog_request_tx, catalog_result_rx) = spawn_catalog_loader(catalog_loader);
     let (detail_request_tx, detail_result_rx) =
         spawn_detail_loader(JsonlDetailLoader::from_home_path(home_dir, display_config));

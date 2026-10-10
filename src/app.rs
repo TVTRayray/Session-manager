@@ -30,6 +30,12 @@ pub const MIN_PANEL_WIDTH: u16 = 15;
 pub const MIN_PANEL_HEIGHT: u16 = 5;
 pub const HORIZONTAL_RESIZE_STEP: u16 = 5;
 pub const VERTICAL_RESIZE_STEP: u16 = 2;
+/// Terminals at least this wide get the three-column layout (nav | list | detail);
+/// narrower ones fall back to the two-pane layout.
+pub const NAV_MIN_TERMINAL_WIDTH: u16 = 140;
+pub const NAV_PANEL_WIDTH: u16 = 24;
+/// Rows above the session tree inside the list pane: pane title + column header.
+pub const LIST_HEADER_ROWS: u16 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionDetailState {
@@ -1031,6 +1037,10 @@ impl App {
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if event.row == 0 {
+                    if layout.nav_panel.is_some() {
+                        self.clear_path_hint();
+                        return None;
+                    }
                     let header_layout = crate::tui::compute_header_layout(terminal_width);
                     for (engine, hitbox) in header_layout.engine_tabs {
                         if hitbox.contains(event.column) {
@@ -1059,12 +1069,41 @@ impl App {
                     return None;
                 }
 
+                if let Some(nav) = layout.nav_panel
+                    && contains(nav, event.column, event.row)
+                {
+                    self.clear_path_hint();
+                    let row = event.row.saturating_sub(nav.y) as usize;
+                    return match crate::tui::nav::nav_entries(self).get(row) {
+                        Some(crate::tui::nav::NavEntry::Engine { engine, .. }) => {
+                            let engine = *engine;
+                            (engine != self.active_engine)
+                                .then(|| AppAction::LoadCatalog(self.switch_to_engine(engine)))
+                        }
+                        Some(crate::tui::nav::NavEntry::Group(mode)) => {
+                            let mode = *mode;
+                            if mode != self.group_mode {
+                                self.set_group_mode_and_persist(mode);
+                            }
+                            None
+                        }
+                        Some(crate::tui::nav::NavEntry::Project { identifier, .. }) => {
+                            let identifier = identifier.clone();
+                            self.select_project_group(identifier);
+                            None
+                        }
+                        _ => None,
+                    };
+                }
+
                 if contains(layout.list_panel, event.column, event.row) {
                     self.focused_panel = FocusedPanel::List;
-                    let visible_row = event
-                        .row
-                        .saturating_sub(layout.list_panel.y)
-                        .saturating_sub(1) as usize;
+                    let content_top = layout.list_panel.y.saturating_add(LIST_HEADER_ROWS);
+                    if event.row < content_top {
+                        self.clear_path_hint();
+                        return None;
+                    }
+                    let visible_row = event.row.saturating_sub(content_top) as usize;
                     let row = self.tree_state.get_offset().saturating_add(visible_row);
                     let visible_identifiers = self.visible_tree_identifiers();
                     if row >= visible_identifiers.len() {
@@ -3098,6 +3137,16 @@ impl App {
         self.refresh_right_panel_mode();
     }
 
+    /// Jumps to a project's group header, switching to project grouping first.
+    fn select_project_group(&mut self, group_identifier: String) {
+        if self.group_mode != GroupMode::ByProject {
+            self.set_group_mode_and_persist(GroupMode::ByProject);
+        }
+        self.focused_panel = FocusedPanel::List;
+        self.tree_state.select(vec![group_identifier]);
+        self.sync_tree_selection_from_tree();
+    }
+
     fn sync_tree_selection_from_tree(&mut self) {
         self.selected_index = self.tree_selected_index();
         self.tree_focus_node = self.current_tree_focus_node();
@@ -3595,6 +3644,7 @@ pub fn drain_catalog_results(app: &mut App, receiver: &Receiver<CatalogLoadResul
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PanelRects {
+    pub nav_panel: Option<RectLike>,
     pub list_panel: RectLike,
     pub detail_panel: RectLike,
     pub body_origin_row: u16,
@@ -3616,23 +3666,33 @@ pub fn compute_layout(
 ) -> PanelRects {
     let body_origin_row = 1;
     let body_height = terminal_height.saturating_sub(2);
+    let nav_width = nav_panel_width(terminal_width);
+    let nav_panel = (nav_width > 0).then_some(RectLike {
+        x: 0,
+        y: body_origin_row,
+        width: nav_width,
+        height: body_height,
+    });
+    let content_x = nav_width;
+    let content_width = terminal_width.saturating_sub(nav_width);
     match split_direction {
         SplitDirection::Horizontal => {
             let list_width = effective_primary_panel_size(
                 SplitDirection::Horizontal,
                 panel_main_size,
-                terminal_width,
+                content_width,
             );
-            let detail_width = terminal_width.saturating_sub(list_width);
+            let detail_width = content_width.saturating_sub(list_width);
             PanelRects {
+                nav_panel,
                 list_panel: RectLike {
-                    x: 0,
+                    x: content_x,
                     y: body_origin_row,
                     width: list_width,
                     height: body_height,
                 },
                 detail_panel: RectLike {
-                    x: list_width,
+                    x: content_x + list_width,
                     y: body_origin_row,
                     width: detail_width,
                     height: body_height,
@@ -3648,21 +3708,31 @@ pub fn compute_layout(
             );
             let detail_height = body_height.saturating_sub(list_height);
             PanelRects {
+                nav_panel,
                 list_panel: RectLike {
-                    x: 0,
+                    x: content_x,
                     y: body_origin_row,
-                    width: terminal_width,
+                    width: content_width,
                     height: list_height,
                 },
                 detail_panel: RectLike {
-                    x: 0,
+                    x: content_x,
                     y: body_origin_row + list_height,
-                    width: terminal_width,
+                    width: content_width,
                     height: detail_height,
                 },
                 body_origin_row,
             }
         }
+    }
+}
+
+/// Width of the navigation column, or 0 when the terminal is too narrow for it.
+pub fn nav_panel_width(terminal_width: u16) -> u16 {
+    if terminal_width >= NAV_MIN_TERMINAL_WIDTH {
+        NAV_PANEL_WIDTH
+    } else {
+        0
     }
 }
 
@@ -3693,7 +3763,9 @@ fn available_primary_size(
     terminal_height: u16,
 ) -> u16 {
     match split_direction {
-        SplitDirection::Horizontal => terminal_width,
+        SplitDirection::Horizontal => {
+            terminal_width.saturating_sub(nav_panel_width(terminal_width))
+        }
         SplitDirection::Vertical => terminal_height.saturating_sub(2),
     }
 }
@@ -3753,7 +3825,7 @@ fn restore_selection_after_delete(deleted_index: usize, remaining_len: usize) ->
     }
 }
 
-fn default_status_message() -> &'static str {
+pub fn default_status_message() -> &'static str {
     "Switch Engine: Tab/Shift+Tab | Navigate: Up/Down or j/k | Resume: Enter | Layout: Ctrl+Alt+H/V | Focus: Ctrl+Alt+Arrows | Resize: Ctrl+Alt+=/- | Delete: d/Delete | Quit: q"
 }
 
@@ -4882,7 +4954,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 2,
-                row: 3,
+                row: 1 + LIST_HEADER_ROWS + 1,
                 modifiers: KeyModifiers::NONE,
             },
             100,
@@ -5482,7 +5554,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 2,
-                row: 3,
+                row: 1 + LIST_HEADER_ROWS + 1,
                 modifiers: KeyModifiers::NONE,
             },
             100,
@@ -6538,7 +6610,7 @@ mod tests {
         assert_eq!(app.tree_state.get_offset(), 10);
 
         // Click on visual row 3 in list_panel
-        let click_row = layout.list_panel.y + 1 + 3;
+        let click_row = layout.list_panel.y + LIST_HEADER_ROWS + 3;
         let action = app.handle_mouse(
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
@@ -6565,7 +6637,7 @@ mod tests {
         assert_eq!(app.tree_state.get_offset(), 0);
 
         // Click visual row 5
-        let click_row = layout.list_panel.y + 1 + 5;
+        let click_row = layout.list_panel.y + LIST_HEADER_ROWS + 5;
         let action = app.handle_mouse(
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
@@ -6624,7 +6696,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::ScrollDown,
                 column: layout.list_panel.x + 2,
-                row: layout.list_panel.y + 2,
+                row: layout.list_panel.y + LIST_HEADER_ROWS + 1,
                 modifiers: KeyModifiers::NONE,
             },
             100,
@@ -6637,7 +6709,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: layout.list_panel.x + 2,
-                row: layout.list_panel.y + 1 + 2,
+                row: layout.list_panel.y + LIST_HEADER_ROWS + 2,
                 modifiers: KeyModifiers::NONE,
             },
             100,
@@ -6650,7 +6722,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::ScrollDown,
                 column: layout.list_panel.x + 2,
-                row: layout.list_panel.y + 2,
+                row: layout.list_panel.y + LIST_HEADER_ROWS + 1,
                 modifiers: KeyModifiers::NONE,
             },
             100,
@@ -6663,7 +6735,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: layout.list_panel.x + 2,
-                row: layout.list_panel.y + 1 + 1,
+                row: layout.list_panel.y + LIST_HEADER_ROWS + 1,
                 modifiers: KeyModifiers::NONE,
             },
             100,
@@ -6676,7 +6748,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::ScrollUp,
                 column: layout.list_panel.x + 2,
-                row: layout.list_panel.y + 2,
+                row: layout.list_panel.y + LIST_HEADER_ROWS + 1,
                 modifiers: KeyModifiers::NONE,
             },
             100,
@@ -6689,7 +6761,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: layout.list_panel.x + 2,
-                row: layout.list_panel.y + 1 + 2,
+                row: layout.list_panel.y + LIST_HEADER_ROWS + 2,
                 modifiers: KeyModifiers::NONE,
             },
             100,

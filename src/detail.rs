@@ -58,6 +58,11 @@ pub enum RenderedLineKind {
     Blank,
 }
 
+/// Role labels opening each transcript block in the Detail panel.
+pub const USER_LABEL: &str = "▍You";
+pub const ASSISTANT_LABEL: &str = "✻ Assistant";
+pub const THINKING_LABEL: &str = "∴ Thinking";
+
 #[derive(Clone, Debug, Eq)]
 pub struct RenderedLine {
     pub kind: RenderedLineKind,
@@ -1501,7 +1506,7 @@ fn block_kind(block: &TranscriptBlock) -> BlockKind {
 fn render_block_lines(block: &TranscriptBlock) -> Vec<RenderedLine> {
     match block {
         TranscriptBlock::UserText(text) => {
-            let mut lines = vec![RenderedLine::new(RenderedLineKind::User, "🧑 User")];
+            let mut lines = vec![RenderedLine::new(RenderedLineKind::User, USER_LABEL)];
             lines.extend(
                 text.lines()
                     .map(|line| RenderedLine::new(RenderedLineKind::User, line)),
@@ -1511,7 +1516,7 @@ fn render_block_lines(block: &TranscriptBlock) -> Vec<RenderedLine> {
         TranscriptBlock::AssistantMarkdown(text) => {
             let mut lines = vec![RenderedLine::new(
                 RenderedLineKind::Assistant,
-                "🤖 Assistant",
+                ASSISTANT_LABEL,
             )];
             lines.extend(
                 text.lines()
@@ -1520,7 +1525,7 @@ fn render_block_lines(block: &TranscriptBlock) -> Vec<RenderedLine> {
             lines
         }
         TranscriptBlock::Thinking(text) => {
-            let mut lines = vec![RenderedLine::new(RenderedLineKind::Thinking, "🤔 Thinking")];
+            let mut lines = vec![RenderedLine::new(RenderedLineKind::Thinking, THINKING_LABEL)];
             lines
                 .extend(text.lines().map(|line| {
                     RenderedLine::new(RenderedLineKind::Thinking, format!("  {line}"))
@@ -1529,11 +1534,11 @@ fn render_block_lines(block: &TranscriptBlock) -> Vec<RenderedLine> {
         }
         TranscriptBlock::ToolCallSummary(text) => vec![RenderedLine::new(
             RenderedLineKind::ToolCall,
-            format!("[tool] {text}"),
+            format!("⏺ {text}"),
         )],
         TranscriptBlock::ToolOutputSummary(text) => vec![RenderedLine::new(
             RenderedLineKind::ToolOutput,
-            format!("[tool-output] {text}"),
+            format!("  ⎿ {text}"),
         )],
         TranscriptBlock::SystemContextFolded(text) => vec![RenderedLine::new(
             RenderedLineKind::SystemContext,
@@ -1627,11 +1632,11 @@ mod tests {
             &DisplayConfig::default(),
         ));
         let rendered = viewport.rendered_lines.join("\n");
-        assert!(rendered.contains("🧑 User"));
-        assert!(rendered.contains("🤖 Assistant"));
+        assert!(rendered.contains(USER_LABEL));
+        assert!(rendered.contains(ASSISTANT_LABEL));
         assert!(rendered.contains("```rust\nfn main() {}\n```"));
         assert!(!rendered.contains("encrypted reasoning"));
-        assert!(!rendered.contains("[tool]"));
+        assert!(!rendered.contains("⏺ "));
     }
 
     #[test]
@@ -1650,7 +1655,7 @@ mod tests {
             &DisplayConfig::default(),
         ));
 
-        assert_eq!(viewport.rendered_lines[0], "🧑 User".to_string());
+        assert_eq!(viewport.rendered_lines[0], USER_LABEL.to_string());
         assert!(
             viewport
                 .rendered_lines
@@ -1739,7 +1744,7 @@ mod tests {
             &DisplayConfig::show_all(),
         ));
 
-        assert_eq!(viewport.rendered_lines[0], "🧑 User".to_string());
+        assert_eq!(viewport.rendered_lines[0], USER_LABEL.to_string());
         assert_eq!(viewport.rendered_lines[1], "latest user".to_string());
         assert!(
             !viewport
@@ -1814,7 +1819,7 @@ mod tests {
         assert!(rendered.contains("```rust\nfn main() {}\n```"));
         assert!(rendered.contains("latest question"));
         assert!(!rendered.contains("hidden reasoning"));
-        assert!(!rendered.contains("[tool]"));
+        assert!(!rendered.contains("⏺ "));
         assert!(!rendered.contains("other session secret"));
         assert!(!rendered.contains("transport noise"));
 
@@ -1824,7 +1829,7 @@ mod tests {
             TAIL_VIEWPORT_OFFSET,
             4,
         ));
-        assert_eq!(tail.rendered_lines[0], "🧑 User".to_string());
+        assert_eq!(tail.rendered_lines[0], USER_LABEL.to_string());
         assert_eq!(tail.rendered_lines[1], "latest question".to_string());
         assert!(
             !tail
@@ -2025,19 +2030,19 @@ mod tests {
 
         let joined = viewport.rendered_lines.join("\n");
         assert!(joined.contains("Session: s1"), "header should always show");
-        assert!(joined.contains("🧑 User"), "user block should be visible");
+        assert!(joined.contains(USER_LABEL), "user block should be visible");
         assert!(joined.contains("hello"), "user text should be visible");
         assert!(
-            joined.contains("🤖 Assistant"),
+            joined.contains(ASSISTANT_LABEL),
             "assistant block should be visible"
         );
         assert!(joined.contains("world"), "assistant text should be visible");
         assert!(
-            !joined.contains("[tool]"),
+            !joined.contains("⏺ "),
             "tool_call should be filtered out"
         );
         assert!(
-            !joined.contains("[tool-output]"),
+            !joined.contains("⎿ "),
             "tool_output should be filtered out"
         );
     }
@@ -2110,11 +2115,11 @@ mod tests {
 
         let joined = viewport.rendered_lines.join("\n");
         assert!(
-            joined.contains("[tool]"),
+            joined.contains("⏺ "),
             "tool_call should be visible with show_all"
         );
         assert!(
-            joined.contains("🤖 Assistant"),
+            joined.contains(ASSISTANT_LABEL),
             "assistant should be visible"
         );
     }
@@ -2139,9 +2144,9 @@ mod tests {
         // (header emission is triggered by the presence of session_meta, not blocks)
         // With empty visible_blocks, no content blocks are rendered
         let joined = viewport.rendered_lines.join("\n");
-        assert!(!joined.contains("🧑 User"), "user should be hidden");
+        assert!(!joined.contains(USER_LABEL), "user should be hidden");
         assert!(
-            !joined.contains("🤖 Assistant"),
+            !joined.contains(ASSISTANT_LABEL),
             "assistant should be hidden"
         );
     }
@@ -2274,8 +2279,8 @@ mod tests {
         ));
 
         let joined = viewport.rendered_lines.join("\n");
-        assert!(joined.contains("🧑 User"));
-        assert!(joined.contains("🤖 Assistant"));
+        assert!(joined.contains(USER_LABEL));
+        assert!(joined.contains(ASSISTANT_LABEL));
         assert!(!joined.contains("\nUser\n"));
         assert!(!joined.contains("\nAssistant\n"));
     }
@@ -2294,8 +2299,8 @@ mod tests {
         ));
 
         let joined = viewport.rendered_lines.join("\n");
-        assert!(joined.contains("🧑 User"));
-        assert!(joined.contains("🤖 Assistant"));
+        assert!(joined.contains(USER_LABEL));
+        assert!(joined.contains(ASSISTANT_LABEL));
         assert!(!joined.contains("\nUser\n"));
         assert!(!joined.contains("\nAssistant\n"));
     }

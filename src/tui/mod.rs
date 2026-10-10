@@ -2,29 +2,29 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use tui_tree_widget::{Tree, TreeItem};
 
 use crate::app::{
+    compute_layout, default_status_message,
     App, CatalogLoadingState, DeleteModalFocus, DeleteScope, ExportModalFocus, ExportModalState,
     FocusedPanel, GroupMode, GroupSummaryCard, RightPanelMode, SearchPhase, SessionDetailState,
-    SplitDirection, TagModalFocus, build_grouped_session_nodes,
+    TagModalFocus, build_grouped_session_nodes,
 };
-use crate::catalog::{FileHealth, SessionEngine, SessionRelation};
-use crate::detail::{RenderedLine, RenderedLineKind};
+use crate::catalog::SessionEngine;
+use crate::detail::{
+    ASSISTANT_LABEL, RenderedLine, RenderedLineKind, THINKING_LABEL, USER_LABEL,
+};
+use crate::theme::theme;
 
-// --- Theme Definition ---
-pub const THEME_BG: Color = Color::Rgb(24, 24, 37); // Catppuccin Mocha Mantle
-pub const THEME_BORDER: Color = Color::DarkGray;
-pub const THEME_HIGHLIGHT: Color = Color::Rgb(137, 180, 250); // Catppuccin Mocha Blue
-pub const THEME_TEXT: Color = Color::Rgb(205, 214, 244); // Catppuccin Mocha Text
-pub const THEME_WARN: Color = Color::Rgb(250, 179, 135); // Catppuccin Mocha Peach
-pub const THEME_HEADER_BG: Color = Color::Rgb(30, 30, 46); // Catppuccin Mocha Base
-pub const THEME_SEARCH_BG: Color = Color::Rgb(249, 226, 175);
-pub const THEME_SEARCH_FG: Color = Color::Rgb(24, 24, 37);
-// ------------------------
+pub mod nav;
+mod rows;
+
+use rows::{RowHighlight, RowLayout, RowOrder};
+
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
+    let screen = frame.area();
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -32,76 +32,45 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             Constraint::Min(3),
             Constraint::Length(1),
         ])
-        .split(frame.area());
+        .split(screen);
 
-    let header = Paragraph::new(render_header_line(app, outer[0].width)).style(
-        Style::default()
-            .fg(THEME_TEXT)
-            .bg(THEME_HEADER_BG)
-            .add_modifier(Modifier::BOLD),
+    frame.render_widget(
+        Block::default().style(Style::default().fg(theme().fg).bg(theme().bg)),
+        screen,
     );
-    frame.render_widget(header, outer[0]);
 
-    let body = layout_body(outer[1], app.split_direction.clone(), app.panel_main_size);
-
-    let list_block = panel_block(
-        &format!("Sessions ({})", app.group_mode.label()),
-        app.focused_panel == FocusedPanel::List,
+    let layout = compute_layout(
+        app.split_direction.clone(),
+        app.panel_main_size,
+        screen.width,
+        screen.height,
     );
-    let tree_items = build_session_tree_items(app);
-    if tree_items.is_empty() {
-        let message = match app.catalog_loading_state {
-            CatalogLoadingState::Loading(engine) => {
-                format!("Loading {} sessions...", engine.label())
-            }
-            CatalogLoadingState::Idle if app.status_message.contains("ERROR:") => {
-                format!("{} catalog error", app.active_engine.label())
-            }
-            CatalogLoadingState::Idle => format!("No {} sessions", app.active_engine.label()),
-        };
-        let list = Paragraph::new(message).block(list_block);
-        frame.render_widget(list, body[0]);
+    let wide = layout.nav_panel.is_some();
+
+    let header_cursor = if wide {
+        render_wide_header(frame, outer[0], app)
     } else {
-        let tree = Tree::new(&tree_items)
-            .expect("tree identifiers stay unique")
-            .block(list_block)
-            .highlight_style(
-                Style::default()
-                    .fg(THEME_TEXT)
-                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-            )
-            .highlight_symbol("")
-            .node_closed_symbol("")
-            .node_open_symbol("")
-            .node_no_children_symbol("");
-        frame.render_stateful_widget(tree, body[0], &mut app.tree_state);
-    }
-
-    let detail_text = render_right_panel_text(app);
-
-    let detail_title_string;
-    let detail_title = match app.right_panel_mode {
-        RightPanelMode::GroupSummary => "Group Summary",
-        RightPanelMode::SessionDetail => "Detail",
-        RightPanelMode::ProjectDashboard => {
-            detail_title_string = if let Some(dash) = &app.project_dashboard_state {
-                format!("Dashboard: {}", dash.project_name)
-            } else {
-                "Dashboard".to_string()
-            };
-            detail_title_string.as_str()
-        }
+        let header = Paragraph::new(render_header_line(app, outer[0].width))
+            .style(Style::default().fg(theme().fg).bg(theme().surface));
+        frame.render_widget(header, outer[0]);
+        None
     };
-    let detail = Paragraph::new(detail_text)
-        .block(panel_block(
-            detail_title,
-            app.focused_panel == FocusedPanel::Detail,
-        ))
-        .wrap(Wrap { trim: false });
-    frame.render_widget(detail, body[1]);
 
-    let status_text = if app.search_state.phase == SearchPhase::Input {
+    if let Some(nav) = layout.nav_panel {
+        nav::render_nav(frame, rect_of(nav), app);
+    }
+    render_list_pane(frame, rect_of(layout.list_panel), app, wide);
+    render_detail_pane(frame, rect_of(layout.detail_panel), app);
+
+    let search_input = app.search_state.phase == SearchPhase::Input;
+    let status_text = if search_input && !wide {
         search_prompt_line(app, outer[2].width)
+    } else if search_input {
+        Line::from(key_hint_spans(&[
+            ("Enter", "Confirm"),
+            ("Esc", "Cancel"),
+            ("n/N", "Next / Prev match"),
+        ]))
     } else if app.is_visual_mode() {
         let count = app.marked_session_ids.len();
         let mut spans = Vec::new();
@@ -109,84 +78,79 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             if !progress.is_complete {
                 spans.push(Span::styled(
                     format!(" [索引中 {}/{}] ", progress.indexed_count, progress.total_count),
-                    Style::default().fg(THEME_WARN),
+                    Style::default().fg(theme().warning),
                 ));
             }
         }
         spans.push(Span::styled(
             " -- VISUAL SELECT ",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme().accent_text).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
             format!("({count} sessions)"),
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme().success).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
             " -- ",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme().accent_text).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
             "[j/k/J/K: adjust | d: batch delete | v: commit | Esc: cancel]",
-            Style::default().fg(THEME_BORDER),
+            Style::default().fg(theme().fg_muted),
         ));
-        if !app.status_message.is_empty() {
-            spans.push(Span::styled(
-                " >> ",
-                Style::default().fg(THEME_WARN).add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::styled(app.status_message.as_str(), Style::default().fg(THEME_WARN)));
+        let message = status_message_body(&app.status_message);
+        if !message.is_empty() {
+            spans.extend(status_message_spans(message));
         }
         Line::from(spans)
     } else {
-        let index_indicator = if let Some(progress) = &app.index_progress {
-            if !progress.is_complete {
-                Some(format!(
-                    "[索引中 {}/{}]",
-                    progress.indexed_count, progress.total_count
-                ))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let marked_indicator = if !app.marked_session_ids.is_empty() {
-            Some(format!("[{} marked]", app.marked_session_ids.len()))
-        } else {
-            None
-        };
-
         let mut spans = Vec::new();
-        if let Some(ind) = index_indicator {
-            spans.push(Span::styled(format!(" {ind} "), Style::default().fg(THEME_WARN)));
-        }
-        if let Some(mark) = marked_indicator {
+        if !wide
+            && let Some(progress) = &app.index_progress
+            && !progress.is_complete
+        {
             spans.push(Span::styled(
-                format!(" {mark} "),
+                format!(" [索引中 {}/{}] ", progress.indexed_count, progress.total_count),
+                Style::default().fg(theme().warning),
+            ));
+        }
+        if !app.marked_session_ids.is_empty() {
+            spans.push(Span::styled(
+                format!(" [{} marked] ", app.marked_session_ids.len()),
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(theme().success)
                     .add_modifier(Modifier::BOLD),
             ));
         }
 
-        if app.status_message.is_empty() {
-            let default_msg = " Tab:Engine | j/k:Nav | /:Search | Ctrl+F:FullText | e:Export | D:Dash | ?:Help | q:Quit";
-            spans.push(Span::raw(default_msg));
+        let message = status_message_body(&app.status_message);
+        if message.is_empty() {
+            spans.extend(key_hint_spans(&[
+                ("↵", "Resume"),
+                ("Tab", "Engine"),
+                ("g", "Group"),
+                ("/", "Search"),
+                ("Ctrl+F", "Full-text"),
+                ("e", "Export"),
+                ("D", "Dashboard"),
+                ("?", "Help"),
+                ("q", "Quit"),
+            ]));
         } else {
-            spans.push(Span::styled(
-                " >> ",
-                Style::default().fg(THEME_WARN).add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::styled(app.status_message.as_str(), Style::default().fg(THEME_WARN)));
+            spans.extend(status_message_spans(message));
         }
         Line::from(spans)
     };
 
-    let status = Paragraph::new(status_text).style(Style::default().bg(THEME_BG));
+    let status = Paragraph::new(status_text)
+        .style(Style::default().fg(theme().fg).bg(theme().surface));
     frame.render_widget(status, outer[2]);
-    if app.search_state.phase == SearchPhase::Input && outer[2].width > 0 {
-        frame.set_cursor_position((search_cursor_x(app, outer[2]), outer[2].y));
+    if search_input {
+        if let Some(position) = header_cursor {
+            frame.set_cursor_position(position);
+        } else if outer[2].width > 0 {
+            frame.set_cursor_position((search_cursor_x(app, outer[2]), outer[2].y));
+        }
     }
 
     if let Some(modal) = &app.delete_modal_state {
@@ -225,15 +189,14 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         };
 
         let modal = Paragraph::new(modal_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(match modal.scope {
-                        DeleteScope::Single => "Confirm Delete",
-                        DeleteScope::Group { .. } => "Confirm Bulk Delete",
-                        DeleteScope::Batch { .. } => "Confirm Batch Delete",
-                    }),
-            )
+            .block(modal_block(
+                match modal.scope {
+                    DeleteScope::Single => " Confirm Delete ",
+                    DeleteScope::Group { .. } => " Confirm Bulk Delete ",
+                    DeleteScope::Batch { .. } => " Confirm Batch Delete ",
+                },
+                theme().danger,
+            ))
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: false });
         frame.render_widget(modal, area);
@@ -274,18 +237,13 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             Line::from(""),
             Line::from(Span::styled(
                 "(Leave empty to clear all tags)",
-                Style::default().fg(THEME_BORDER),
+                Style::default().fg(theme().fg_muted),
             )),
             buttons,
         ]);
 
         let modal_widget = Paragraph::new(modal_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Edit Tags ")
-                    .border_style(Style::default().fg(THEME_HIGHLIGHT)),
-            )
+            .block(modal_block(" Edit Tags ", theme().accent))
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: false });
         frame.render_widget(modal_widget, area);
@@ -331,12 +289,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             Line::from("  q                  Quit"),
         ]);
         let help = Paragraph::new(help_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Help ")
-                    .border_style(Style::default().fg(THEME_HIGHLIGHT)),
-            )
+            .block(modal_block(" Help ", theme().accent))
             .alignment(Alignment::Left)
             .wrap(Wrap { trim: false });
         frame.render_widget(help, area);
@@ -346,9 +299,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 fn search_prompt_line(app: &App, width: u16) -> Line<'static> {
     let (tail, suffix) = search_prompt_parts(app, width);
     Line::from(vec![
-        Span::styled("/", Style::default().fg(THEME_HIGHLIGHT)),
+        Span::styled("/", Style::default().fg(theme().accent_text)),
         Span::raw(tail),
-        Span::styled(suffix, Style::default().fg(THEME_BORDER)),
+        Span::styled(suffix, Style::default().fg(theme().fg_muted)),
     ])
 }
 
@@ -467,10 +420,11 @@ fn delete_button_span(label: &'static str, focused: bool) -> Span<'static> {
     };
     let style = if focused {
         Style::default()
-            .fg(THEME_HIGHLIGHT)
+            .fg(theme().on_accent)
+            .bg(theme().accent_bg)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(THEME_BORDER)
+        Style::default().fg(theme().fg_muted)
     };
     Span::styled(text, style)
 }
@@ -518,12 +472,7 @@ fn render_export_modal(frame: &mut Frame<'_>, modal: &ExportModalState) {
     ]);
 
     let modal_widget = Paragraph::new(modal_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Confirm Export ")
-                .border_style(Style::default().fg(THEME_HIGHLIGHT)),
-        )
+        .block(modal_block(" Confirm Export ", theme().accent))
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: false });
     frame.render_widget(modal_widget, area);
@@ -549,10 +498,7 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
     );
     frame.render_widget(Clear, area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Full-text Search ")
-        .border_style(Style::default().fg(THEME_HIGHLIGHT));
+    let block = modal_block(" Full-text Search ", theme().accent);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -573,8 +519,8 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
 
     // 1. Search input line
     let search_line = Paragraph::new(Line::from(vec![
-        Span::styled(" 🔍 ", Style::default().fg(THEME_HIGHLIGHT)),
-        Span::styled(overlay.query.as_str(), Style::default().fg(THEME_TEXT)),
+        Span::styled(" 🔍 ", Style::default().fg(theme().accent_text)),
+        Span::styled(overlay.query.as_str(), Style::default().fg(theme().fg)),
     ]));
     frame.render_widget(search_line, chunks[0]);
 
@@ -586,7 +532,7 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
     // 2. Top divider
     let divider = Paragraph::new(Line::from(Span::styled(
         "─".repeat(chunks[1].width as usize),
-        Style::default().fg(THEME_BORDER),
+        Style::default().fg(theme().border),
     )));
     frame.render_widget(divider, chunks[1]);
 
@@ -596,7 +542,7 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
             Line::from(""),
             Line::from(Span::styled(
                 "⚠️ 全文搜索不可用：当前 SQLite 环境未启用 FTS5 扩展组件",
-                Style::default().fg(THEME_WARN),
+                Style::default().fg(theme().warning),
             )),
         ]))
         .alignment(Alignment::Center);
@@ -604,7 +550,7 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
     } else if overlay.is_loading {
         let loading = Paragraph::new(Text::from(vec![
             Line::from(""),
-            Line::from(Span::styled("搜索中...", Style::default().fg(THEME_BORDER))),
+            Line::from(Span::styled("搜索中...", Style::default().fg(theme().fg_muted))),
         ]))
         .alignment(Alignment::Center);
         frame.render_widget(loading, chunks[2]);
@@ -613,7 +559,7 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
             Line::from(""),
             Line::from(Span::styled(
                 format!("⚠️ {}", err_msg),
-                Style::default().fg(THEME_WARN),
+                Style::default().fg(theme().warning),
             )),
         ]))
         .alignment(Alignment::Center);
@@ -623,7 +569,7 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
             Line::from(""),
             Line::from(Span::styled(
                 "Type keywords to search session transcripts...",
-                Style::default().fg(THEME_BORDER),
+                Style::default().fg(theme().fg_muted),
             )),
         ]))
         .alignment(Alignment::Center);
@@ -633,7 +579,7 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
             Line::from(""),
             Line::from(Span::styled(
                 "No matching sessions found.",
-                Style::default().fg(THEME_BORDER),
+                Style::default().fg(theme().fg_muted),
             )),
         ]))
         .alignment(Alignment::Center);
@@ -656,9 +602,9 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
         {
             let is_selected = i == overlay.selected_index;
             let card_bg = if is_selected {
-                THEME_HEADER_BG
+                theme().selection
             } else {
-                THEME_BG
+                theme().overlay
             };
 
             let pointer = if is_selected { "▸ " } else { "  " };
@@ -666,11 +612,11 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
                 pointer,
                 if is_selected {
                     Style::default()
-                        .fg(THEME_HIGHLIGHT)
+                        .fg(theme().accent_text)
                         .bg(card_bg)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(THEME_BORDER).bg(card_bg)
+                    Style::default().fg(theme().fg_muted).bg(card_bg)
                 },
             );
 
@@ -737,11 +683,11 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
                 truncated_header,
                 if is_selected {
                     Style::default()
-                        .fg(THEME_TEXT)
+                        .fg(theme().fg)
                         .bg(card_bg)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(THEME_TEXT).bg(card_bg)
+                    Style::default().fg(theme().fg).bg(card_bg)
                 },
             );
             let pad_span = Span::styled(" ".repeat(pad), Style::default().bg(card_bg));
@@ -749,11 +695,11 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
                 meta_text,
                 if is_selected {
                     Style::default()
-                        .fg(THEME_TEXT)
+                        .fg(theme().fg)
                         .bg(card_bg)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(THEME_BORDER).bg(card_bg)
+                    Style::default().fg(theme().fg_muted).bg(card_bg)
                 },
             );
 
@@ -764,17 +710,17 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
 
             let mut snippet_spans = vec![Span::styled(
                 "    \"...",
-                Style::default().fg(THEME_TEXT).bg(card_bg),
+                Style::default().fg(theme().fg).bg(card_bg),
             )];
             render_highlighted_snippet_with_bg(&hit.snippet, card_bg, &mut snippet_spans);
             snippet_spans.push(Span::styled(
                 "...\"",
-                Style::default().fg(THEME_TEXT).bg(card_bg),
+                Style::default().fg(theme().fg).bg(card_bg),
             ));
             if hit.extra_matches() > 0 {
                 snippet_spans.push(Span::styled(
                     format!(" ({} more matches in this session)", hit.extra_matches()),
-                    Style::default().fg(THEME_BORDER).bg(card_bg),
+                    Style::default().fg(theme().fg_muted).bg(card_bg),
                 ));
             }
 
@@ -793,7 +739,7 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
 
             let divider_span = Span::styled(
                 "─".repeat(available_w),
-                Style::default().fg(THEME_BORDER).bg(THEME_BG),
+                Style::default().fg(theme().border).bg(theme().overlay),
             );
             lines.push(Line::from(vec![divider_span]));
         }
@@ -805,13 +751,13 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
     // 4. Bottom divider
     let bot_divider = Paragraph::new(Line::from(Span::styled(
         "─".repeat(chunks[3].width as usize),
-        Style::default().fg(THEME_BORDER),
+        Style::default().fg(theme().border),
     )));
     frame.render_widget(bot_divider, chunks[3]);
 
     // 5. Footer
     let footer_left = if !app.state_store.fts_status().is_ready() {
-        Span::styled(" 索引状态：已禁用", Style::default().fg(THEME_WARN))
+        Span::styled(" 索引状态：已禁用", Style::default().fg(theme().warning))
     } else if let Some(progress) = &app.index_progress {
         if !progress.is_complete {
             Span::styled(
@@ -819,7 +765,7 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
                     " ⚠️ 索引构建中 ({}/{})，搜索结果基于已完成部分",
                     progress.indexed_count, progress.total_count
                 ),
-                Style::default().fg(THEME_WARN),
+                Style::default().fg(theme().warning),
             )
         } else {
             Span::styled(
@@ -827,16 +773,16 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
                     " 索引状态：已完成 {}/{} 会话",
                     progress.indexed_count, progress.total_count
                 ),
-                Style::default().fg(THEME_BORDER),
+                Style::default().fg(theme().fg_muted),
             )
         }
     } else {
-        Span::styled(" 索引状态：就绪", Style::default().fg(THEME_BORDER))
+        Span::styled(" 索引状态：就绪", Style::default().fg(theme().fg_muted))
     };
 
     let footer_right = Span::styled(
         "↑↓ 选择   Enter 跳转   Esc 关闭 ",
-        Style::default().fg(THEME_BORDER),
+        Style::default().fg(theme().fg_muted),
     );
 
     let available_w = chunks[4].width as usize;
@@ -854,7 +800,7 @@ fn render_search_overlay(frame: &mut Frame<'_>, app: &App) {
 
 #[allow(dead_code)]
 fn render_highlighted_snippet(snippet: &str, spans: &mut Vec<Span<'static>>) {
-    render_highlighted_snippet_with_bg(snippet, THEME_BG, spans);
+    render_highlighted_snippet_with_bg(snippet, theme().bg, spans);
 }
 
 fn render_highlighted_snippet_with_bg(
@@ -867,7 +813,7 @@ fn render_highlighted_snippet_with_bg(
         if start_idx > 0 {
             spans.push(Span::styled(
                 rest[..start_idx].to_string(),
-                Style::default().fg(THEME_TEXT).bg(card_bg),
+                Style::default().fg(theme().fg).bg(card_bg),
             ));
         }
         let after_start = &rest[start_idx + 2..];
@@ -876,8 +822,8 @@ fn render_highlighted_snippet_with_bg(
             spans.push(Span::styled(
                 matched.to_string(),
                 Style::default()
-                    .fg(THEME_SEARCH_FG)
-                    .bg(THEME_SEARCH_BG)
+                    .fg(theme().search_hit_fg)
+                    .bg(theme().search_hit_bg)
                     .add_modifier(Modifier::BOLD),
             ));
             rest = &after_start[end_idx + 2..];
@@ -885,8 +831,8 @@ fn render_highlighted_snippet_with_bg(
             spans.push(Span::styled(
                 after_start.to_string(),
                 Style::default()
-                    .fg(THEME_SEARCH_FG)
-                    .bg(THEME_SEARCH_BG)
+                    .fg(theme().search_hit_fg)
+                    .bg(theme().search_hit_bg)
                     .add_modifier(Modifier::BOLD),
             ));
             rest = "";
@@ -896,7 +842,7 @@ fn render_highlighted_snippet_with_bg(
     if !rest.is_empty() {
         spans.push(Span::styled(
             rest.to_string(),
-            Style::default().fg(THEME_TEXT).bg(card_bg),
+            Style::default().fg(theme().fg).bg(card_bg),
         ));
     }
 }
@@ -909,10 +855,10 @@ fn render_project_dashboard(app: &App) -> Text<'static> {
     let mut lines = Vec::new();
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("  项目路径      ", Style::default().fg(THEME_BORDER)),
+        Span::styled("  项目路径      ", Style::default().fg(theme().fg_muted)),
         Span::styled(
             dashboard.project_path.clone(),
-            Style::default().fg(THEME_TEXT),
+            Style::default().fg(theme().fg),
         ),
     ]));
 
@@ -928,17 +874,17 @@ fn render_project_dashboard(app: &App) -> Text<'static> {
     };
 
     lines.push(Line::from(vec![
-        Span::styled("  会话总数      ", Style::default().fg(THEME_BORDER)),
+        Span::styled("  会话总数      ", Style::default().fg(theme().fg_muted)),
         Span::styled(
             format!("{}{breakdown_str}", dashboard.total_sessions),
-            Style::default().fg(THEME_TEXT).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme().fg).add_modifier(Modifier::BOLD),
         ),
     ]));
 
     if !dashboard.engine_counts.is_empty() {
         let mut bar_spans = vec![Span::styled(
             "  引擎分布      ",
-            Style::default().fg(THEME_BORDER),
+            Style::default().fg(theme().fg_muted),
         )];
         for (i, (eng, count)) in dashboard.engine_counts.iter().enumerate() {
             if i > 0 {
@@ -957,25 +903,25 @@ fn render_project_dashboard(app: &App) -> Text<'static> {
             );
             bar_spans.push(Span::styled(
                 format!("{} ", eng.label()),
-                Style::default().fg(THEME_HIGHLIGHT),
+                Style::default().fg(theme().accent_text),
             ));
             bar_spans.push(Span::styled(
                 format!("[{bar}] "),
-                Style::default().fg(THEME_TEXT),
+                Style::default().fg(theme().fg),
             ));
             bar_spans.push(Span::styled(
                 count.to_string(),
-                Style::default().fg(THEME_WARN),
+                Style::default().fg(theme().warning),
             ));
         }
         lines.push(Line::from(bar_spans));
     }
 
     lines.push(Line::from(vec![
-        Span::styled("  收藏数        ", Style::default().fg(THEME_BORDER)),
+        Span::styled("  收藏数        ", Style::default().fg(theme().fg_muted)),
         Span::styled(
             dashboard.favorite_count.to_string(),
-            Style::default().fg(THEME_TEXT),
+            Style::default().fg(theme().fg),
         ),
     ]));
 
@@ -990,15 +936,15 @@ fn render_project_dashboard(app: &App) -> Text<'static> {
             .join("  ")
     };
     lines.push(Line::from(vec![
-        Span::styled("  常用标签      ", Style::default().fg(THEME_BORDER)),
-        Span::styled(tags_str, Style::default().fg(THEME_TEXT)),
+        Span::styled("  常用标签      ", Style::default().fg(theme().fg_muted)),
+        Span::styled(tags_str, Style::default().fg(theme().fg)),
     ]));
 
     lines.push(Line::from(vec![
-        Span::styled("  最近活跃      ", Style::default().fg(THEME_BORDER)),
+        Span::styled("  最近活跃      ", Style::default().fg(theme().fg_muted)),
         Span::styled(
             dashboard.last_active.clone(),
-            Style::default().fg(THEME_TEXT),
+            Style::default().fg(theme().fg),
         ),
     ]));
 
@@ -1007,13 +953,13 @@ fn render_project_dashboard(app: &App) -> Text<'static> {
         None => "N/A".to_string(),
     };
     lines.push(Line::from(vec![
-        Span::styled("  正文规模      ", Style::default().fg(THEME_BORDER)),
-        Span::styled(scale_str, Style::default().fg(THEME_TEXT)),
+        Span::styled("  正文规模      ", Style::default().fg(theme().fg_muted)),
+        Span::styled(scale_str, Style::default().fg(theme().fg)),
     ]));
 
     lines.push(Line::from(Span::styled(
         "  ──────────────────────────────────────────────────────────",
-        Style::default().fg(THEME_BORDER),
+        Style::default().fg(theme().border),
     )));
 
     // Recent sessions (only if terminal height is >= 20 or unknown 0)
@@ -1021,7 +967,7 @@ fn render_project_dashboard(app: &App) -> Text<'static> {
         lines.push(Line::from(Span::styled(
             "  最近会话",
             Style::default()
-                .fg(THEME_BORDER)
+                .fg(theme().fg_muted)
                 .add_modifier(Modifier::BOLD),
         )));
 
@@ -1040,29 +986,29 @@ fn render_project_dashboard(app: &App) -> Text<'static> {
 
                 let line_style = if is_selected {
                     Style::default()
-                        .fg(THEME_HIGHLIGHT)
+                        .fg(theme().accent_text)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(THEME_TEXT)
+                    Style::default().fg(theme().fg)
                 };
 
                 lines.push(Line::from(vec![
                     Span::styled(
                         pointer,
                         if is_selected {
-                            Style::default().fg(THEME_HIGHLIGHT)
+                            Style::default().fg(theme().accent_text)
                         } else {
-                            Style::default().fg(THEME_BORDER)
+                            Style::default().fg(theme().fg_muted)
                         },
                     ),
                     Span::styled(format!("{truncated_title:<34}"), line_style),
                     Span::styled(
                         format!("[{}] ", engine.label()),
-                        Style::default().fg(THEME_BORDER),
+                        Style::default().fg(theme().fg_muted),
                     ),
                     Span::styled(
                         format!("{:<8}", short_time(&sess.display_time)),
-                        Style::default().fg(THEME_BORDER),
+                        Style::default().fg(theme().fg_muted),
                     ),
                 ]));
             }
@@ -1078,99 +1024,476 @@ fn loading_spinner(tick_count: u64) -> &'static str {
 }
 
 fn rendered_line_to_line(line: &RenderedLine) -> Line<'static> {
+    let label = match line.text.as_str() {
+        USER_LABEL => Some(Style::default().fg(theme().fg)),
+        ASSISTANT_LABEL => Some(Style::default().fg(theme().accent_text)),
+        THINKING_LABEL => Some(Style::default().fg(theme().thinking)),
+        _ => None,
+    };
+    if let Some(style) = label {
+        return Line::from(Span::styled(
+            line.text.clone(),
+            style.add_modifier(Modifier::BOLD),
+        ));
+    }
     let style = match line.kind {
-        RenderedLineKind::Header => Style::default()
-            .fg(THEME_HIGHLIGHT)
-            .add_modifier(Modifier::BOLD),
-        RenderedLineKind::User => Style::default().fg(THEME_TEXT),
-        RenderedLineKind::Assistant => Style::default().fg(Color::Rgb(166, 227, 161)),
-        RenderedLineKind::Thinking => Style::default().fg(Color::Rgb(203, 166, 247)),
+        RenderedLineKind::Header => Style::default().fg(theme().fg_muted),
+        RenderedLineKind::User => Style::default().fg(theme().fg),
+        RenderedLineKind::Assistant => Style::default().fg(theme().assistant),
+        RenderedLineKind::Thinking => Style::default()
+            .fg(theme().thinking)
+            .add_modifier(Modifier::ITALIC),
         RenderedLineKind::ToolCall | RenderedLineKind::ToolOutput => {
-            Style::default().fg(THEME_BORDER)
+            Style::default().fg(theme().fg_muted)
         }
         RenderedLineKind::SystemContext => Style::default()
-            .fg(THEME_BORDER)
+            .fg(theme().fg_muted)
             .add_modifier(Modifier::ITALIC),
-        RenderedLineKind::CorruptedLine => Style::default().fg(THEME_WARN),
+        RenderedLineKind::CorruptedLine => Style::default().fg(theme().warning),
         RenderedLineKind::Blank => Style::default(),
     };
     Line::from(Span::styled(line.text.clone(), style))
 }
 
 fn render_group_summary_card(card: Option<&GroupSummaryCard>) -> Text<'static> {
-    let Some(card) = card else {
-        return Text::from(vec![
-            Line::from("Group Summary"),
-            Line::from(""),
-            Line::from("Group: -"),
-            Line::from("Sessions: 0"),
-            Line::from("Main sessions: 0"),
-            Line::from("Subagents: 0"),
-            Line::from("Last Active: -"),
-            Line::from("Engine: -"),
-        ]);
+    let rows: [(&str, String); 6] = match card {
+        Some(card) => [
+            ("Group", card.group_label.clone()),
+            ("Sessions", card.total_sessions.to_string()),
+            ("Main sessions", card.root_sessions.to_string()),
+            ("Subagents", card.subagent_sessions.to_string()),
+            ("Last Active", card.last_active.clone()),
+            ("Engine", card.engine.label().to_string()),
+        ],
+        None => [
+            ("Group", "-".to_string()),
+            ("Sessions", "0".to_string()),
+            ("Main sessions", "0".to_string()),
+            ("Subagents", "0".to_string()),
+            ("Last Active", "-".to_string()),
+            ("Engine", "-".to_string()),
+        ],
     };
+    let mut lines = vec![Line::default()];
+    lines.extend(rows.into_iter().map(|(label, value)| {
+        Line::from(vec![
+            Span::styled(format!("{label:<15}"), Style::default().fg(theme().fg_muted)),
+            Span::styled(value, Style::default().fg(theme().fg)),
+        ])
+    }));
+    Text::from(lines)
+}
 
-    Text::from(vec![
-        Line::from(vec![Span::styled(
-            "Group Summary",
-            Style::default()
-                .fg(THEME_HIGHLIGHT)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(""),
-        Line::from(format!("Group: {}", card.group_label)),
-        Line::from(format!("Sessions: {}", card.total_sessions)),
-        Line::from(format!("Main sessions: {}", card.root_sessions)),
-        Line::from(format!("Subagents: {}", card.subagent_sessions)),
-        Line::from(format!("Last Active: {}", card.last_active)),
-        Line::from(format!("Engine: {}", card.engine.label())),
+fn rect_of(rect: crate::app::RectLike) -> Rect {
+    Rect::new(rect.x, rect.y, rect.width, rect.height)
+}
+
+/// Panes are separated by single rules instead of boxes: a left rule when the
+/// pane has a neighbour on its left, a top rule when it sits below another.
+/// The rule turns accent-colored on the focused pane.
+fn pane_block(area: Rect, focused: bool) -> Block<'static> {
+    let mut borders = Borders::NONE;
+    if area.x > 0 {
+        borders |= Borders::LEFT;
+    }
+    if area.y > 1 {
+        borders |= Borders::TOP;
+    }
+    let color = if focused { theme().accent } else { theme().border };
+    Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(color))
+}
+
+/// Inner content area of a pane: inside its rules, with one column of padding.
+fn pane_inner(area: Rect, focused: bool) -> Rect {
+    let inner = pane_block(area, focused).inner(area);
+    Rect::new(
+        inner.x.saturating_add(1),
+        inner.y,
+        inner.width.saturating_sub(2),
+        inner.height,
+    )
+}
+
+fn pane_title_line(title: String, title_style: Style, right: String, width: u16) -> Line<'static> {
+    let right_width = display_width(&right);
+    let title = truncate_summary(&title, (width as usize).saturating_sub(right_width + 1));
+    let pad = (width as usize).saturating_sub(display_width(&title) + right_width);
+    Line::from(vec![
+        Span::styled(title, title_style),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(right, Style::default().fg(theme().fg_muted)),
     ])
 }
 
-fn layout_body(
-    area: Rect,
-    split_direction: SplitDirection,
-    panel_main_size: Option<u16>,
-) -> Vec<Rect> {
-    let layout = crate::app::compute_layout(
-        split_direction,
-        panel_main_size,
-        area.width,
-        area.height.saturating_add(2),
-    );
-    vec![
-        Rect::new(
-            area.x + layout.list_panel.x,
-            area.y + layout.list_panel.y.saturating_sub(1),
-            layout.list_panel.width,
-            layout.list_panel.height,
-        ),
-        Rect::new(
-            area.x + layout.detail_panel.x,
-            area.y + layout.detail_panel.y.saturating_sub(1),
-            layout.detail_panel.width,
-            layout.detail_panel.height,
-        ),
-    ]
+fn pane_title_style(focused: bool) -> Style {
+    let color = if focused {
+        theme().accent_text
+    } else {
+        theme().fg_muted
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
-fn panel_block(title: &str, focused: bool) -> Block<'static> {
-    let title = format!(" {} ", title);
-    let border_style = if focused {
-        Style::default()
-            .fg(THEME_HIGHLIGHT)
-            .add_modifier(Modifier::BOLD)
+fn row(area: Rect, offset: u16) -> Rect {
+    Rect::new(
+        area.x,
+        area.y.saturating_add(offset),
+        area.width,
+        u16::from(area.height > offset),
+    )
+}
+
+fn render_list_pane(frame: &mut Frame<'_>, area: Rect, app: &mut App, wide: bool) {
+    let focused = app.focused_panel == FocusedPanel::List;
+    frame.render_widget(pane_block(area, focused), area);
+    let inner = pane_inner(area, focused);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let title = format!(
+        "SESSIONS · BY {}",
+        nav::group_mode_name(app.group_mode).to_uppercase()
+    );
+    frame.render_widget(
+        Paragraph::new(pane_title_line(
+            title,
+            pane_title_style(focused),
+            app.session_list.len().to_string(),
+            inner.width,
+        )),
+        row(inner, 0),
+    );
+
+    let order = if wide { RowOrder::Table } else { RowOrder::Compact };
+    let row_layout = RowLayout::new(inner.width, app.group_mode, order);
+    frame.render_widget(Paragraph::new(rows::column_header(&row_layout)), row(inner, 1));
+
+    let header_rows = crate::app::LIST_HEADER_ROWS;
+    let tree_area = Rect::new(
+        inner.x,
+        inner.y.saturating_add(header_rows),
+        inner.width,
+        inner.height.saturating_sub(header_rows),
+    );
+    let tree_items = build_session_tree_items(app, &row_layout, inner.width);
+    if tree_items.is_empty() {
+        let message = match app.catalog_loading_state {
+            CatalogLoadingState::Loading(engine) => {
+                format!("Loading {} sessions...", engine.label())
+            }
+            CatalogLoadingState::Idle if app.status_message.contains("ERROR:") => {
+                format!("{} catalog error", app.active_engine.label())
+            }
+            CatalogLoadingState::Idle => format!("No {} sessions", app.active_engine.label()),
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(message, Style::default().fg(theme().fg_muted))),
+            tree_area,
+        );
     } else {
-        Style::default().fg(THEME_BORDER)
+        let tree = Tree::new(&tree_items)
+            .expect("tree identifiers stay unique")
+            .highlight_style(selection_style())
+            .highlight_symbol("")
+            .node_closed_symbol("")
+            .node_open_symbol("")
+            .node_no_children_symbol("");
+        frame.render_stateful_widget(tree, tree_area, &mut app.tree_state);
+    }
+}
+
+fn render_detail_pane(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let focused = app.focused_panel == FocusedPanel::Detail;
+    frame.render_widget(pane_block(area, focused), area);
+    let inner = pane_inner(area, focused);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let (title, title_style, right) = match app.right_panel_mode {
+        RightPanelMode::GroupSummary => (
+            "GROUP SUMMARY".to_string(),
+            pane_title_style(focused),
+            String::new(),
+        ),
+        RightPanelMode::ProjectDashboard => (
+            match &app.project_dashboard_state {
+                Some(dash) => format!("DASHBOARD · {}", dash.project_name),
+                None => "DASHBOARD".to_string(),
+            },
+            pane_title_style(focused),
+            String::new(),
+        ),
+        RightPanelMode::SessionDetail => match app.selected_item() {
+            Some(item) => {
+                let color = if focused {
+                    theme().accent_text
+                } else {
+                    theme().fg
+                };
+                let title = if item.name.is_empty() {
+                    item.session_id.clone()
+                } else {
+                    item.name.clone()
+                };
+                (
+                    title,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    format!("{} · {}", app.active_engine.label(), short_time(&item.display_time)),
+                )
+            }
+            None => ("DETAIL".to_string(), pane_title_style(focused), String::new()),
+        },
+    };
+    frame.render_widget(
+        Paragraph::new(pane_title_line(title, title_style, right, inner.width)),
+        row(inner, 0),
+    );
+
+    let body = Rect::new(
+        inner.x,
+        inner.y.saturating_add(1),
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
+    let detail = Paragraph::new(render_right_panel_text(app)).wrap(Wrap { trim: false });
+    frame.render_widget(detail, body);
+}
+
+/// Header of the wide layout: brand, search field, catalog status. Returns the
+/// cursor position while the search field is being edited.
+fn render_wide_header(frame: &mut Frame<'_>, area: Rect, app: &App) -> Option<(u16, u16)> {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme().surface)),
+        area,
+    );
+    let brand = vec![
+        Span::styled(
+            " ✻ Sessions ",
+            Style::default()
+                .fg(theme().accent_text)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("│ ", Style::default().fg(theme().border)),
+    ];
+    let brand_width: u16 = brand.iter().map(|span| span.width() as u16).sum();
+
+    let right = match &app.index_progress {
+        Some(progress) if !progress.is_complete => Span::styled(
+            format!("Indexing {}/{} ", progress.indexed_count, progress.total_count),
+            Style::default().fg(theme().warning),
+        ),
+        _ => Span::styled(
+            format!(
+                "{} · {} sessions ",
+                app.active_engine.label(),
+                app.session_list.len()
+            ),
+            Style::default().fg(theme().fg_muted),
+        ),
+    };
+    let right_width = right.width() as u16;
+
+    let box_width = area
+        .width
+        .saturating_sub(brand_width + right_width + 2)
+        .min(56);
+    let box_area = Rect::new(area.x + brand_width, area.y, box_width, 1);
+    let field = Style::default().bg(theme().bg);
+    let (search_line, cursor) = if app.search_state.phase == SearchPhase::Input {
+        let (tail, suffix) = search_prompt_parts(app, box_width);
+        let cursor = (search_cursor_x(app, box_area), area.y);
+        (
+            Line::from(vec![
+                Span::styled("/", Style::default().fg(theme().accent_text)),
+                Span::styled(tail, Style::default().fg(theme().fg)),
+                Span::styled(suffix, Style::default().fg(theme().fg_muted)),
+            ]),
+            Some(cursor),
+        )
+    } else if let (Some(pattern), false) = (
+        app.search_state.last_pattern.as_deref(),
+        app.search_state.matches.is_empty(),
+    ) {
+        let current = app.search_state.current_match.map_or(0, |index| index + 1);
+        (
+            Line::from(vec![
+                Span::styled("/", Style::default().fg(theme().accent_text)),
+                Span::styled(pattern.to_string(), Style::default().fg(theme().fg)),
+                Span::styled(
+                    format!(" {current}/{}", app.search_state.matches.len()),
+                    Style::default().fg(theme().fg_muted),
+                ),
+            ]),
+            None,
+        )
+    } else {
+        (
+            Line::from(Span::styled(
+                "/ Search title, project, #tag, fav:",
+                Style::default().fg(theme().fg_muted),
+            )),
+            None,
+        )
     };
 
-    use ratatui::widgets::BorderType;
+    frame.render_widget(Paragraph::new(Line::from(brand)), area);
+    frame.render_widget(Paragraph::new(search_line).style(field), box_area);
+    let right_area = Rect::new(
+        area.x + area.width.saturating_sub(right_width),
+        area.y,
+        right_width.min(area.width),
+        1,
+    );
+    frame.render_widget(Paragraph::new(right), right_area);
+    cursor
+}
+
+fn build_session_tree_items(
+    app: &App,
+    row_layout: &RowLayout,
+    list_width: u16,
+) -> Vec<TreeItem<'static, String>> {
+    let pattern = app.search_highlight_pattern();
+    let needles = pattern.map(rows::search_needles).unwrap_or_default();
+    let ctx = TreeRowContext {
+        row_layout,
+        needles: &needles,
+        highlighting: pattern.is_some(),
+        matches: &app.search_state.matches,
+        current_match: app.current_match_index(),
+        marked_ids: &app.marked_session_ids,
+    };
+    build_grouped_session_nodes(&app.session_list, &app.group_mode)
+        .into_iter()
+        .map(|group| {
+            let children = group
+                .children
+                .iter()
+                .map(|node| build_session_item(node, 1, &ctx))
+                .collect::<Vec<_>>();
+            let is_open = app
+                .tree_state
+                .opened()
+                .contains(&vec![group.identifier.clone()]);
+            TreeItem::new(
+                group.identifier,
+                rows::group_row(
+                    &group.label,
+                    group.root_session_count,
+                    group.subagent_count,
+                    is_open,
+                    list_width as usize,
+                ),
+                children,
+            )
+            .expect("group children stay unique")
+        })
+        .collect()
+}
+
+struct TreeRowContext<'a> {
+    row_layout: &'a RowLayout,
+    needles: &'a [String],
+    highlighting: bool,
+    matches: &'a [usize],
+    current_match: Option<usize>,
+    marked_ids: &'a std::collections::HashSet<String>,
+}
+
+fn build_session_item(
+    node: &crate::app::SessionTreeNode,
+    depth: usize,
+    ctx: &TreeRowContext<'_>,
+) -> TreeItem<'static, String> {
+    let highlight = RowHighlight {
+        needles: ctx.needles,
+        is_match: ctx.highlighting && ctx.matches.contains(&node.session_index),
+        is_current: ctx.current_match == Some(node.session_index),
+    };
+    let is_marked = ctx.marked_ids.contains(&node.session_id);
+    let text = rows::session_row(node, depth, ctx.row_layout, is_marked, highlight);
+    if node.children.is_empty() {
+        TreeItem::new_leaf(node.identifier.clone(), text)
+    } else {
+        let children = node
+            .children
+            .iter()
+            .map(|child| build_session_item(child, depth + 1, ctx))
+            .collect::<Vec<_>>();
+        TreeItem::new(node.identifier.clone(), text, children)
+            .expect("session children stay unique")
+    }
+}
+
+fn modal_block(title: &'static str, border: Color) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(title)
-        .border_style(border_style)
+        .title(Span::styled(
+            title,
+            Style::default().fg(border).add_modifier(Modifier::BOLD),
+        ))
+        .border_style(Style::default().fg(border))
+        .style(Style::default().fg(theme().fg).bg(theme().overlay))
+}
+
+/// App status messages are prefixed with the legacy key reference; the status
+/// bar shows its own key hints, so only the part after that prefix matters.
+fn status_message_body(message: &str) -> &str {
+    match message.strip_prefix(default_status_message()) {
+        Some(rest) => rest.trim_start_matches(" | "),
+        None => message,
+    }
+}
+
+/// Status messages are plain strings; their severity is carried by wording.
+fn status_message_color(message: &str) -> Color {
+    const DANGER: [&str; 4] = ["Error:", "ERROR", "失败", "无法"];
+    const WARNING: [&str; 2] = ["警告", "⚠"];
+    if DANGER.iter().any(|needle| message.contains(needle)) {
+        theme().danger
+    } else if WARNING.iter().any(|needle| message.contains(needle)) {
+        theme().warning
+    } else {
+        theme().fg_secondary
+    }
+}
+
+fn status_message_spans(message: &str) -> [Span<'_>; 2] {
+    let color = status_message_color(message);
+    [
+        Span::styled(
+            " >> ",
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(message, Style::default().fg(color)),
+    ]
+}
+
+fn selection_style() -> Style {
+    Style::default()
+        .fg(theme().fg)
+        .bg(theme().selection)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn key_hint_spans(hints: &[(&'static str, &'static str)]) -> Vec<Span<'static>> {
+    let mut spans = Vec::with_capacity(hints.len() * 2);
+    for (key, label) in hints {
+        spans.push(Span::styled(
+            format!(" {key}"),
+            Style::default().fg(theme().fg).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!(" {label} "),
+            Style::default().fg(theme().fg_muted),
+        ));
+    }
+    spans
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1272,7 +1595,7 @@ pub fn render_header_line(app: &App, terminal_width: u16) -> Line<'static> {
         if index > 0 {
             spans.push(Span::styled(
                 " | ",
-                Style::default().fg(THEME_BORDER).bg(THEME_HEADER_BG),
+                Style::default().fg(theme().border).bg(theme().surface),
             ));
         }
         spans.push(tab_span(engine, app.active_engine));
@@ -1285,7 +1608,7 @@ pub fn render_header_line(app: &App, terminal_width: u16) -> Line<'static> {
         if pad_len > 0 {
             spans.push(Span::styled(
                 " ".repeat(pad_len as usize),
-                Style::default().bg(THEME_HEADER_BG),
+                Style::default().bg(theme().surface),
             ));
         }
         for (index, &mode) in [GroupMode::ByTime, GroupMode::ByProject, GroupMode::ByTag]
@@ -1295,7 +1618,7 @@ pub fn render_header_line(app: &App, terminal_width: u16) -> Line<'static> {
             if index > 0 {
                 spans.push(Span::styled(
                     " | ",
-                    Style::default().fg(THEME_BORDER).bg(THEME_HEADER_BG),
+                    Style::default().fg(theme().border).bg(theme().surface),
                 ));
             }
             spans.push(group_mode_span(mode, app.group_mode));
@@ -1311,452 +1634,18 @@ fn group_mode_span(mode: GroupMode, active_mode: GroupMode) -> Span<'static> {
         Span::styled(
             label,
             Style::default()
-                .fg(THEME_BG)
-                .bg(THEME_HIGHLIGHT)
+                .fg(theme().on_accent)
+                .bg(theme().accent_bg)
                 .add_modifier(Modifier::BOLD),
         )
     } else {
         Span::styled(
             label,
             Style::default()
-                .fg(THEME_BORDER)
+                .fg(theme().fg_muted)
                 .add_modifier(Modifier::BOLD),
         )
     }
-}
-
-fn build_session_tree_items(app: &App) -> Vec<TreeItem<'static, String>> {
-    let highlight_pattern = app.search_highlight_pattern();
-    let current_match = app.current_match_index();
-    build_grouped_session_nodes(&app.session_list, &app.group_mode)
-        .into_iter()
-        .map(|group| {
-            let children = group
-                .children
-                .iter()
-                .map(|node| {
-                    build_session_item(
-                        node,
-                        &app.group_mode,
-                        false,
-                        highlight_pattern,
-                        &app.search_state.matches,
-                        current_match,
-                        &app.marked_session_ids,
-                    )
-                })
-                .collect::<Vec<_>>();
-            TreeItem::new(
-                group.identifier,
-                group_text(
-                    &group.label,
-                    group.root_session_count,
-                    group.subagent_count,
-                    &app.group_mode,
-                ),
-                children,
-            )
-            .expect("group children stay unique")
-        })
-        .collect()
-}
-
-fn build_session_item(
-    node: &crate::app::SessionTreeNode,
-    mode: &GroupMode,
-    is_child: bool,
-    highlight_pattern: Option<&str>,
-    match_indexes: &[usize],
-    current_match: Option<usize>,
-    marked_ids: &std::collections::HashSet<String>,
-) -> TreeItem<'static, String> {
-    let is_current = current_match == Some(node.session_index);
-    let is_marked = marked_ids.contains(&node.session_id);
-    let node_text = session_node_text_with_width_marked(node, mode, is_child, usize::MAX, is_marked);
-    let text = match highlight_pattern {
-        Some(pattern) if match_indexes.contains(&node.session_index) => {
-            highlight_session_match(&node_text, pattern, is_current)
-        }
-        _ => {
-            render_styled_session_line(node, &node_text)
-        }
-    };
-    if node.children.is_empty() {
-        TreeItem::new_leaf(node.identifier.clone(), text)
-    } else {
-        let children = node
-            .children
-            .iter()
-            .map(|child| {
-                build_session_item(
-                    child,
-                    mode,
-                    true,
-                    highlight_pattern,
-                    match_indexes,
-                    current_match,
-                    marked_ids,
-                )
-            })
-            .collect::<Vec<_>>();
-        TreeItem::new(node.identifier.clone(), text, children)
-            .expect("session children stay unique")
-    }
-}
-
-pub(crate) fn render_styled_session_line(
-    node: &crate::app::SessionTreeNode,
-    node_text: &str,
-) -> Line<'static> {
-    let mut spans = Vec::new();
-    let mut rest = node_text;
-
-    if rest.starts_with("[✓] ") {
-        spans.push(Span::styled(
-            "[✓] ",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ));
-        rest = &rest["[✓] ".len()..];
-    }
-
-    if node.is_favorite {
-        if rest.starts_with("★ ") {
-            spans.push(Span::styled(
-                "★ ",
-                Style::default()
-                    .fg(Color::Rgb(249, 226, 175))
-                    .add_modifier(Modifier::BOLD),
-            ));
-            rest = &rest["★ ".len()..];
-        } else if rest.starts_with('★') {
-            spans.push(Span::styled(
-                "★",
-                Style::default()
-                    .fg(Color::Rgb(249, 226, 175))
-                    .add_modifier(Modifier::BOLD),
-            ));
-            rest = &rest['★'.len_utf8()..];
-        }
-    }
-
-    if rest.starts_with("🤖 ") {
-        spans.push(Span::styled(
-            "🤖 ",
-            Style::default()
-                .fg(THEME_HIGHLIGHT)
-                .add_modifier(Modifier::BOLD),
-        ));
-        rest = &rest["🤖 ".len()..];
-    }
-
-    if !node.tags.is_empty()
-        && let Some(pos) = rest.rfind(" #")
-    {
-        let body = &rest[..pos];
-        let tags_part = &rest[pos..];
-        spans.push(Span::styled(
-            body.to_string(),
-            Style::default().fg(THEME_TEXT),
-        ));
-        spans.push(Span::styled(
-            tags_part.to_string(),
-            Style::default().fg(THEME_BORDER),
-        ));
-        return Line::from(spans);
-    }
-
-    spans.push(Span::styled(
-        rest.to_string(),
-        Style::default().fg(THEME_TEXT),
-    ));
-    Line::from(spans)
-}
-
-fn highlight_session_match(text: &str, raw_pattern: &str, is_current: bool) -> Line<'static> {
-    let needles: Vec<&str> = raw_pattern
-        .split_whitespace()
-        .filter_map(|token| {
-            if token.eq_ignore_ascii_case("fav:") {
-                None
-            } else if let Some(pat) = token.strip_prefix("tag:") {
-                if pat.is_empty() {
-                    Some("tag:")
-                } else {
-                    Some(pat)
-                }
-            } else {
-                Some(token)
-            }
-        })
-        .collect();
-
-    if needles.is_empty() {
-        let mut style = Style::default()
-            .fg(THEME_SEARCH_FG)
-            .bg(THEME_SEARCH_BG)
-            .add_modifier(Modifier::BOLD);
-        if is_current {
-            style = style.add_modifier(Modifier::UNDERLINED);
-        }
-        return Line::from(Span::styled(text.to_string(), style));
-    }
-
-    let mut line = highlight_matches(text, needles[0], is_current);
-    for needle in &needles[1..] {
-        line = highlight_matches_in_line(line, needle, is_current);
-    }
-
-    if line
-        .spans
-        .iter()
-        .any(|span| span.style.bg == Some(THEME_SEARCH_BG))
-    {
-        line
-    } else {
-        let mut style = Style::default()
-            .fg(THEME_SEARCH_FG)
-            .bg(THEME_SEARCH_BG)
-            .add_modifier(Modifier::BOLD);
-        if is_current {
-            style = style.add_modifier(Modifier::UNDERLINED);
-        }
-        Line::from(Span::styled(text.to_string(), style))
-    }
-}
-
-fn highlight_matches_in_line(
-    line: Line<'static>,
-    pattern: &str,
-    is_current: bool,
-) -> Line<'static> {
-    let mut new_spans = Vec::new();
-    for span in line.spans {
-        if span.style.bg == Some(THEME_SEARCH_BG) {
-            new_spans.push(span);
-        } else {
-            let sub_line = highlight_matches(&span.content, pattern, is_current);
-            new_spans.extend(sub_line.spans);
-        }
-    }
-    Line::from(new_spans)
-}
-
-/// Highlight every case-insensitive occurrence of `pattern` inside `text`.
-fn highlight_matches(text: &str, pattern: &str, is_current: bool) -> Line<'static> {
-    let needle: Vec<char> = pattern.chars().collect();
-    let chars: Vec<char> = text.chars().collect();
-    let mut style = Style::default()
-        .fg(THEME_SEARCH_FG)
-        .bg(THEME_SEARCH_BG)
-        .add_modifier(Modifier::BOLD);
-    if is_current {
-        style = style.add_modifier(Modifier::UNDERLINED);
-    }
-
-    let mut spans = Vec::new();
-    let mut index = 0;
-    let mut plain_start = 0;
-    while index + needle.len() <= chars.len() {
-        if chars_eq_ignore_ascii_case(&chars[index..index + needle.len()], &needle) {
-            if plain_start < index {
-                spans.push(Span::styled(
-                    chars[plain_start..index].iter().collect::<String>(),
-                    Style::default().fg(THEME_TEXT),
-                ));
-            }
-            spans.push(Span::styled(
-                chars[index..index + needle.len()]
-                    .iter()
-                    .collect::<String>(),
-                style,
-            ));
-            index += needle.len();
-            plain_start = index;
-        } else {
-            index += 1;
-        }
-    }
-    if plain_start < chars.len() {
-        spans.push(Span::styled(
-            chars[plain_start..].iter().collect::<String>(),
-            Style::default().fg(THEME_TEXT),
-        ));
-    }
-    Line::from(spans)
-}
-
-fn chars_eq_ignore_ascii_case(left: &[char], right: &[char]) -> bool {
-    left.iter()
-        .zip(right)
-        .all(|(left, right)| left.eq_ignore_ascii_case(right))
-}
-
-pub(crate) fn group_text(
-    label: &str,
-    root_count: usize,
-    subagent_count: usize,
-    mode: &GroupMode,
-) -> Text<'static> {
-    let icon = match mode {
-        GroupMode::ByProject => "📂 ",
-        GroupMode::ByTime => "🕒 ",
-        GroupMode::ByTag => "🏷️ ",
-    };
-    let style = Style::default()
-        .fg(THEME_HIGHLIGHT)
-        .add_modifier(Modifier::BOLD);
-    Text::from(Line::from(vec![Span::styled(
-        format!("{icon}{label} ({root_count} main · {subagent_count} sub)"),
-        style,
-    )]))
-}
-
-pub fn session_node_text(
-    node: &crate::app::SessionTreeNode,
-    mode: &GroupMode,
-    is_child: bool,
-) -> String {
-    session_node_text_with_width_marked(node, mode, is_child, usize::MAX, false)
-}
-
-pub fn session_node_text_with_marking(
-    node: &crate::app::SessionTreeNode,
-    mode: &GroupMode,
-    is_child: bool,
-    is_marked: bool,
-) -> String {
-    session_node_text_with_width_marked(node, mode, is_child, usize::MAX, is_marked)
-}
-
-pub fn session_node_text_with_width(
-    node: &crate::app::SessionTreeNode,
-    mode: &GroupMode,
-    is_child: bool,
-    max_width: usize,
-) -> String {
-    session_node_text_with_width_marked(node, mode, is_child, max_width, false)
-}
-
-pub fn session_node_text_with_width_marked(
-    node: &crate::app::SessionTreeNode,
-    mode: &GroupMode,
-    is_child: bool,
-    max_width: usize,
-    is_marked: bool,
-) -> String {
-    let health_suffix = match node.file_health {
-        FileHealth::Healthy => "",
-        FileHealth::Warning => " [warning]",
-        FileHealth::Unreadable => " [unreadable]",
-    };
-    let detached_suffix = if node.is_detached { " [detached]" } else { "" };
-    let mark_prefix = if is_marked { "[✓] " } else { "" };
-    if is_child {
-        let full = if node.relation == SessionRelation::Fork {
-            // The relation glyph replaces the `⑂` Claude appends to branch titles.
-            let name = truncate_name(node.name.trim_end_matches('⑂').trim_end(), 38);
-            format!("{mark_prefix}↳ ⑂ {name}{detached_suffix}{health_suffix}")
-        } else {
-            let name = truncate_name(&node.name, 38);
-            let agent = node.agent_name.as_deref().unwrap_or("Subagent");
-            format!("{mark_prefix}↳ {agent} · {name}{detached_suffix}{health_suffix}")
-        };
-        if max_width < usize::MAX && display_width(&full) > max_width {
-            return truncate_summary(&full, max_width);
-        }
-        return full;
-    }
-
-    let child_suffix = if node.children.is_empty() {
-        String::new()
-    } else {
-        format!(" [{}]", session_descendant_count(node))
-    };
-
-    let star = if node.is_favorite { "★ " } else { "" };
-    let name = truncate_name(&node.name, 38);
-    let subagent_icon = if node
-        .children
-        .iter()
-        .any(|child| child.relation != SessionRelation::Fork)
-    {
-        "🤖 "
-    } else if !node.children.is_empty() {
-        "⑂ "
-    } else {
-        ""
-    };
-    let prefix = match mode {
-        GroupMode::ByTime | GroupMode::ByTag => format!(
-            "{mark_prefix}{star}{subagent_icon}[{}] {}{}{}{}",
-            node.cwd_tail, name, child_suffix, detached_suffix, health_suffix
-        ),
-        GroupMode::ByProject => format!(
-            "{mark_prefix}{star}{subagent_icon}[{}] {}{}{}{}",
-            short_time(&node.display_time),
-            name,
-            child_suffix,
-            detached_suffix,
-            health_suffix
-        ),
-    };
-
-    if node.tags.is_empty() {
-        if max_width < usize::MAX && display_width(&prefix) > max_width {
-            return truncate_summary(&prefix, max_width);
-        }
-        return prefix;
-    }
-
-    let tags_suffix = format!(
-        " {}",
-        node.tags
-            .iter()
-            .map(|t| format!("#{t}"))
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
-
-    let full = format!("{prefix}{tags_suffix}");
-    if max_width == usize::MAX || display_width(&full) <= max_width {
-        return full;
-    }
-
-    let prefix_width = display_width(&prefix);
-    if prefix_width >= max_width {
-        return truncate_summary(&prefix, max_width);
-    }
-
-    let available_for_tags = max_width.saturating_sub(prefix_width);
-    let mut current_tags = String::new();
-    for tag in &node.tags {
-        let badge = format!(" #{tag}");
-        if display_width(&current_tags) + display_width(&badge) <= available_for_tags {
-            current_tags.push_str(&badge);
-        } else {
-            let remaining = available_for_tags.saturating_sub(display_width(&current_tags));
-            if remaining >= 4 && current_tags.is_empty() {
-                let truncated = truncate_summary(&badge, remaining);
-                current_tags.push_str(&truncated);
-            }
-            break;
-        }
-    }
-
-    if current_tags.is_empty() {
-        prefix
-    } else {
-        format!("{prefix}{current_tags}")
-    }
-}
-
-fn session_descendant_count(node: &crate::app::SessionTreeNode) -> usize {
-    node.children
-        .iter()
-        .map(|child| 1 + session_descendant_count(child))
-        .sum()
 }
 
 fn short_time(display_time: &str) -> String {
@@ -1769,10 +1658,6 @@ fn short_time(display_time: &str) -> String {
     } else {
         format!("{short_date} {time}")
     }
-}
-
-fn truncate_name(name: &str, max_width: usize) -> String {
-    truncate_summary(name, max_width)
 }
 
 pub(crate) fn truncate_summary(summary: &str, max_width: usize) -> String {
@@ -1816,15 +1701,15 @@ fn tab_span(engine: SessionEngine, active_engine: SessionEngine) -> Span<'static
         Span::styled(
             label,
             Style::default()
-                .fg(THEME_BG)
-                .bg(THEME_HIGHLIGHT)
+                .fg(theme().on_accent)
+                .bg(theme().accent_bg)
                 .add_modifier(Modifier::BOLD),
         )
     } else {
         Span::styled(
             label,
             Style::default()
-                .fg(THEME_BORDER)
+                .fg(theme().fg_muted)
                 .add_modifier(Modifier::BOLD),
         )
     }
@@ -1843,11 +1728,11 @@ fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{GroupMode, SearchOverlayState, compute_layout};
+    use crate::app::{GroupMode, SearchOverlayState, SplitDirection, compute_layout};
+    use crate::catalog::FileHealth;
     use crate::catalog::{CatalogLoad, SessionCatalogReader, SessionListItem};
     use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::buffer::Buffer;
-    use ratatui::widgets::Widget;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::time::SystemTime;
@@ -1882,28 +1767,70 @@ mod tests {
     }
 
     #[test]
-    fn layout_body_switches_direction() {
-        let horizontal = layout_body(Rect::new(0, 0, 100, 30), SplitDirection::Horizontal, None);
-        assert!(horizontal[0].width < 100);
-        let vertical = layout_body(Rect::new(0, 0, 100, 30), SplitDirection::Vertical, None);
-        assert!(vertical[0].height < 30);
+    fn layout_adds_nav_column_only_on_wide_terminals() {
+        let narrow = compute_layout(SplitDirection::Horizontal, None, 139, 30);
+        assert!(narrow.nav_panel.is_none());
+        assert_eq!(narrow.list_panel.x, 0);
+        assert_eq!(
+            narrow.list_panel.width + narrow.detail_panel.width,
+            139
+        );
+
+        let wide = compute_layout(SplitDirection::Horizontal, None, 160, 30);
+        let nav = wide.nav_panel.expect("nav column on wide terminals");
+        assert_eq!(wide.list_panel.x, nav.width);
+        assert_eq!(nav.width + wide.list_panel.width + wide.detail_panel.width, 160);
+
+        let stacked = compute_layout(SplitDirection::Vertical, None, 160, 30);
+        assert!(stacked.nav_panel.is_some());
+        assert_eq!(stacked.detail_panel.x, stacked.list_panel.x);
+        assert!(stacked.list_panel.height < 30);
+    }
+
+    fn draw(app: &mut App, width: u16, height: u16) -> Buffer {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_row(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect()
     }
 
     #[test]
-    fn compute_layout_contract_matches_tui_expectation() {
-        let layout = compute_layout(SplitDirection::Horizontal, None, 100, 30);
-        assert!(layout.list_panel.width > 0);
-        assert!(layout.detail_panel.width > 0);
+    fn wide_terminal_renders_nav_table_and_search_field() {
+        let mut app = App::new(&StubCatalog);
+        let buffer = draw(&mut app, 160, 20);
+
+        let header = buffer_row(&buffer, 0);
+        assert!(header.contains("✻ Sessions"));
+        assert!(header.contains("/ Search title"));
+        assert!(!header.contains("OpenCode"), "engine tabs move to the nav column");
+
+        let screen: String = (0..20).map(|y| buffer_row(&buffer, y)).collect::<Vec<_>>().join("
+");
+        for label in ["ENGINE", "GROUP BY", "PROJECTS", "OpenCode", "SESSIONS · BY TIME", "TIME", "TITLE"] {
+            assert!(screen.contains(label), "missing {label}");
+        }
+        assert!(screen.contains("hello world"));
+
+        // The focused list pane draws its left rule in the accent color.
+        let list_x = compute_layout(SplitDirection::Horizontal, None, 160, 20).list_panel.x;
+        assert_eq!(buffer[(list_x, 3)].fg, theme().accent);
     }
 
     #[test]
-    fn focused_panel_highlight_is_visible_in_rendered_title() {
-        let area = Rect::new(0, 0, 30, 5);
-        let mut buffer = Buffer::empty(area);
-        Widget::render(panel_block("Sessions", true), area, &mut buffer);
-
-        let title: String = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
-        assert!(title.contains(" Sessions "));
+    fn narrow_terminal_falls_back_to_two_panes_with_engine_tabs() {
+        let mut app = App::new(&StubCatalog);
+        let buffer = draw(&mut app, 100, 20);
+        let header = buffer_row(&buffer, 0);
+        assert!(header.contains("OpenCode"));
+        let screen: String = (0..20).map(|y| buffer_row(&buffer, y)).collect::<Vec<_>>().join("
+");
+        assert!(!screen.contains("GROUP BY"));
+        assert!(screen.contains("SESSIONS · BY TIME"));
+        assert!(!screen.contains("TITLE"), "compact rows have no column header");
     }
 
     #[test]
@@ -1915,42 +1842,29 @@ mod tests {
         assert!(tabs.contains("OpenCode"));
         assert!(tabs.contains("Codex"));
         assert!(tabs.contains("Claude"));
-        assert_eq!(pi.spans[0].style.bg, Some(THEME_HIGHLIGHT));
+        assert_eq!(pi.spans[0].style.bg, Some(theme().accent_bg));
 
         app.active_engine = SessionEngine::Claude;
         let claude = render_header_line(&app, 130);
-        assert_eq!(claude.spans[6].style.bg, Some(THEME_HIGHLIGHT));
+        assert_eq!(claude.spans[6].style.bg, Some(theme().accent_bg));
     }
 
     #[test]
     fn render_session_tree_uses_group_mode_and_summary() {
         let mut app = App::new(&StubCatalog);
         app.group_mode = GroupMode::ByProject;
-        let items = build_session_tree_items(&app);
+        let layout = RowLayout::new(60, app.group_mode, RowOrder::Table);
+        let items = build_session_tree_items(&app, &layout, 60);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].identifier(), "group:workspace/demo");
         let leaf = items[0].child(0).expect("leaf child");
         assert_eq!(leaf.identifier(), "/tmp/one.jsonl");
-        let nodes = crate::app::build_grouped_session_nodes(&app.session_list, &app.group_mode);
-        let leaf_text = session_node_text(&nodes[0].children[0], &app.group_mode, false);
-        assert!(leaf_text.contains("[04-29 12:00]"));
-        assert!(leaf_text.contains("hello world"));
-    }
 
-    #[test]
-    fn group_node_style_has_bold_and_theme_color() {
-        let text = group_text("TestGroup", 5, 2, &GroupMode::ByProject);
-        let line = &text.lines[0];
-        let span = &line.spans[0];
-        assert!(
-            span.style.add_modifier.contains(Modifier::BOLD),
-            "group node should be bold"
-        );
-        assert_eq!(
-            span.style.fg,
-            Some(THEME_HIGHLIGHT),
-            "group node should use theme highlight color"
-        );
+        let nodes = crate::app::build_grouped_session_nodes(&app.session_list, &app.group_mode);
+        let line = rows::session_row(&nodes[0].children[0], 1, &layout, false, RowHighlight::default());
+        let text: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+        assert!(text.contains("04-29 12:00"));
+        assert!(text.contains("hello world"));
     }
 
     #[test]
@@ -1974,28 +1888,6 @@ mod tests {
             !first_line.contains(">>"),
             "highlight symbol should not produce '>>' prefix, got: {first_line}"
         );
-    }
-
-    #[test]
-    fn group_mode_switch_updates_icon_prefix() {
-        let project_text = group_text("demo", 3, 1, &GroupMode::ByProject);
-        let project_str = project_text.to_string();
-        assert!(
-            project_str.contains("📂"),
-            "project mode should use folder icon"
-        );
-
-        let time_text = group_text("2026-04-29", 2, 0, &GroupMode::ByTime);
-        let time_str = time_text.to_string();
-        assert!(time_str.contains("🕒"), "time mode should use clock icon");
-    }
-
-    #[test]
-    fn group_text_includes_label_and_count() {
-        let text = group_text("my-project", 7, 3, &GroupMode::ByProject);
-        let s = text.to_string();
-        assert!(s.contains("my-project"));
-        assert!(s.contains("7 main · 3 sub"));
     }
 
     #[test]
@@ -2026,13 +1918,19 @@ mod tests {
 
         let rendered = render_right_panel_text(&app).to_string();
 
-        assert!(rendered.contains("Group Summary"));
-        assert!(rendered.contains("Group: 2026-04-29"));
-        assert!(rendered.contains("Sessions: 1"));
-        assert!(rendered.contains("Main sessions: 1"));
-        assert!(rendered.contains("Subagents: 0"));
-        assert!(rendered.contains("Last Active: 2026-04-29 12:00"));
-        assert!(rendered.contains("Engine: Pi"));
+        for (label, value) in [
+            ("Group", "2026-04-29"),
+            ("Sessions", "1"),
+            ("Main sessions", "1"),
+            ("Subagents", "0"),
+            ("Last Active", "2026-04-29 12:00"),
+            ("Engine", "Pi"),
+        ] {
+            assert!(
+                rendered.contains(&format!("{label:<15}{value}")),
+                "missing {label}: {rendered}"
+            );
+        }
         assert!(!rendered.contains("Session: demo"));
     }
 
@@ -2073,40 +1971,6 @@ mod tests {
             text.len() <= 78,
             "status bar text is {} chars, must be <= 70",
             text.len()
-        );
-    }
-
-    #[test]
-    fn search_highlights_distinguish_current_and_other_matches() {
-        let ordinary = highlight_matches("Foo BAR bar", "bar", false);
-        assert_eq!(ordinary.to_string(), "Foo BAR bar");
-        assert_eq!(
-            ordinary
-                .spans
-                .iter()
-                .filter(|span| span.style.bg == Some(THEME_SEARCH_BG))
-                .count(),
-            2
-        );
-        assert!(ordinary.spans.iter().all(|span| {
-            span.style.bg != Some(THEME_SEARCH_BG)
-                || !span.style.add_modifier.contains(Modifier::UNDERLINED)
-        }));
-
-        let current = highlight_matches("alpha beta", "alpha", true);
-        let match_span = current
-            .spans
-            .iter()
-            .find(|span| span.style.bg == Some(THEME_SEARCH_BG))
-            .expect("highlighted match");
-        assert!(match_span.style.add_modifier.contains(Modifier::BOLD));
-        assert!(match_span.style.add_modifier.contains(Modifier::UNDERLINED));
-
-        let hidden_metadata_match = highlight_session_match("visible title", "session-id", false);
-        assert_eq!(hidden_metadata_match.spans.len(), 1);
-        assert_eq!(
-            hidden_metadata_match.spans[0].style.bg,
-            Some(THEME_SEARCH_BG)
         );
     }
 
@@ -2251,80 +2115,6 @@ mod tests {
         assert!(rendered.contains("j / k / Arrows    Navigate (j/k cycle)"));
         assert!(rendered.contains("J / K             Jump 5 rows"));
         assert!(rendered.contains("z                 Collapse / expand all"));
-    }
-
-    #[test]
-    fn render_session_node_text_favorite_and_tags() {
-        let mut node = crate::app::SessionTreeNode {
-            identifier: "node-1".to_string(),
-            session_index: 0,
-            session_id: "s1".to_string(),
-            name: "Fix bug in parser".to_string(),
-            display_time: "2026-04-16 12:00".to_string(),
-            cwd_tail: "my-repo".to_string(),
-            agent_name: None,
-            relation: Default::default(),
-            is_detached: false,
-            file_health: FileHealth::Healthy,
-            is_favorite: true,
-            tags: vec!["bug".to_string(), "urgent".to_string()],
-            children: Vec::new(),
-        };
-
-        // 1. Root main session with favorite and tags
-        let text = session_node_text(&node, &GroupMode::ByTime, false);
-        assert!(text.starts_with("★ "));
-        assert!(text.contains("#bug #urgent"));
-
-        // 2. Not favorite
-        node.is_favorite = false;
-        let text_no_fav = session_node_text(&node, &GroupMode::ByTime, false);
-        assert!(!text_no_fav.contains('★'));
-        assert!(text_no_fav.contains("#bug #urgent"));
-
-        // 3. Child subagent excludes star and tags
-        node.is_favorite = true;
-        let child_text = session_node_text(&node, &GroupMode::ByTime, true);
-        assert!(!child_text.contains('★'));
-        assert!(!child_text.contains("#bug"));
-        assert!(!child_text.contains("#urgent"));
-        assert!(child_text.starts_with("↳ Subagent ·"));
-    }
-
-    #[test]
-    fn render_session_node_text_narrow_screen_truncation() {
-        let node = crate::app::SessionTreeNode {
-            identifier: "node-1".to_string(),
-            session_index: 0,
-            session_id: "s1".to_string(),
-            name: "A somewhat longer session name for test".to_string(),
-            display_time: "2026-04-16 12:00".to_string(),
-            cwd_tail: "my-repo".to_string(),
-            agent_name: None,
-            relation: Default::default(),
-            is_detached: false,
-            file_health: FileHealth::Healthy,
-            is_favorite: true,
-            tags: vec![
-                "very-long-tag-name-one".to_string(),
-                "second-tag".to_string(),
-            ],
-            children: Vec::new(),
-        };
-
-        // Constrain width to 45 chars
-        let truncated = session_node_text_with_width(&node, &GroupMode::ByTime, false, 45);
-        assert!(display_width(&truncated) <= 45);
-        assert!(truncated.starts_with("★ "));
-    }
-
-    #[test]
-    fn group_text_renders_tag_icon_and_counts() {
-        let text = group_text("bug", 3, 5, &GroupMode::ByTag);
-        let s = text.to_string();
-        assert!(s.contains("🏷️"));
-        assert!(s.contains("bug"));
-        assert!(s.contains("3 main · 5 sub"));
     }
 
     #[test]
@@ -2548,7 +2338,7 @@ mod tests {
             .join("\n");
         let normalized = rendered.replace(' ', "");
 
-        assert!(rendered.contains("Dashboard: python-script"));
+        assert!(rendered.contains("DASHBOARD · python-script"));
         assert!(normalized.contains("项目路径"));
         assert!(rendered.contains("/home/ray/workspace/python-script"));
         assert!(normalized.contains("会话总数"));
@@ -2842,74 +2632,6 @@ mod tests {
         assert_eq!(truncate_summary("abc", 2), "ab");
         assert!(display_width(&truncate_summary("未分类", 2)) <= 2);
         assert!(display_width(&truncate_summary("🏷️标签", 2)) <= 2);
-    }
-
-    #[test]
-    fn group_text_uncategorized_roundtrip_selection_preserves_characters() {
-        use ratatui::widgets::StatefulWidget;
-        use tui_tree_widget::TreeState;
-
-        let initial_text = group_text("未分类", 1, 0, &GroupMode::ByTag);
-        let initial_string = initial_text.to_string();
-        assert!(initial_string.contains("🏷️ 未分类"));
-        assert!(initial_string.contains("未分类"));
-
-        let item = TreeItem::new_leaf("g:未分类".to_string(), initial_text);
-        let items = [item];
-        let tree = Tree::new(&items).unwrap().highlight_style(
-            Style::default()
-                .fg(THEME_TEXT)
-                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-        );
-
-        let area = Rect::new(0, 0, 40, 1);
-        let mut state = TreeState::default();
-
-        // 1. Initial render (unselected)
-        let mut buf1 = Buffer::empty(area);
-        StatefulWidget::render(tree.clone(), area, &mut buf1, &mut state);
-
-        // 2. Select and render (reversed highlight)
-        state.select(vec!["g:未分类".to_string()]);
-        let mut buf2 = Buffer::empty(area);
-        StatefulWidget::render(tree.clone(), area, &mut buf2, &mut state);
-
-        // 3. Deselect and render
-        state.select(Vec::<String>::new());
-        let mut buf3 = Buffer::empty(area);
-        StatefulWidget::render(tree, area, &mut buf3, &mut state);
-
-        // Re-generate text across lifecycle
-        let restored_text = group_text("未分类", 1, 0, &GroupMode::ByTag);
-        let restored_string = restored_text.to_string();
-        assert_eq!(initial_string, restored_string);
-        assert!(restored_string.contains("未分类"));
-    }
-
-    #[test]
-    fn favorite_star_rendered_completely_in_selected_state() {
-        let node = crate::app::SessionTreeNode {
-            identifier: "fav-sess".to_string(),
-            session_index: 0,
-            session_id: "fav-sess".to_string(),
-            name: "Favorited Session".to_string(),
-            display_time: "2026-04-29 12:00".to_string(),
-            cwd_tail: "demo".to_string(),
-            file_health: FileHealth::Healthy,
-            is_detached: false,
-            is_favorite: true,
-            tags: Vec::new(),
-            agent_name: None,
-            relation: Default::default(),
-            children: Vec::new(),
-        };
-
-        let line = render_styled_session_line(&node, "★ [demo] Favorited Session");
-        assert_eq!(line.spans.len(), 2);
-        assert_eq!(line.spans[0].content, "★ ");
-        assert_eq!(line.spans[0].style.fg, Some(Color::Rgb(249, 226, 175)));
-        assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(line.spans[1].content, "[demo] Favorited Session");
     }
 
     #[test]
@@ -3258,183 +2980,6 @@ mod tests {
     }
 
     #[test]
-    fn session_node_text_renders_subagent_icon_on_left() {
-        let child_node = crate::app::SessionTreeNode {
-            identifier: "child-1".to_string(),
-            session_index: 1,
-            session_id: "child-1".to_string(),
-            name: "Child Subagent".to_string(),
-            display_time: "2026-04-29 12:05".to_string(),
-            cwd_tail: "demo".to_string(),
-            file_health: FileHealth::Healthy,
-            is_detached: false,
-            is_favorite: false,
-            tags: Vec::new(),
-            agent_name: Some("Explore".to_string()),
-            relation: Default::default(),
-            children: Vec::new(),
-        };
-
-        let parent_node = crate::app::SessionTreeNode {
-            identifier: "parent-1".to_string(),
-            session_index: 0,
-            session_id: "parent-1".to_string(),
-            name: "Parent Session".to_string(),
-            display_time: "2026-04-29 12:00".to_string(),
-            cwd_tail: "demo".to_string(),
-            file_health: FileHealth::Healthy,
-            is_detached: false,
-            is_favorite: false,
-            tags: Vec::new(),
-            agent_name: None,
-            relation: Default::default(),
-            children: vec![child_node.clone()],
-        };
-
-        // Root session with subagents: has 🤖 on left and [1] on right
-        let parent_text = session_node_text(&parent_node, &GroupMode::ByTime, false);
-        assert!(parent_text.starts_with("🤖 [demo] Parent Session [1]"));
-
-        // Favorite parent: has ★ 🤖 on left
-        let mut fav_parent = parent_node.clone();
-        fav_parent.is_favorite = true;
-        let fav_parent_text = session_node_text(&fav_parent, &GroupMode::ByTime, false);
-        assert!(fav_parent_text.starts_with("★ 🤖 [demo] Parent Session [1]"));
-
-        // Root session without subagents: does NOT have 🤖
-        let solo_node = crate::app::SessionTreeNode {
-            identifier: "solo-1".to_string(),
-            session_index: 2,
-            session_id: "solo-1".to_string(),
-            name: "Solo Session".to_string(),
-            display_time: "2026-04-29 12:00".to_string(),
-            cwd_tail: "demo".to_string(),
-            file_health: FileHealth::Healthy,
-            is_detached: false,
-            is_favorite: false,
-            tags: Vec::new(),
-            agent_name: None,
-            relation: Default::default(),
-            children: Vec::new(),
-        };
-        let solo_text = session_node_text(&solo_node, &GroupMode::ByTime, false);
-        assert!(!solo_text.contains("🤖"));
-        assert!(solo_text.starts_with("[demo] Solo Session"));
-
-        // Child subagent session: renders with ↳ Agent ·, does NOT have 🤖
-        let child_text = session_node_text(&child_node, &GroupMode::ByTime, true);
-        assert!(!child_text.contains("🤖"));
-        assert!(child_text.starts_with("↳ Explore · Child Subagent"));
-
-        // Fork children use the branch glyph instead of an agent label, and a parent whose
-        // children are all forks is not presented as a subagent owner.
-        let mut fork_child = child_node.clone();
-        fork_child.relation = SessionRelation::Fork;
-        fork_child.agent_name = None;
-        fork_child.name = "Alarm push ⑂".to_string();
-        let fork_text = session_node_text(&fork_child, &GroupMode::ByTime, true);
-        assert!(fork_text.starts_with("↳ ⑂ Alarm push"), "{fork_text}");
-        assert!(!fork_text.ends_with('⑂'));
-        let mut fork_parent = parent_node.clone();
-        fork_parent.children = vec![fork_child];
-        let fork_parent_text = session_node_text(&fork_parent, &GroupMode::ByTime, false);
-        assert!(
-            fork_parent_text.starts_with("⑂ [demo] Parent Session [1]"),
-            "{fork_parent_text}"
-        );
-    }
-
-    #[test]
-    fn session_node_text_renders_marking_checkmark() {
-        let node = crate::app::SessionTreeNode {
-            identifier: "sess-marked".to_string(),
-            session_index: 0,
-            session_id: "sess-marked".to_string(),
-            name: "Session Title".to_string(),
-            display_time: "2026-04-29 12:00".to_string(),
-            cwd_tail: "demo".to_string(),
-            file_health: FileHealth::Healthy,
-            is_detached: false,
-            is_favorite: true,
-            tags: Vec::new(),
-            agent_name: None,
-            relation: Default::default(),
-            children: Vec::new(),
-        };
-
-        // Unmarked
-        let unmarked_text = session_node_text_with_marking(&node, &GroupMode::ByTime, false, false);
-        assert!(!unmarked_text.contains("[✓]"));
-        assert!(unmarked_text.starts_with("★ [demo] Session Title"));
-
-        // Marked
-        let marked_text = session_node_text_with_marking(&node, &GroupMode::ByTime, false, true);
-        assert!(marked_text.starts_with("[✓] ★ [demo] Session Title"));
-
-        // Marked child
-        let child_node = crate::app::SessionTreeNode {
-            identifier: "child-marked".to_string(),
-            session_index: 1,
-            session_id: "child-marked".to_string(),
-            name: "Child Subagent".to_string(),
-            display_time: "2026-04-29 12:00".to_string(),
-            cwd_tail: "demo".to_string(),
-            file_health: FileHealth::Healthy,
-            is_detached: false,
-            is_favorite: false,
-            tags: Vec::new(),
-            agent_name: Some("Planner".to_string()),
-            relation: Default::default(),
-            children: Vec::new(),
-        };
-        let marked_child_text = session_node_text_with_marking(&child_node, &GroupMode::ByTime, true, true);
-        assert!(marked_child_text.starts_with("[✓] ↳ Planner · Child Subagent"));
-    }
-
-    #[test]
-    fn render_styled_session_line_styles_subagent_and_marked() {
-        let node = crate::app::SessionTreeNode {
-            identifier: "test-node".to_string(),
-            session_index: 0,
-            session_id: "test-node".to_string(),
-            name: "Test Session".to_string(),
-            display_time: "2026-04-29 12:00".to_string(),
-            cwd_tail: "demo".to_string(),
-            file_health: FileHealth::Healthy,
-            is_detached: false,
-            is_favorite: true,
-            tags: vec!["tag1".to_string()],
-            agent_name: None,
-            relation: Default::default(),
-            children: Vec::new(),
-        };
-
-        let raw_line = "[✓] ★ 🤖 [demo] Test Session #tag1";
-        let line = render_styled_session_line(&node, raw_line);
-
-        // Span 0: [✓] (green bold)
-        assert_eq!(line.spans[0].content, "[✓] ");
-        assert_eq!(line.spans[0].style.fg, Some(Color::Green));
-        assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
-
-        // Span 1: ★ (gold bold)
-        assert_eq!(line.spans[1].content, "★ ");
-        assert_eq!(line.spans[1].style.fg, Some(Color::Rgb(249, 226, 175)));
-        assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
-
-        // Span 2: 🤖 (theme highlight bold)
-        assert_eq!(line.spans[2].content, "🤖 ");
-        assert_eq!(line.spans[2].style.fg, Some(THEME_HIGHLIGHT));
-        assert!(line.spans[2].style.add_modifier.contains(Modifier::BOLD));
-
-        // Remaining spans: body and tags
-        assert_eq!(line.spans[3].content, "[demo] Test Session");
-        assert_eq!(line.spans[3].style.fg, Some(THEME_TEXT));
-        assert_eq!(line.spans[4].content, " #tag1");
-        assert_eq!(line.spans[4].style.fg, Some(THEME_BORDER));
-    }
-
-    #[test]
     fn batch_delete_modal_renders_marked_count_and_buttons() {
         let mut app = App::new(&StubCatalog);
         app.delete_modal_state = Some(crate::app::DeleteModalState {
@@ -3532,5 +3077,23 @@ mod tests {
 
         assert!(rendered.contains("v                  Visual mode (range select)"));
         assert!(rendered.contains("Esc                Exit visual mode / cancel"));
+    }
+
+    #[test]
+    fn status_message_color_follows_message_severity() {
+        assert_eq!(status_message_color("Resumed session"), theme().fg_secondary);
+        assert_eq!(status_message_color("警告: 分组模式仅在内存生效"), theme().warning);
+        assert_eq!(status_message_color("hint | Error: boom"), theme().danger);
+        assert_eq!(status_message_color("⚡ 导出失败：x"), theme().danger);
+    }
+
+    #[test]
+    fn status_message_body_drops_the_legacy_key_reference() {
+        assert_eq!(status_message_body(default_status_message()), "");
+        assert_eq!(
+            status_message_body(&format!("{} | Error: boom", default_status_message())),
+            "Error: boom"
+        );
+        assert_eq!(status_message_body("警告: x"), "警告: x");
     }
 }
