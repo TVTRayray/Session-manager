@@ -1,0 +1,14 @@
+task_id: planner-mudqbuhd-1h0gu
+change_id: prd8-phase2-navigation-enhancements
+role: planner
+adapter: manual
+lease_id: lease-mudqbuhd-eq100
+inputs:
+  - proposal.md
+allowed_paths:
+  - .specflow/changes/prd8-phase2-navigation-enhancements/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

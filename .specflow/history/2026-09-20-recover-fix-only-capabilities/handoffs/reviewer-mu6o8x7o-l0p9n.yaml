@@ -1,0 +1,18 @@
+task_id: reviewer-mu6o8x7o-l0p9n
+change_id: recover-fix-only-capabilities
+role: reviewer
+target_spec: session-launch
+adapter: manual
+lease_id: lease-mu6o8x7o-qbknd
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/session-launch.md
+allowed_paths:
+  - .specflow/changes/recover-fix-only-capabilities/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

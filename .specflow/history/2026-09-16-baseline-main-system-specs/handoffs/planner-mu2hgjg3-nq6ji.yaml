@@ -1,0 +1,14 @@
+task_id: planner-mu2hgjg3-nq6ji
+change_id: baseline-main-system-specs
+role: planner
+adapter: manual
+lease_id: lease-mu2hgjg3-netjx
+inputs:
+  - proposal.md
+allowed_paths:
+  - .specflow/changes/baseline-main-system-specs/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

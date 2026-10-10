@@ -1,0 +1,48 @@
+change_id: repair-phase1-system-spec-preservation
+state: archived
+created_at: 2026-09-20T07:42:58.976Z
+updated_at: 2026-09-20T07:53:53.589Z
+specs:
+  - id: tui-interaction
+    title: Restore baseline scenarios and preserve phase1 additions for TUI
+      navigation and grouping
+    state: qa_passed
+    depends_on: []
+    qa_attempts: 0
+    qa_report: reviews/reviewer-mu9ip96i-bjuge.md
+leases: []
+history:
+  - at: 2026-09-20T07:42:58.976Z
+    event: change_created
+    detail: No PRD supplied
+  - at: 2026-09-20T07:43:04.405Z
+    event: task_dispatched
+    detail: planner:planner-mu9ieh90-2jip5:route=planner
+  - at: 2026-09-20T07:47:33.326Z
+    event: plan_submitted
+  - at: 2026-09-20T07:49:21.009Z
+    event: spec_ready
+    detail: tui-interaction
+  - at: 2026-09-20T07:49:21.009Z
+    event: plan_approved
+  - at: 2026-09-20T07:49:31.537Z
+    event: task_dispatched
+    detail: implementer:implementer-mu9imryo-0w88l:tui-interaction:route=implementer
+  - at: 2026-09-20T07:51:24.080Z
+    event: implementation_completed
+    detail: tui-interaction
+  - at: 2026-09-20T07:51:27.162Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mu9ip96i-bjuge:tui-interaction:route=reviewer
+  - at: 2026-09-20T07:53:40.628Z
+    event: qa_passed
+    detail: tui-interaction
+  - at: 2026-09-20T07:53:40.628Z
+    event: archive_ready
+  - at: 2026-09-20T07:53:53.589Z
+    event: archive_completed
+    detail: Merged 1 Delta Spec file(s).
+labels:
+  - correction
+  - audit
+  - prd7-phase1

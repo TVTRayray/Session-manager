@@ -1,0 +1,33 @@
+task_id: reviewer-muax0brt-yp52c
+lease_id: lease-muax0brt-cm32v
+outcome: completed
+verdict: repair
+summary: "TUI interaction implementation (export, search overlay, project dashboard, keymap) largely compiles and passes unit tests, but fails canonical delta spec scenarios and UX design contracts on two high-severity issues: (1) Cross-engine search jump and dashboard jump drop the DetailRequest in apply_catalog_result, causing the detail panel to permanently stall at Loading; (2) Search overlay results omit required project name and relative timestamp fields. Additionally, recent_sessions in Project Dashboard lacks engine identity, causing wrong-engine jumps on duplicate session IDs across engines."
+evidence:
+  changed_files:
+    - src/app.rs
+    - src/tui.rs
+    - .specflow/changes/efficiency-export-search-dashboard/reviews/reviewer-muax0brt-yp52c.md
+  test_results:
+    - command: "cargo fmt --check"
+      result: "passed"
+    - command: "cargo check --all-targets"
+      result: "passed"
+    - command: "cargo test --lib app::tests"
+      result: "95 passed, 0 failed"
+    - command: "cargo test --lib tui::tests"
+      result: "34 passed, 0 failed"
+    - command: "cargo test --lib search::tests"
+      result: "13 passed, 0 failed"
+    - command: "cargo test --lib state::tests"
+      result: "16 passed, 0 failed"
+    - command: "cargo test"
+      result: "258 passed (251 unit tests + 7 integration tests), 0 failed"
+    - command: "git diff --check"
+      result: "passed"
+unresolved_issues:
+  - "Cross-engine jump in apply_catalog_result drops the DetailRequest return value, leaving the right panel permanently stuck in Loading state."
+  - "Search overlay result cards in src/tui.rs omit project name and relative timestamp required by delta spec scenario."
+  - "Dashboard recent_sessions lacks engine identity, causing cross-engine jumps to misroute when identical session IDs exist in multiple engines."
+  - "Search query error handling silently swallows StateError via unwrap_or_default, disguising database failures as empty search results."
+requested_transition: repair

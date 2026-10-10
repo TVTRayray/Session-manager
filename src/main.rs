@@ -36,13 +36,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let resume_executor = EngineAwareResumeExecutor::new();
     let new_session_executor = EngineAwareNewSessionExecutor::new();
     let display_config = config::load_config();
+    sessions_manager::theme::init(config::load_theme_name());
     let (catalog_request_tx, catalog_result_rx) = spawn_catalog_loader(catalog_loader);
     let (detail_request_tx, detail_result_rx) =
         spawn_detail_loader(JsonlDetailLoader::from_home_path(home_dir, display_config));
 
-    if let Some(request) = app.initial_detail_request() {
-        let _ = detail_request_tx.send(request);
-    }
+    let _ = catalog_request_tx.send(app.initial_catalog_request());
 
     let mut terminal_mode = TerminalModeGuard::activate(CrosstermTerminalOps)?;
     let mut terminal = Some(create_terminal()?);
@@ -89,6 +88,19 @@ fn run_app(
         app.set_detail_viewport_height(size.height.saturating_sub(3) as usize);
         app.on_tick();
         drain_catalog_results(app, &catalog_result_rx);
+        while let Some(action) = app.take_pending_action() {
+            dispatch_action(
+                terminal,
+                terminal_mode,
+                app,
+                action,
+                &catalog_request_tx,
+                &detail_request_tx,
+                delete_executor,
+                resume_executor,
+                new_session_executor,
+            )?;
+        }
         drain_detail_results(app, &detail_result_rx);
         if app.consume_full_redraw() {
             active_terminal(terminal)?.clear()?;

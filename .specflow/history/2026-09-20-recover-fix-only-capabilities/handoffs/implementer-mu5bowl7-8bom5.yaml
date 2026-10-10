@@ -1,0 +1,26 @@
+task_id: implementer-mu5bowl7-8bom5
+change_id: recover-fix-only-capabilities
+role: implementer
+target_spec: session-catalog
+adapter: manual
+lease_id: lease-mu5bowl8-p2nup
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/session-catalog.md
+allowed_paths:
+  - Cargo.toml
+  - Cargo.lock
+  - src/catalog.rs
+  - src/app.rs
+  - src/delete.rs
+  - src/detail.rs
+  - src/resume.rs
+  - src/tui.rs
+  - tests/**
+  - .specflow/changes/recover-fix-only-capabilities/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden

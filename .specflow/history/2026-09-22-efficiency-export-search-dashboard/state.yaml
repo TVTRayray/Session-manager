@@ -1,0 +1,154 @@
+change_id: efficiency-export-search-dashboard
+state: archived
+created_at: 2026-09-20T08:01:23.441Z
+updated_at: 2026-09-22T02:12:14.986Z
+specs:
+  - id: session-export
+    title: Markdown single session and group export, secure path containment, and
+      error aggregation
+    state: qa_passed
+    depends_on: []
+    qa_attempts: 1
+    qa_report: reviews/reviewer-muauscxb-t43mt.md
+  - id: persisted-state
+    title: Schema v2 migration, FTS5 virtual table, index metadata, and worker
+      connection factory
+    state: qa_passed
+    depends_on: []
+    qa_attempts: 0
+    qa_report: reviews/reviewer-muav8div-k1ne2.md
+  - id: content-search
+    title: Asynchronous background indexing, full-text FTS5 queries, and block-level
+      jump navigation
+    state: qa_passed
+    depends_on:
+      - persisted-state
+    qa_attempts: 0
+    qa_report: reviews/reviewer-muavusoe-u9z4e.md
+  - id: tui-interaction
+    title: Export shortcut, full-text search overlay, project dashboard, and modal
+      safeguards
+    state: qa_passed
+    depends_on:
+      - session-export
+      - content-search
+    qa_attempts: 1
+    qa_report: reviews/reviewer-muc02ja9-keci4.md
+leases: []
+history:
+  - at: 2026-09-20T08:01:23.441Z
+    event: change_created
+    detail: "PRDs: docs/prd-7.md"
+  - at: 2026-09-20T08:01:28.149Z
+    event: task_dispatched
+    detail: planner:planner-mu9j24wl-l8cat:route=planner
+  - at: 2026-09-20T08:09:18.061Z
+    event: plan_submitted
+  - at: 2026-09-20T08:19:04.372Z
+    event: spec_ready
+    detail: session-export
+  - at: 2026-09-20T08:19:04.372Z
+    event: plan_approved
+  - at: 2026-09-21T05:53:23.002Z
+    event: task_dispatched
+    detail: implementer:implementer-muatx9o7-lpr0i:session-export:route=implementer
+  - at: 2026-09-21T06:00:00.785Z
+    event: implementation_completed
+    detail: session-export
+  - at: 2026-09-21T06:00:08.546Z
+    event: task_dispatched
+    detail: reviewer:reviewer-muau5yle-qnpq8:session-export:route=reviewer
+  - at: 2026-09-21T06:03:19.922Z
+    event: decision_required
+    detail: session-export:unclassified
+  - at: 2026-09-21T06:05:43.570Z
+    event: spec_ready
+    detail: persisted-state
+  - at: 2026-09-21T06:05:43.571Z
+    event: human_resolution
+    detail: "ready: User approved repair for session-export QA findings (config
+      wiring, genuine partial failure, collision handling, C0 escaping, trailing
+      spaces, atomic doc fix)"
+  - at: 2026-09-21T06:06:07.492Z
+    event: task_dispatched
+    detail: implementer:implementer-muaudnk4-2dcfm:session-export:route=implementer
+  - at: 2026-09-21T06:16:25.376Z
+    event: implementation_completed
+    detail: session-export
+  - at: 2026-09-21T06:17:33.552Z
+    event: task_dispatched
+    detail: reviewer:reviewer-muauscxb-t43mt:session-export:route=reviewer
+  - at: 2026-09-21T06:20:25.126Z
+    event: qa_passed
+    detail: session-export
+  - at: 2026-09-21T06:20:25.126Z
+    event: spec_ready
+    detail: persisted-state
+  - at: 2026-09-21T06:20:25.145Z
+    event: task_dispatched
+    detail: implementer:implementer-muauw1bt-pqqyi:persisted-state:route=implementer
+  - at: 2026-09-21T06:29:51.544Z
+    event: implementation_completed
+    detail: persisted-state
+  - at: 2026-09-21T06:30:00.823Z
+    event: task_dispatched
+    detail: reviewer:reviewer-muav8div-k1ne2:persisted-state:route=reviewer
+  - at: 2026-09-21T06:33:21.025Z
+    event: qa_passed
+    detail: persisted-state
+  - at: 2026-09-21T06:33:21.025Z
+    event: spec_ready
+    detail: content-search
+  - at: 2026-09-21T06:33:21.046Z
+    event: task_dispatched
+    detail: implementer:implementer-muavco0m-9xpjb:content-search:route=implementer
+  - at: 2026-09-21T06:47:18.376Z
+    event: implementation_completed
+    detail: content-search
+  - at: 2026-09-21T06:47:26.894Z
+    event: task_dispatched
+    detail: reviewer:reviewer-muavusoe-u9z4e:content-search:route=reviewer
+  - at: 2026-09-21T06:52:26.544Z
+    event: qa_passed
+    detail: content-search
+  - at: 2026-09-21T06:52:26.544Z
+    event: spec_ready
+    detail: tui-interaction
+  - at: 2026-09-21T06:52:26.566Z
+    event: task_dispatched
+    detail: implementer:implementer-muaw17wm-5pmlt:tui-interaction:route=implementer
+  - at: 2026-09-21T07:19:33.996Z
+    event: implementation_completed
+    detail: tui-interaction
+  - at: 2026-09-21T07:19:44.538Z
+    event: task_dispatched
+    detail: reviewer:reviewer-muax0brt-yp52c:tui-interaction:route=reviewer
+  - at: 2026-09-22T01:09:43.882Z
+    event: lease_expired
+    detail: lease-muax0brt-cm32v:reviewer-muax0brt-yp52c
+  - at: 2026-09-22T01:14:14.449Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mubze52p-imzgw:tui-interaction:route=reviewer
+  - at: 2026-09-22T01:17:52.982Z
+    event: repair_dispatched
+    detail: tui-interaction:attempt-1
+  - at: 2026-09-22T01:19:31.186Z
+    event: task_dispatched
+    detail: implementer:implementer-mubzkxgy-hqhoi:tui-interaction:route=implementer
+  - at: 2026-09-22T01:31:26.019Z
+    event: implementation_completed
+    detail: tui-interaction
+  - at: 2026-09-22T01:33:12.609Z
+    event: task_dispatched
+    detail: reviewer:reviewer-muc02ja9-keci4:tui-interaction:route=reviewer
+  - at: 2026-09-22T01:37:22.492Z
+    event: qa_passed
+    detail: tui-interaction
+  - at: 2026-09-22T01:37:22.492Z
+    event: archive_ready
+  - at: 2026-09-22T02:12:14.986Z
+    event: archive_completed
+    detail: Merged 4 Delta Spec file(s).
+labels:
+  - prd7
+  - phase2

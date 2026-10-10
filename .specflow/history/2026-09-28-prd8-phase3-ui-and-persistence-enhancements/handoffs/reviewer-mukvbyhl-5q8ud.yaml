@@ -1,0 +1,18 @@
+task_id: reviewer-mukvbyhl-5q8ud
+change_id: prd8-phase3-ui-and-persistence-enhancements
+role: reviewer
+target_spec: persisted-state
+adapter: manual
+lease_id: lease-mukvbyhl-982xd
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/persisted-state.md
+allowed_paths:
+  - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

@@ -1,0 +1,16 @@
+task_id: planner-mukkgz3l-nk5lt
+lease_id: lease-mukkgz3l-xy25e
+outcome: completed
+summary: "Finalized precise SpecFlow planning revision for PRD-8 Phase 3 (UI and persistence enhancements) eliminating all contradictions: 1) Corrected engine tab click semantics in tasks.md and design.md to align with PRD REQ-6.3 and unit test test_header_mouse_click_empty_catalog: clicking tabs for engines with empty catalogs or errors still switches engine and issues a CatalogRequest identical to keyboard Tab navigation (only separators, collision zones, unrendered areas, or already-active tabs are ignored). 2) In design.md and ux-design.md, removed fictitious token THEME_MUTED in favor of existing THEME_BORDER, and replaced external UnicodeWidthStr references with reusing src/tui.rs existing display_width / to_char_clusters without new dependencies. 3) In ux-design.md, eliminated the arbitrary 'default 88 columns' mention, establishing purely dynamic width calculation (left_w + min_gap + right_w) and boundary test planning (just-fitting, just-colliding, and ultra-narrow). 4) In tasks.md, verified full command verification suite (cargo fmt --check, cargo check --all-targets, cargo test --lib app::tests, cargo test --lib tui::tests, cargo test, git diff --check). Preserved all 21 canonical scenarios across modified requirements, without modifying business code, system specs, PRD, or config/state."
+evidence:
+  changed_files:
+    - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/proposal.md
+    - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/ux-design.md
+    - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/design.md
+    - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/tasks.md
+    - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/spec-plan.yaml
+    - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/specs/persisted-state.md
+    - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/specs/tui-interaction.md
+    - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/handoffs/planner-mukkgz3l-nk5lt.result.yaml
+unresolved_issues: []
+requested_transition: awaiting_plan_approval

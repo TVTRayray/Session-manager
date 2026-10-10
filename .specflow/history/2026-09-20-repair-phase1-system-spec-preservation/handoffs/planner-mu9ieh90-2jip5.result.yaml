@@ -1,0 +1,14 @@
+task_id: planner-mu9ieh90-2jip5
+lease_id: lease-mu9ieh90-s3jii
+outcome: completed
+summary: "Completed specification audit and lossless scenario union planning for tui-interaction. Restored all baseline scenarios and preserved all Phase 1 additions across Navigate engines and session trees (7 scenarios) and Support project and time grouping (6 scenarios) without any code modifications."
+evidence:
+  changed_files:
+    - .specflow/changes/repair-phase1-system-spec-preservation/proposal.md
+    - .specflow/changes/repair-phase1-system-spec-preservation/spec-plan.yaml
+    - .specflow/changes/repair-phase1-system-spec-preservation/specs/tui-interaction.md
+    - .specflow/changes/repair-phase1-system-spec-preservation/tasks.md
+    - .specflow/changes/repair-phase1-system-spec-preservation/state.yaml
+    - .specflow/changes/repair-phase1-system-spec-preservation/handoffs/planner-mu9ieh90-2jip5.result.yaml
+unresolved_issues: []
+requested_transition: awaiting_plan_approval

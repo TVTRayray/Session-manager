@@ -1,0 +1,18 @@
+task_id: reviewer-mu98naqg-o9fo6
+change_id: efficiency-state-and-tags
+role: reviewer
+target_spec: tui-interaction
+adapter: manual
+lease_id: lease-mu98naqg-2y7jk
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/tui-interaction.md
+allowed_paths:
+  - .specflow/changes/efficiency-state-and-tags/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

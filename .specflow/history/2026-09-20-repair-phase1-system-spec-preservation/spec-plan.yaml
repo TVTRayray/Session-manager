@@ -1,0 +1,5 @@
+specs:
+  - id: tui-interaction
+    title: Restore baseline scenarios and preserve phase1 additions for TUI navigation and grouping
+    depends_on: []
+    delta_file: specs/tui-interaction.md

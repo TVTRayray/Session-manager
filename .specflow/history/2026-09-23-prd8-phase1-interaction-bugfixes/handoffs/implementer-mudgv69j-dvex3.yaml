@@ -1,0 +1,19 @@
+task_id: implementer-mudgv69j-dvex3
+change_id: prd8-phase1-interaction-bugfixes
+role: implementer
+target_spec: session-catalog
+adapter: manual
+lease_id: lease-mudgv69j-o76c3
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/session-catalog.md
+allowed_paths:
+  - src/**
+  - tests/**
+  - .specflow/changes/prd8-phase1-interaction-bugfixes/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden

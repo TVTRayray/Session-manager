@@ -1,0 +1,19 @@
+task_id: implementer-mu2huh01-m9m27
+change_id: baseline-main-system-specs
+role: implementer
+target_spec: session-catalog
+adapter: manual
+lease_id: lease-mu2huh01-9b3rg
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/session-catalog.md
+allowed_paths:
+  - src/**
+  - tests/**
+  - .specflow/changes/baseline-main-system-specs/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden

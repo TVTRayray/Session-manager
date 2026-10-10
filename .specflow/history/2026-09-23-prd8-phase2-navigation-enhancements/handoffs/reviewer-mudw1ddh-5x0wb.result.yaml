@@ -1,0 +1,7 @@
+task_id: reviewer-mudw1ddh-5x0wb
+lease_id: lease-mudw1ddh-6jws7
+outcome: completed
+verdict: repair
+category: regression
+qa_report: .specflow/changes/prd8-phase2-navigation-enhancements/reviews/reviewer-mudw1ddh-5x0wb.md
+summary: "j/k 回绕复用了方向键 move_selection，令 Up/Down 在边界也回绕，改变既有 clamp 行为；应只对 j/k 循环并添加方向键回归测试。前次看板 J/K/z 泄漏已修复；全部自动检查通过，未做人工 TUI 验收。"

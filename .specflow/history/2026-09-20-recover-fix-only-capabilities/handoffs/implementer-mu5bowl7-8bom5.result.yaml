@@ -1,0 +1,18 @@
+task_id: implementer-mu5bowl7-8bom5
+lease_id: lease-mu5bowl8-p2nup
+outcome: needs_decision
+summary: >-
+  permission_insufficient: 新增 SessionEngine::Pi/OpenCode 与 SessionListItem 字段后，
+  需要对未授权路径 src/bin/shortcut_probe.rs 进行 compile compatibility；该路径仅用于
+  compile compatibility。
+evidence:
+  changed_files:
+    - Cargo.toml
+    - src/catalog.rs
+    - .specflow/changes/recover-fix-only-capabilities/handoffs/implementer-mu5bowl7-8bom5.result.yaml
+test_results:
+  - cargo fmt: passed
+  - 其他测试: 未运行
+unresolved_issues:
+  - 需要获得 src/bin/shortcut_probe.rs 路径授权，以完成 compile compatibility。
+requested_transition: reviewing

@@ -1,0 +1,18 @@
+task_id: reviewer-mu97xbx9-zsblb
+change_id: efficiency-state-and-tags
+role: reviewer
+target_spec: persisted-state
+adapter: manual
+lease_id: lease-mu97xbx9-2drz0
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/persisted-state.md
+allowed_paths:
+  - .specflow/changes/efficiency-state-and-tags/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

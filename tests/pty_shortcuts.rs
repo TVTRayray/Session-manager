@@ -12,6 +12,8 @@ where
     K: AsRef<OsStr>,
     V: AsRef<OsStr>,
 {
+    let state_dir = tempfile::tempdir().expect("probe state tempdir");
+    let state_db = state_dir.path().join("state.db");
     let probe = env!("CARGO_BIN_EXE_shortcut_probe");
     let mut command = Command::new("/usr/bin/script");
     command
@@ -22,6 +24,8 @@ where
     for (key, value) in envs {
         command.env(key, value);
     }
+    // Override inherited user state (and any caller-provided state path) per probe.
+    command.env("SESSION_MANAGER_STATE_DB", &state_db);
     let mut child = command
         .spawn()
         .unwrap_or_else(|err| panic!("failed to spawn PTY probe: {err}"));
@@ -52,6 +56,33 @@ where
 
     String::from_utf8(output.stdout)
         .unwrap_or_else(|err| panic!("probe stdout is not valid UTF-8: {err}"))
+}
+
+#[test]
+fn pty_probe_ignores_parent_project_grouping() {
+    let parent_dir = tempfile::tempdir().expect("parent state tempdir");
+    let parent_db = parent_dir.path().join("state.db");
+    let parent_store = sessions_manager::state::StateStore::open_at(&parent_db);
+    parent_store.set_setting("group_by", "project").unwrap();
+    assert_eq!(
+        parent_store.get_setting("group_by").unwrap().as_deref(),
+        Some("project")
+    );
+
+    let transcript = run_probe_with_env(
+        &[b"j", b"q"],
+        &[("SESSION_MANAGER_STATE_DB", parent_db.as_os_str())],
+    );
+    assert!(
+        transcript.contains(
+            "step=1 event=key:char(j) mods=KeyModifiers(0x0) action=LoadDetail(offset=tail)"
+        ),
+        "parent project grouping influenced fresh ByTime probe:\n{transcript}"
+    );
+    assert_eq!(
+        parent_store.get_setting("group_by").unwrap().as_deref(),
+        Some("project")
+    );
 }
 
 #[test]
@@ -101,13 +132,13 @@ fn pty_probe_covers_text_input_enter_and_mouse_focus() {
     let transcript = run_probe(&[b"j", b"\x1b[13u", b"\x1b[<0;70;10M", b"q"]);
     assert!(
         transcript.contains(
-            "step=1 event=key:char(j) mods=KeyModifiers(0x0) action=LoadDetail(offset=0)"
+            "step=1 event=key:char(j) mods=KeyModifiers(0x0) action=LoadDetail(offset=tail)"
         ),
         "unexpected transcript:\n{transcript}"
     );
     assert!(
         transcript.contains(
-            "step=2 event=key:Enter mods=KeyModifiers(0x0) action=Resume(engine=Codex,session_id=probe,cwd=/workspace/probe)"
+            "step=2 event=key:Enter mods=KeyModifiers(0x0) action=Resume(engine=Pi,session_id=probe,cwd=/workspace/probe)"
         ),
         "unexpected transcript:\n{transcript}"
     );
@@ -171,26 +202,53 @@ fn pty_probe_logs_resize_boundaries_and_trace_file_output() {
 }
 
 #[test]
-fn pty_probe_covers_claude_tab_mouse_select_and_enter_resume() {
-    let transcript = run_probe(&[b"\t", b"\x1b[<0;3;4M", b"\x1b[13u", b"q"]);
+fn pty_probe_covers_four_engine_cycle_and_claude_resume() {
+    let transcript = run_probe(&[b"\t", b"\t", b"\t", b"\x1b[<0;3;5M", b"\x1b[13u", b"q"]);
+    for (step, engine) in [(1, "OpenCode"), (2, "Codex"), (3, "Claude")] {
+        assert!(
+            transcript.contains(&format!(
+                "step={step} event=key:Tab mods=KeyModifiers(0x0) action=LoadCatalog(engine={engine},request_id={step})"
+            )),
+            "unexpected transcript:\n{transcript}"
+        );
+    }
     assert!(
-        transcript.contains(
-            "step=1 event=key:Tab mods=KeyModifiers(0x0) action=LoadCatalog(engine=Claude,request_id=1)"
-        ),
-        "unexpected transcript:\n{transcript}"
-    );
-    assert!(
-        transcript.contains("step=2 event=mouse:Down(Left)@2,3 action=LoadDetail(offset=0)"),
-        "unexpected transcript:\n{transcript}"
-    );
-    assert!(
-        transcript.contains("step=2 event=mouse:Down(Left)@2,3 action=LoadDetail(offset=0) split=Horizontal focus=List"),
+        transcript.contains("step=4 event=mouse:Down(Left)@2,4 action=LoadDetail(offset=tail) split=Horizontal focus=List"),
         "unexpected transcript:\n{transcript}"
     );
     assert!(
         transcript.contains(
-            "step=3 event=key:Enter mods=KeyModifiers(0x0) action=Resume(engine=Claude,session_id=probe-claude,cwd=/workspace/probe-claude)"
+            "step=5 event=key:Enter mods=KeyModifiers(0x0) action=Resume(engine=Claude,session_id=probe-claude,cwd=/workspace/probe-claude)"
         ),
         "unexpected transcript:\n{transcript}"
     );
+}
+
+#[test]
+fn pty_probe_covers_live_search_commit_and_match_navigation() {
+    let transcript = run_probe(&[b"/", b"inspect", b"\x1b[13u", b"n", b"N", b"q"]);
+    assert!(transcript.contains("step=1 event=key:char(/) mods=KeyModifiers(0x0) action=None"));
+    assert!(transcript.contains("search=Input search_input=\"\""));
+    assert!(transcript.contains("search=Input search_input=\"inspect\" search_matches=1"));
+    assert!(
+        transcript.contains("event=key:Enter mods=KeyModifiers(0x0) action=LoadDetail(offset=tail)")
+    );
+    assert!(
+        transcript.contains("event=key:char(n) mods=KeyModifiers(0x0) action=LoadDetail(offset=tail)")
+    );
+    assert!(
+        transcript
+            .contains("event=key:char(N) mods=KeyModifiers(SHIFT) action=LoadDetail(offset=tail)")
+    );
+}
+
+#[test]
+fn pty_probe_reports_search_without_history() {
+    let transcript = run_probe(&[b"n", b"q"]);
+    let first = transcript
+        .lines()
+        .find(|line| line.contains("step=1 "))
+        .expect("step 1");
+    assert!(first.contains("search=Idle"));
+    assert!(first.contains("status_error=true"));
 }

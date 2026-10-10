@@ -1,0 +1,27 @@
+task_id: reviewer-mu3dpq1u-s30a9
+lease_id: lease-mu3dpq1u-zo5g3
+outcome: completed
+verdict: repair
+summary: >-
+  session-detail 的显示配置默认契约与 main@eaee62d 不一致：有效 TOML 缺失
+  [display] 或 visible_blocks 时会显示 User、Assistant、Thinking；只有配置文件
+  不存在/不可读或 TOML 无效时才回退为仅 User、Assistant。规格应按 main 修正，
+  不修改业务代码。
+evidence:
+  - "src/config.rs:58-85: serde 缺失字段默认调用 default_visible_blocks()，包含 user、assistant、thinking"
+  - "src/config.rs:27-33,135-143: invalid TOML 直接返回 DisplayConfig::default()，仅包含 user、assistant"
+  - "cargo test detail::tests: PASS（20 passed, 0 failed）"
+  - "cargo test config::tests: PASS（9 passed, 0 failed）"
+  - "src/config.rs 与 src/detail.rs 相对 eaee62d 无差异"
+unresolved_issues:
+  - requirement: Apply transcript display configuration with safe defaults
+    scenario: Default transcript view
+    category: implementation_defect
+    issue: >-
+      规格把缺失配置统一描述为仅 User/Assistant，但有效 TOML 缺失 [display]
+      或 visible_blocks 的实际默认还包含 Thinking。
+    minimal_repair: >-
+      在规格中分别写明：不存在/不可读配置或 invalid TOML => User+Assistant；
+      valid TOML 缺失 [display] 或 visible_blocks => User+Assistant+Thinking；
+      显式空列表仍隐藏所有 transcript blocks，未知名称仍忽略。
+requested_transition: repair

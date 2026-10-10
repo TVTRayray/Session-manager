@@ -1,0 +1,18 @@
+task_id: reviewer-mu9ip96i-bjuge
+change_id: repair-phase1-system-spec-preservation
+role: reviewer
+target_spec: tui-interaction
+adapter: manual
+lease_id: lease-mu9ip96i-o3cz5
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/tui-interaction.md
+allowed_paths:
+  - .specflow/changes/repair-phase1-system-spec-preservation/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

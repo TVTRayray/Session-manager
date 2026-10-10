@@ -1,0 +1,91 @@
+task_id: implementer-mu9imryo-0w88l
+lease_id: lease-mu9imryo-no5vr
+outcome: completed
+summary: "Completed comprehensive audit and verification of Delta Spec (specs/tui-interaction.md) for repair-phase1-system-spec-preservation. Proved that all 13 scenarios across 'Navigate engines and session trees' (7 scenarios) and 'Support project and time grouping' (6 scenarios) form a 100% lossless union of baseline scenarios (b851d75^:.specflow/system-specs/tui-interaction.md) and Phase 1 additions (.specflow/history/2026-09-20-efficiency-state-and-tags/specs/tui-interaction.md). Ran full test suite regression with all 220 tests passing without any code changes."
+evidence:
+  changed_files:
+    - .specflow/changes/repair-phase1-system-spec-preservation/tasks.md
+    - .specflow/changes/repair-phase1-system-spec-preservation/handoffs/implementer-mu9imryo-0w88l.result.yaml
+  test_results:
+    - command: "cargo fmt --check"
+      status: passed
+      details: "No formatting diffs found across codebase"
+    - command: "cargo check --all-targets"
+      status: passed
+      details: "All targets compile successfully with zero warnings"
+    - command: "cargo test"
+      status: passed
+      details: "All 220 tests passed (210 unit tests in lib, 3 cli integration tests, 7 pty_shortcuts tests, 0 failed)"
+    - command: "git diff --check"
+      status: passed
+      details: "No trailing whitespace or conflict markers"
+  scenario_union_verification:
+    requirement_1:
+      name: "Navigate engines and session trees"
+      total_scenarios: 7
+      scenarios:
+        - name: "Scenario: Cycle through engines"
+          origin: "Baseline b851d75^ (Scenario: Cycle through four engines)"
+          status: preserved
+          notes: "Updated to reference dynamic tab cycling SessionEngine::tab_order() while preserving engine cycling, catalog fetching, and context clearing contract"
+        - name: "Scenario: Start with default engine dynamically"
+          origin: "Phase 1 addition (.specflow/history/2026-09-20-efficiency-state-and-tags/specs/tui-interaction.md)"
+          status: preserved
+          notes: "Preserves dynamic startup via SessionEngine::default_engine() and dynamic header tabs"
+        - name: "Scenario: Render session tree with root and child agents"
+          origin: "Baseline b851d75^ (Scenario: Navigate a recursive Agent tree)"
+          status: preserved
+          notes: "Preserves root and recursive descendant agent rendering, indentation, ↳ Agent labels, and safe navigation"
+        - name: "Scenario: Fallback detached sessions to root"
+          origin: "Baseline b851d75^ (Scenario: Keep invalid relationships navigable)"
+          status: preserved
+          notes: "Preserves missing parent, cyclic, and duplicate parent fallback to detached roots without crash or infinite loop"
+        - name: "Scenario: Automatically expand ancestors for matching sessions"
+          origin: "Baseline b851d75^ (Scenario: Select a hidden search descendant)"
+          status: preserved
+          notes: "Preserves automatic ancestor expansion and selection when search targets nested descendants"
+        - name: "Scenario: Render favorite star and tag badges on session row"
+          origin: "Phase 1 addition (.specflow/history/2026-09-20-efficiency-state-and-tags/specs/tui-interaction.md)"
+          status: preserved
+          notes: "Preserves favorite star ★ prefix and muted tag badge #tag rendering with constrained width truncation"
+        - name: "Scenario: Exclude subagent child nodes from favorite and tag badges"
+          origin: "Phase 1 addition (.specflow/history/2026-09-20-efficiency-state-and-tags/specs/tui-interaction.md)"
+          status: preserved
+          notes: "Preserves exclusion of subagent child nodes from favorite and tag badges for clean layout"
+    requirement_2:
+      name: "Support project and time grouping"
+      total_scenarios: 6
+      scenarios:
+        - name: "Scenario: Group sessions by project and time"
+          origin: "Baseline b851d75^ (Scenario: Keep descendants with the root group)"
+          status: preserved
+          notes: "Preserves grouping by time period and project directory, header counts (root and subagent), and keeping child subagents nested under root"
+        - name: "Scenario: Cycle through three grouping modes with g"
+          origin: "Phase 1 addition (.specflow/history/2026-09-20-efficiency-state-and-tags/specs/tui-interaction.md)"
+          status: preserved
+          notes: "Preserves By Time -> By Project -> By Tag -> By Time three-way grouping toggle via g"
+        - name: "Scenario: Group sessions by tags including multi-tag placement"
+          origin: "Phase 1 addition (.specflow/history/2026-09-20-efficiency-state-and-tags/specs/tui-interaction.md)"
+          status: preserved
+          notes: "Preserves tag grouping under 🏷️ headers, 🏷️ 未分类 fallback, and multi-tag duplicate placement"
+        - name: "Scenario: Preserve nested selection when toggling to By Tag"
+          origin: "Phase 1 addition (.specflow/history/2026-09-20-efficiency-state-and-tags/specs/tui-interaction.md)"
+          status: preserved
+          notes: "Preserves nested selection and automatic ancestor expansion when toggling into By Tag mode"
+        - name: "Scenario: Preserve nested selection across grouping modes"
+          origin: "Baseline b851d75^ (Scenario: Toggle grouping without losing a nested selection)"
+          status: preserved
+          notes: "Preserves ancestor expansion and selection preservation across all grouping modes (By Time, By Project, By Tag)"
+        - name: "Scenario: Include recursive descendants in group actions"
+          origin: "Baseline b851d75^ (Scenario: Include descendants in a group action)"
+          status: preserved
+          notes: "Preserves recursive gathering of all root sessions and descendant subagents exactly once in group actions"
+security_checks:
+  - "Zero modifications to application source code (src/)"
+  - "Zero modifications to test code (tests/)"
+  - "Zero modifications to Cargo.toml or Cargo.lock"
+  - "Zero modifications to historical commits or .specflow/history archives"
+  - "Zero direct edits to .specflow/system-specs/ (will be synced cleanly by SpecFlow runtime on change archival)"
+  - "All 13 scenarios strictly adhere to Gherkin syntax (GIVEN / WHEN / THEN)"
+unresolved_issues: []
+requested_transition: reviewing

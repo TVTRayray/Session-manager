@@ -1,0 +1,18 @@
+task_id: reviewer-mubze52p-imzgw
+change_id: efficiency-export-search-dashboard
+role: reviewer
+target_spec: tui-interaction
+adapter: manual
+lease_id: lease-mubze52p-lifzt
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/tui-interaction.md
+allowed_paths:
+  - .specflow/changes/efficiency-export-search-dashboard/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

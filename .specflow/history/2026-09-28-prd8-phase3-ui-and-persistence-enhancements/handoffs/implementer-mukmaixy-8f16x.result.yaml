@@ -1,0 +1,40 @@
+task_id: implementer-mukmaixy-8f16x
+lease_id: lease-mukmaixy-w7es5
+outcome: completed
+summary: "Implemented canonical tui-interaction requirements for PRD-8 Phase 3: (1) Extracted shared header layout geometry and hitbox calculations (`compute_header_layout`, `HeaderLayout`, `HeaderHitbox`) between `src/tui.rs` and `src/app.rs`, preventing coordinate drift; (2) Implemented header row 0 mouse click handling for all 4 engines (Pi, OpenCode, Codex, Claude) with left/center/right boundary detection, clearing stale selection/detail/search context and dispatching catalog requests matching keyboard Tab behavior; (3) Added dynamic width collision protection: when terminal width >= threshold (88), right-hand Group-by buttons (`By Time | By Project | By Tag`) are rendered and clickable; when width < 88, right buttons are omitted and their hitboxes disabled to eliminate collision risks; (4) Added group-by mouse click persistence via `App::set_group_mode_and_persist`, updating grouping and writing to `state.db`; (5) Redesigned full-text search overlay into distinct card-based layout with horizontal dividers, prominent full-card selection background (`THEME_HEADER_BG`), bold indicators, and high-contrast yellow keyword highlight (`THEME_SEARCH_FG` on `THEME_SEARCH_BG`); (6) Verified full search overlay state matrix (empty query, loading, empty results, disabled FTS5, indexing progress, partial results, error messages) and wide CJK/Emoji safety under extreme narrow widths; (7) Added comprehensive unit tests and verified all quality gates."
+evidence:
+  changed_files:
+    - src/tui.rs
+    - src/app.rs
+    - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/tasks.md
+    - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/handoffs/implementer-mukmaixy-8f16x.result.yaml
+  test_results:
+    - command: "cargo fmt --check"
+      status: "passed"
+    - command: "cargo check --all-targets"
+      status: "passed"
+    - command: "cargo test --lib app::tests"
+      status: "passed"
+      details: "122 passed, 0 failed"
+    - command: "cargo test --lib tui::tests"
+      status: "passed"
+      details: "47 passed, 0 failed"
+    - command: "cargo test --lib test_header_mouse"
+      status: "passed"
+      details: "3 passed, 0 failed"
+    - command: "cargo test --lib test_search_overlay"
+      status: "passed"
+      details: "3 passed, 0 failed"
+    - command: "cargo test --lib test_schema_migration"
+      status: "passed"
+      details: "4 passed, 0 failed"
+    - command: "cargo test --lib"
+      status: "passed"
+      details: "315 passed, 0 failed"
+    - command: "cargo test"
+      status: "passed"
+      details: "315 lib tests + 3 main tests + 7 integration tests passed (325 total passed, 0 failed)"
+    - command: "git diff --check"
+      status: "passed"
+unresolved_issues: []
+requested_transition: reviewing

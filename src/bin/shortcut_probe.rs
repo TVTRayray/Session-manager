@@ -13,12 +13,13 @@ use crossterm::event::{
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use sessions_manager::app::{
-    App, AppAction, CatalogLoadResult, CatalogRequest, FocusedPanel, SessionDetailState,
-    SplitDirection, compute_layout,
+    App, AppAction, CatalogLoadResult, CatalogRequest, FocusedPanel, SearchPhase,
+    SessionDetailState, SplitDirection, compute_layout,
 };
 use sessions_manager::catalog::{
     CatalogLoad, FileHealth, SessionCatalogReader, SessionEngine, SessionListItem,
 };
+use sessions_manager::detail::TAIL_VIEWPORT_OFFSET;
 
 const PROBE_TERMINAL_WIDTH: u16 = 100;
 const PROBE_TERMINAL_HEIGHT: u16 = 30;
@@ -124,31 +125,47 @@ fn probe_catalog_result(request: CatalogRequest) -> CatalogLoadResult {
 }
 
 fn probe_item_for(engine: SessionEngine) -> SessionListItem {
-    match engine {
-        SessionEngine::Codex => SessionListItem {
-            session_id: "probe".to_string(),
-            summary: "inspect current session layout".to_string(),
-            display_time: "2026-04-17 12:00".to_string(),
-            cwd_tail: "probe".to_string(),
-            cwd_group_label: "workspace/probe".to_string(),
-            cwd_path: "/workspace/probe".to_string(),
-            abs_path: PathBuf::from("/tmp/probe.jsonl"),
-            is_loadable: true,
-            modified_at: SystemTime::now(),
-            file_health: FileHealth::Healthy,
-        },
-        SessionEngine::Claude => SessionListItem {
-            session_id: "probe-claude".to_string(),
-            summary: "resume claude conversation".to_string(),
-            display_time: "2026-04-17 12:30".to_string(),
-            cwd_tail: "probe-claude".to_string(),
-            cwd_group_label: "workspace/probe-claude".to_string(),
-            cwd_path: "/workspace/probe-claude".to_string(),
-            abs_path: PathBuf::from("/tmp/probe-claude.jsonl"),
-            is_loadable: true,
-            modified_at: SystemTime::now(),
-            file_health: FileHealth::Healthy,
-        },
+    let key = engine.storage_key();
+    if engine == SessionEngine::default_engine() {
+        make_probe_item(
+            "probe",
+            "inspect current session layout",
+            "2026-04-17 12:00",
+            "probe",
+        )
+    } else {
+        make_probe_item(
+            &format!("probe-{key}"),
+            &format!("resume {key} conversation"),
+            "2026-04-17 12:30",
+            &format!("probe-{key}"),
+        )
+    }
+}
+
+fn make_probe_item(
+    session_id: &str,
+    name: &str,
+    display_time: &str,
+    workspace: &str,
+) -> SessionListItem {
+    SessionListItem {
+        session_id: session_id.to_string(),
+        name: name.to_string(),
+        summary: name.to_string(),
+        parent_session_id: None,
+        agent_name: None,
+        relation: Default::default(),
+        display_time: display_time.to_string(),
+        cwd_tail: workspace.to_string(),
+        cwd_group_label: format!("workspace/{workspace}"),
+        cwd_path: format!("/workspace/{workspace}"),
+        abs_path: PathBuf::from(format!("/tmp/{session_id}.jsonl")),
+        is_loadable: true,
+        modified_at: SystemTime::now(),
+        file_health: FileHealth::Healthy,
+        is_favorite: false,
+        tags: Vec::new(),
     }
 }
 
@@ -157,11 +174,22 @@ struct StubCatalog;
 
 impl SessionCatalogReader for StubCatalog {
     fn load_sessions(&self) -> Result<CatalogLoad, String> {
-        let item = probe_item_for(SessionEngine::Codex);
+        let prev_item = make_probe_item(
+            "probe-initial",
+            "initial probe session",
+            "2026-04-17 12:01",
+            "probe-initial",
+        );
+        let item = probe_item_for(SessionEngine::default_engine());
+        let items = vec![prev_item.clone(), item.clone()];
+        let file_health_map = items
+            .iter()
+            .map(|i| (i.abs_path.clone(), i.file_health.clone()))
+            .collect();
         Ok(CatalogLoad {
-            items: vec![item.clone()],
+            items,
             warnings: Vec::new(),
-            file_health_map: HashMap::from([(item.abs_path.clone(), item.file_health.clone())]),
+            file_health_map,
         })
     }
 }
@@ -204,6 +232,10 @@ struct ProbeState {
     list_rect: sessions_manager::app::RectLike,
     detail_rect: sessions_manager::app::RectLike,
     delete_modal_open: bool,
+    search_phase: SearchPhase,
+    search_input: String,
+    search_matches: usize,
+    status_error: bool,
     should_quit: bool,
 }
 
@@ -224,6 +256,11 @@ impl ProbeState {
             list_rect: layout.list_panel,
             detail_rect: layout.detail_panel,
             delete_modal_open: app.delete_modal_state.is_some(),
+            search_phase: app.search_state.phase,
+            search_input: app.search_state.input.clone(),
+            search_matches: app.search_state.matches.len(),
+            status_error: app.status_message.contains("E35:")
+                || app.status_message.contains("E486:"),
             should_quit: app.should_quit,
         }
     }
@@ -245,7 +282,7 @@ fn format_trace_line(
 ) -> String {
     format!(
         "step={step} event={} action={} split={:?} focus={:?} primary_size={:?} \
-layout_version={} redraw={} resize={} list_rect={} detail_rect={} delete_modal={} quit={}",
+layout_version={} redraw={} resize={} list_rect={} detail_rect={} delete_modal={} search={:?} search_input={:?} search_matches={} status_error={} quit={}",
         format_event(event),
         format_action(action),
         after.split_direction,
@@ -257,6 +294,10 @@ layout_version={} redraw={} resize={} list_rect={} detail_rect={} delete_modal={
         format_rect(after.list_rect),
         format_rect(after.detail_rect),
         after.delete_modal_open,
+        after.search_phase,
+        after.search_input,
+        after.search_matches,
+        after.status_error,
         after.should_quit
     )
 }
@@ -285,6 +326,9 @@ fn format_action(action: Option<&AppAction>) -> String {
                 "LoadCatalog(engine={:?},request_id={})",
                 request.engine, request.request_id
             )
+        }
+        Some(AppAction::LoadDetail(request)) if request.offset == TAIL_VIEWPORT_OFFSET => {
+            "LoadDetail(offset=tail)".to_string()
         }
         Some(AppAction::LoadDetail(request)) => format!("LoadDetail(offset={})", request.offset),
         Some(AppAction::Delete(request)) => format!("Delete(session_id={})", request.session_id),

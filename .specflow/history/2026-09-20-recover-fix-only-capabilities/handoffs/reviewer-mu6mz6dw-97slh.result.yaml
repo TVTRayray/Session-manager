@@ -1,0 +1,25 @@
+task_id: reviewer-mu6mz6dw-97slh
+lease_id: lease-mu6mz6dw-u9ex3
+outcome: completed
+verdict: pass
+summary: >-
+  Final QA for session-detail passed. Pi and OpenCode detail handling,
+  content preservation, canonical-root and read-only SQL safeguards, and
+  stale request/engine protection were verified with no findings.
+evidence:
+  changed_files:
+    - .specflow/changes/recover-fix-only-capabilities/reviews/reviewer-mu6mz6dw-97slh.md
+    - .specflow/changes/recover-fix-only-capabilities/handoffs/reviewer-mu6mz6dw-97slh.result.yaml
+  test_results:
+    - command: cargo fmt --check
+      result: pass
+    - command: cargo test --lib detail::tests
+      result: pass
+    - command: cargo test --lib app::tests
+      result: pass
+    - command: cargo test
+      result: pass
+    - command: git diff --check
+      result: pass
+unresolved_issues: []
+requested_transition: ready

@@ -1,0 +1,45 @@
+task_id: reviewer-mu3embqz-xerg9
+lease_id: lease-mu3embqz-o573x
+outcome: completed
+verdict: repair
+category: implementation_defect
+summary: >-
+  tui-interaction contains one unsupported baseline contract: while a deletion
+  modal is open, Tab and Shift+Tab switch engine context, clear deletion state,
+  and request the other engine catalog rather than staying solely within
+  confirmation controls. Repair the spec only; do not change business code.
+evidence:
+  source_contract:
+    pinned_commit: eaee62d20f930c55ae5892602f1cf75a8fd7c322
+    working_tree_matches_pinned: true
+    details:
+      - "src/app.rs:468-470 routes deletion-modal keys to handle_delete_modal_key"
+      - "src/app.rs:846-847 maps Tab/BackTab to switch_engine"
+      - "src/app.rs:1119-1150 clears deletion state and returns a catalog request"
+      - "src/app.rs:2280-2317 tests engine switching from an open deletion modal"
+      - "src/app.rs:568-570 correctly blocks background mouse handling"
+  test_results:
+    - command: cargo test app::tests
+      result: passed
+      details: "57 passed; 0 failed"
+    - command: cargo test tui::tests
+      result: passed
+      details: "20 passed; 0 failed"
+    - command: cargo test --test pty_shortcuts
+      result: passed
+      details: "5 passed; 0 failed"
+  changed_files:
+    - .specflow/changes/baseline-main-system-specs/reviews/reviewer-mu3embqz-xerg9.md
+    - .specflow/changes/baseline-main-system-specs/handoffs/reviewer-mu3embqz-xerg9.result.yaml
+unresolved_issues:
+  - requirement: Provide modal interaction safeguards
+    category: implementation_defect
+    issue: >-
+      The spec says deletion-modal keyboard input is routed only through
+      confirmation controls, but Tab/Shift+Tab perform engine switching.
+    minimal_repair: >-
+      Edit only specs/tui-interaction/spec.md to document the exception:
+      Tab/Shift+Tab switch engine context, dismiss deletion state, and request
+      that engine's catalog while other deletion-modal keys remain routed
+      through confirmation controls. Do not modify application code or tests.
+requested_transition: repair

@@ -1,0 +1,20 @@
+task_id: implementer-mu6quo1v-4eivn
+change_id: recover-fix-only-capabilities
+role: implementer
+target_spec: tui-interaction
+adapter: manual
+lease_id: lease-mu6quo1v-lp5p0
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/tui-interaction.md
+allowed_paths:
+  - README.md
+  - src/**
+  - tests/**
+  - .specflow/changes/recover-fix-only-capabilities/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden

@@ -1,0 +1,21 @@
+specs:
+  - id: session-catalog
+    title: Pi and OpenCode catalog metadata foundation
+    depends_on: []
+    delta_file: specs/session-catalog.md
+  - id: session-detail
+    title: Pi and OpenCode session detail loading
+    depends_on: [session-catalog]
+    delta_file: specs/session-detail.md
+  - id: session-launch
+    title: Pi and OpenCode launch and resume
+    depends_on: [session-catalog]
+    delta_file: specs/session-launch.md
+  - id: session-deletion
+    title: Engine-specific safe deletion
+    depends_on: [session-catalog]
+    delta_file: specs/session-deletion.md
+  - id: tui-interaction
+    title: Four-engine hierarchy search and summaries
+    depends_on: [session-catalog, session-detail, session-launch, session-deletion]
+    delta_file: specs/tui-interaction.md

@@ -1,0 +1,19 @@
+task_id: implementer-muaudnk4-2dcfm
+change_id: efficiency-export-search-dashboard
+role: implementer
+target_spec: session-export
+adapter: manual
+lease_id: lease-muaudnk4-k0hmb
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/session-export.md
+allowed_paths:
+  - src/**
+  - tests/**
+  - .specflow/changes/efficiency-export-search-dashboard/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden

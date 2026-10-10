@@ -1,0 +1,23 @@
+task_id: reviewer-mukmyfee-rjq6o
+change_id: prd8-phase3-ui-and-persistence-enhancements
+role: reviewer
+target_spec: tui-interaction
+adapter: herdr
+lease_id: lease-mukmyfee-zt39d
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/tui-interaction.md
+allowed_paths:
+  - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden
+runtime:
+  provider: herdr
+  agent_name: reviewer-reviewer-mukmyfee-rjq6o
+  pane_id: wW:p2K
+  state: working

@@ -1,0 +1,19 @@
+task_id: implementer-mu6meg4i-3tax9
+change_id: recover-fix-only-capabilities
+role: implementer
+target_spec: session-detail
+adapter: manual
+lease_id: lease-mu6meg4i-ofmee
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/session-detail.md
+allowed_paths:
+  - src/**
+  - tests/**
+  - .specflow/changes/recover-fix-only-capabilities/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden

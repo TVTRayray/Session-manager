@@ -1,0 +1,211 @@
+change_id: baseline-main-system-specs
+state: archived
+created_at: 2026-09-15T09:41:56.757Z
+updated_at: 2026-09-16T06:26:34.694Z
+specs:
+  - id: session-catalog
+    title: Session catalog and engine discovery
+    state: qa_passed
+    depends_on: []
+    qa_attempts: 0
+    qa_report: reviews/reviewer-mu3dghf5-aqqhs.md
+  - id: session-detail
+    title: Session detail parsing and display configuration
+    state: qa_passed
+    depends_on:
+      - session-catalog
+    qa_attempts: 0
+    qa_report: reviews/reviewer-mu3egfkq-6w1mv.md
+  - id: tui-interaction
+    title: TUI navigation grouping layout and shortcuts
+    state: qa_passed
+    depends_on:
+      - session-detail
+    qa_attempts: 1
+    qa_report: reviews/reviewer-mu3euy9p-olkpl.md
+  - id: session-launch
+    title: Session resume and creation
+    state: qa_passed
+    depends_on:
+      - tui-interaction
+    qa_attempts: 1
+    qa_report: reviews/reviewer-mu3fdupy-s7uu4.md
+  - id: session-deletion
+    title: Safe session deletion
+    state: qa_passed
+    depends_on:
+      - session-launch
+    qa_attempts: 0
+    qa_report: reviews/reviewer-mu3fn3cx-j5ojw.md
+  - id: terminal-lifecycle
+    title: Terminal lifecycle and recovery
+    state: qa_passed
+    depends_on:
+      - session-deletion
+    qa_attempts: 0
+    qa_report: reviews/reviewer-mu3fv1mr-maijj.md
+leases: []
+history:
+  - at: 2026-09-15T09:41:56.758Z
+    event: change_created
+    detail: No PRD supplied
+  - at: 2026-09-15T09:41:56.838Z
+    event: spec_added
+    detail: session-catalog
+  - at: 2026-09-15T09:41:56.910Z
+    event: spec_added
+    detail: session-detail depends_on:session-catalog
+  - at: 2026-09-15T09:41:56.985Z
+    event: spec_added
+    detail: tui-interaction depends_on:session-detail
+  - at: 2026-09-15T09:41:57.067Z
+    event: spec_added
+    detail: session-launch depends_on:tui-interaction
+  - at: 2026-09-15T09:41:57.139Z
+    event: spec_added
+    detail: session-deletion depends_on:session-launch
+  - at: 2026-09-15T09:41:57.223Z
+    event: spec_added
+    detail: terminal-lifecycle depends_on:session-deletion
+  - at: 2026-09-15T09:42:17.715Z
+    event: task_dispatched
+    detail: planner:planner-mu2hgjg3-nq6ji:route=planner
+  - at: 2026-09-15T09:49:39.071Z
+    event: plan_submitted
+  - at: 2026-09-15T09:51:33.579Z
+    event: spec_ready
+    detail: session-catalog
+  - at: 2026-09-15T09:51:33.579Z
+    event: plan_approved
+  - at: 2026-09-15T09:53:07.730Z
+    event: task_dispatched
+    detail: implementer:implementer-mu2huh01-m9m27:session-catalog:route=implementer
+  - at: 2026-09-16T00:36:17.699Z
+    event: lease_expired
+    detail: lease-mu2huh01-9b3rg:implementer-mu2huh01-m9m27
+  - at: 2026-09-16T00:36:31.725Z
+    event: task_dispatched
+    detail: implementer:implementer-mu3dej59-vdhx4:session-catalog:route=implementer
+  - at: 2026-09-16T00:37:55.823Z
+    event: implementation_completed
+    detail: session-catalog
+  - at: 2026-09-16T00:38:02.801Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mu3dghf5-aqqhs:session-catalog:route=reviewer
+  - at: 2026-09-16T00:40:58.417Z
+    event: qa_passed
+    detail: session-catalog
+  - at: 2026-09-16T00:40:58.417Z
+    event: spec_ready
+    detail: session-detail
+  - at: 2026-09-16T00:40:58.439Z
+    event: task_dispatched
+    detail: implementer:implementer-mu3dk8xz-svzpk:session-detail:route=implementer
+  - at: 2026-09-16T00:43:14.265Z
+    event: implementation_completed
+    detail: session-detail
+  - at: 2026-09-16T00:45:13.891Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mu3dpq1u-s30a9:session-detail:route=reviewer
+  - at: 2026-09-16T00:51:09.548Z
+    event: decision_required
+    detail: session-detail:unclassified
+  - at: 2026-09-16T01:05:40.636Z
+    event: human_resolution
+    detail: "reviewing: User approved spec-only repair to match main display
+      defaults; corrected session-detail delta and returning to review"
+  - at: 2026-09-16T01:06:00.026Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mu3egfkq-6w1mv:session-detail:route=reviewer
+  - at: 2026-09-16T01:08:05.068Z
+    event: qa_passed
+    detail: session-detail
+  - at: 2026-09-16T01:08:05.068Z
+    event: spec_ready
+    detail: tui-interaction
+  - at: 2026-09-16T01:08:05.098Z
+    event: task_dispatched
+    detail: implementer:implementer-mu3ej42x-dojrn:tui-interaction:route=implementer
+  - at: 2026-09-16T01:10:29.042Z
+    event: implementation_completed
+    detail: tui-interaction
+  - at: 2026-09-16T01:10:35.004Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mu3embqz-xerg9:tui-interaction:route=reviewer
+  - at: 2026-09-16T01:15:16.902Z
+    event: repair_dispatched
+    detail: tui-interaction:attempt-1
+  - at: 2026-09-16T01:15:23.950Z
+    event: task_dispatched
+    detail: implementer:implementer-mu3esipa-4yfmo:tui-interaction:route=implementer
+  - at: 2026-09-16T01:17:10.447Z
+    event: implementation_completed
+    detail: tui-interaction
+  - at: 2026-09-16T01:17:17.438Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mu3euy9p-olkpl:tui-interaction:route=reviewer
+  - at: 2026-09-16T01:20:45.564Z
+    event: qa_passed
+    detail: tui-interaction
+  - at: 2026-09-16T01:20:45.564Z
+    event: spec_ready
+    detail: session-launch
+  - at: 2026-09-16T01:20:45.588Z
+    event: task_dispatched
+    detail: implementer:implementer-mu3ezevo-pk541:session-launch:route=implementer
+  - at: 2026-09-16T01:23:22.248Z
+    event: implementation_completed
+    detail: session-launch
+  - at: 2026-09-16T01:23:27.363Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mu3f2vpf-g07pd:session-launch:route=reviewer
+  - at: 2026-09-16T01:26:59.048Z
+    event: repair_dispatched
+    detail: session-launch:attempt-1
+  - at: 2026-09-16T01:27:07.330Z
+    event: task_dispatched
+    detail: implementer:implementer-mu3f7lfm-cfzl5:session-launch:route=implementer
+  - at: 2026-09-16T01:31:51.340Z
+    event: implementation_completed
+    detail: session-launch
+  - at: 2026-09-16T01:31:59.302Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mu3fdupy-s7uu4:session-launch:route=reviewer
+  - at: 2026-09-16T01:34:54.065Z
+    event: qa_passed
+    detail: session-launch
+  - at: 2026-09-16T01:34:54.065Z
+    event: spec_ready
+    detail: session-deletion
+  - at: 2026-09-16T01:34:54.097Z
+    event: task_dispatched
+    detail: implementer:implementer-mu3fhlld-ov7ip:session-deletion:route=implementer
+  - at: 2026-09-16T01:38:54.574Z
+    event: implementation_completed
+    detail: session-deletion
+  - at: 2026-09-16T01:39:10.402Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mu3fn3cx-j5ojw:session-deletion:route=reviewer
+  - at: 2026-09-16T01:42:40.721Z
+    event: qa_passed
+    detail: session-deletion
+  - at: 2026-09-16T01:42:40.721Z
+    event: spec_ready
+    detail: terminal-lifecycle
+  - at: 2026-09-16T01:42:40.756Z
+    event: task_dispatched
+    detail: implementer:implementer-mu3frlo4-k06ow:terminal-lifecycle:route=implementer
+  - at: 2026-09-16T01:45:10.345Z
+    event: implementation_completed
+    detail: terminal-lifecycle
+  - at: 2026-09-16T01:45:21.411Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mu3fv1mr-maijj:terminal-lifecycle:route=reviewer
+  - at: 2026-09-16T01:50:49.935Z
+    event: qa_passed
+    detail: terminal-lifecycle
+  - at: 2026-09-16T01:50:49.935Z
+    event: archive_ready
+  - at: 2026-09-16T06:26:34.694Z
+    event: archive_metadata_corrected
+    detail: Corrected archived state after the legacy CLI omitted final archive metadata; archive artifacts and System Specs were already written. Fixed in SpecFlow CLI commit 1fbab42.

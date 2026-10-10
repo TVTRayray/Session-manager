@@ -1,0 +1,142 @@
+change_id: prd8-phase3-ui-and-persistence-enhancements
+state: archived
+created_at: 2026-09-28T01:26:04.760Z
+updated_at: 2026-09-28T07:16:36.818Z
+specs:
+  - id: persisted-state
+    title: Persist group-by selection in state.db
+    state: qa_passed
+    depends_on: []
+    qa_attempts: 0
+    qa_report: reviews/reviewer-mukvbyhl-5q8ud.md
+    updated_at: 2026-09-28T06:26:34.327Z
+  - id: tui-interaction
+    title: Clickable header tabs and refined full-text search presentation
+    state: qa_passed
+    depends_on:
+      - persisted-state
+    qa_attempts: 0
+    qa_report: reviews/reviewer-mukuvtmw-kp9v8.md
+    updated_at: 2026-09-28T06:09:44.879Z
+leases: []
+history:
+  - at: 2026-09-28T01:26:04.761Z
+    event: change_created
+    detail: "PRDs: docs/prd-8.md"
+  - at: 2026-09-28T01:26:04.819Z
+    event: spec_added
+    detail: persisted-state
+  - at: 2026-09-28T01:26:04.888Z
+    event: spec_added
+    detail: tui-interaction depends_on:persisted-state
+  - at: 2026-09-28T01:26:28.017Z
+    event: task_dispatched
+    detail: planner:planner-mukkgz3l-nk5lt:route=planner
+  - at: 2026-09-28T01:26:31.375Z
+    event: herdr_agent_started
+    detail: planner-planner-mukkgz3l-nk5lt:wW:p2E
+  - at: 2026-09-28T01:41:57.665Z
+    event: plan_submitted
+  - at: 2026-09-28T01:54:57.531Z
+    event: spec_ready
+    detail: persisted-state
+  - at: 2026-09-28T01:54:57.531Z
+    event: plan_approved
+  - at: 2026-09-28T01:56:53.652Z
+    event: task_dispatched
+    detail: implementer:implementer-muklk3rk-nl5cw:persisted-state:route=implementer
+  - at: 2026-09-28T01:56:57.129Z
+    event: herdr_agent_started
+    detail: implementer-implementer-muklk3rk:wW:p2G
+  - at: 2026-09-28T01:57:23.509Z
+    event: herdr_probe
+    detail: implementer-implementer-muklk3rk:unknown
+  - at: 2026-09-28T02:07:46.061Z
+    event: implementation_completed
+    detail: persisted-state
+  - at: 2026-09-28T02:10:03.391Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mukm114v-dxkgs:persisted-state:route=reviewer
+  - at: 2026-09-28T02:10:06.755Z
+    event: herdr_agent_started
+    detail: reviewer-reviewer-mukm114v-dxkgs:wW:p2H
+  - at: 2026-09-28T02:14:56.305Z
+    event: qa_passed
+    detail: persisted-state
+  - at: 2026-09-28T02:14:56.305Z
+    event: spec_ready
+    detail: tui-interaction
+  - at: 2026-09-28T02:17:26.374Z
+    event: task_dispatched
+    detail: implementer:implementer-mukmaixy-8f16x:tui-interaction:route=implementer
+  - at: 2026-09-28T02:17:29.731Z
+    event: herdr_agent_started
+    detail: implementer-implementer-mukmaixy:wW:p2J
+  - at: 2026-09-28T02:34:00.264Z
+    event: implementation_completed
+    detail: tui-interaction
+  - at: 2026-09-28T02:36:01.526Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mukmyfee-rjq6o:tui-interaction:route=reviewer
+  - at: 2026-09-28T02:36:04.883Z
+    event: herdr_agent_started
+    detail: reviewer-reviewer-mukmyfee-rjq6o:wW:p2K
+  - at: 2026-09-28T02:41:14.883Z
+    event: qa_passed
+    detail: tui-interaction
+  - at: 2026-09-28T02:41:14.885Z
+    event: archive_ready
+  - at: 2026-09-28T03:30:58.661Z
+    event: subagent_dispatched
+    detail: independent_reviewer:subagent-mukox3hf-07ozj:investigate_z_key_regression
+  - at: 2026-09-28T03:48:59.353Z
+    event: late_result_imported
+    detail: lease-mukox3hf-489ri:subagent-mukox3hf-07ozj
+  - at: 2026-09-28T03:48:59.353Z
+    event: subagent_completed
+    detail: independent_reviewer:subagent-mukox3hf-07ozj
+  - at: 2026-09-28T06:09:44.879Z
+    event: qa_reopened
+    detail: '{"spec":"tui-interaction","reason":"manual acceptance failed: z key is
+      ignored after detail
+      focus","previous_qa_report":"reviews/reviewer-mukmyfee-rjq6o.md"}'
+  - at: 2026-09-28T06:11:18.146Z
+    event: task_dispatched
+    detail: implementer:implementer-mukun9xd-4tnfr:tui-interaction:route=implementer
+  - at: 2026-09-28T06:17:39.782Z
+    event: implementation_completed
+    detail: tui-interaction
+  - at: 2026-09-28T06:17:56.936Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mukuvtmw-kp9v8:tui-interaction:route=reviewer
+  - at: 2026-09-28T06:24:12.883Z
+    event: qa_passed
+    detail: tui-interaction
+  - at: 2026-09-28T06:24:12.883Z
+    event: archive_ready
+  - at: 2026-09-28T06:26:34.327Z
+    event: qa_reopened
+    detail: '{"spec":"persisted-state","reason":"default cargo test inherits user
+      group_by state; PTY fixtures must isolate
+      SESSION_MANAGER_STATE_DB","previous_qa_report":"reviews/reviewer-mukm114v-dxkgs.md"}'
+  - at: 2026-09-28T06:26:40.119Z
+    event: task_dispatched
+    detail: implementer:implementer-mukv71bq-uruhc:persisted-state:route=implementer
+  - at: 2026-09-28T06:30:29.646Z
+    event: implementation_completed
+    detail: persisted-state
+  - at: 2026-09-28T06:30:29.721Z
+    event: task_dispatched
+    detail: reviewer:reviewer-mukvbyhl-5q8ud:persisted-state:route=reviewer
+  - at: 2026-09-28T06:34:06.919Z
+    event: qa_passed
+    detail: persisted-state
+  - at: 2026-09-28T06:34:06.919Z
+    event: archive_ready
+  - at: 2026-09-28T07:16:36.818Z
+    event: archive_completed
+    detail: Merged 2 Delta Spec file(s).
+labels:
+  - prd8
+  - phase3
+  - ui-persistence

@@ -1,0 +1,19 @@
+task_id: implementer-mu3fhlld-ov7ip
+change_id: baseline-main-system-specs
+role: implementer
+target_spec: session-deletion
+adapter: manual
+lease_id: lease-mu3fhlld-s9634
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/session-deletion.md
+allowed_paths:
+  - src/**
+  - tests/**
+  - .specflow/changes/baseline-main-system-specs/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden

@@ -1,0 +1,36 @@
+task_id: implementer-mubzkxgy-hqhoi
+lease_id: lease-mubzkxgy-lj0fc
+outcome: completed
+summary: "Repaired all 4 review defects with minimal diffs: (A) Added pending action mechanism in App (pending_action & take_pending_action), wired execute_search_jump return into pending_action in apply_catalog_result, and drained pending actions in main.rs event loop after catalog results to dispatch DetailRequest without freezing; (B) Formatted SearchOverlay cards to display project name, session title, engine, relative timestamp, highlighted snippet, and extra match count via catalog/cache lookup with safe [-] fallback; (C) Preserved engine identity in ProjectDashboardState.recent_sessions as (SessionEngine, SessionListItem), stabilized secondary sort by session_id, aggregated project metrics per engine, routed dashboard Enter to exact engine context, and displayed [Engine] badges in recent sessions; (D) Handled SearchService errors explicitly into SearchOverlayState.error_message without leaking queries or content, and rendered prominent error warnings in results area while allowing user edit and Esc exit."
+evidence:
+  changed_files:
+    - src/main.rs
+    - src/app.rs
+    - src/tui.rs
+    - src/search.rs
+    - .specflow/changes/efficiency-export-search-dashboard/handoffs/implementer-mubzkxgy-hqhoi.result.yaml
+  test_results:
+    - command: "cargo fmt --check"
+      status: "passed"
+    - command: "cargo check --all-targets"
+      status: "passed"
+    - command: "cargo test --lib app::tests"
+      status: "passed"
+      details: "97 passed, 0 failed"
+    - command: "cargo test --lib tui::tests"
+      status: "passed"
+      details: "37 passed, 0 failed"
+    - command: "cargo test --lib search::tests"
+      status: "passed"
+      details: "14 passed, 0 failed"
+    - command: "cargo test"
+      status: "passed"
+      details: "264 lib tests + 7 integration tests passed (271 total passed, 0 failed)"
+    - command: "git diff --check"
+      status: "passed"
+security_checks:
+  sanitized_error_reporting: "Verified that search failure error message is a generic static string without leaking user query terms or sensitive transcript contents."
+  cross_engine_isolation: "Verified that cross-engine search and dashboard jumps strictly resolve to the target engine without colliding on identical session IDs or corrupting detail requests."
+  safe_fallback_on_unindexed_sessions: "Verified that cold-cache or unindexed hits in search overlay gracefully fall back to [-] without panicking."
+unresolved_issues: []
+requested_transition: reviewing

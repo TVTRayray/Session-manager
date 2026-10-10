@@ -1,0 +1,14 @@
+task_id: planner-mu9j24wl-l8cat
+change_id: efficiency-export-search-dashboard
+role: planner
+adapter: manual
+lease_id: lease-mu9j24wl-76hnu
+inputs:
+  - proposal.md
+allowed_paths:
+  - .specflow/changes/efficiency-export-search-dashboard/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

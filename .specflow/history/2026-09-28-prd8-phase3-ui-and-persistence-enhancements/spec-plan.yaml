@@ -1,0 +1,10 @@
+specs:
+  - id: persisted-state
+    title: Persist group-by selection in state.db
+    depends_on: []
+    delta_file: specs/persisted-state.md
+  - id: tui-interaction
+    title: Clickable header tabs and refined full-text search presentation
+    depends_on:
+      - persisted-state
+    delta_file: specs/tui-interaction.md

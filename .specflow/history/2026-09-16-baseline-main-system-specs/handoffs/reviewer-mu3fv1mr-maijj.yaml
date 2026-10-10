@@ -1,0 +1,18 @@
+task_id: reviewer-mu3fv1mr-maijj
+change_id: baseline-main-system-specs
+role: reviewer
+target_spec: terminal-lifecycle
+adapter: manual
+lease_id: lease-mu3fv1mr-35vko
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/terminal-lifecycle.md
+allowed_paths:
+  - .specflow/changes/baseline-main-system-specs/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

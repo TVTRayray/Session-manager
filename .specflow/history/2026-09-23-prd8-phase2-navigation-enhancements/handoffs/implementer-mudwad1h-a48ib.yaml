@@ -1,0 +1,24 @@
+task_id: implementer-mudwad1h-a48ib
+change_id: prd8-phase2-navigation-enhancements
+role: implementer
+target_spec: tui-interaction
+adapter: herdr
+lease_id: lease-mudwad1h-vvr7i
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/tui-interaction.md
+allowed_paths:
+  - src/**
+  - tests/**
+  - .specflow/changes/prd8-phase2-navigation-enhancements/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden
+runtime:
+  provider: herdr
+  agent_name: implementer-implementer-mudwad1h
+  pane_id: wW:p2A
+  state: working

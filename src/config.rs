@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::theme::ThemeName;
+
 /// Which kind of transcript block this represents, used as the filtering key.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum BlockKind {
@@ -56,17 +58,65 @@ impl DisplayConfig {
 // ── TOML file schema ──────────────────────────────────────────────────────
 
 #[derive(Deserialize, Default)]
-struct ConfigFile {
+pub struct ConfigFile {
     #[serde(default)]
-    display: DisplaySection,
+    pub display: DisplaySection,
+    #[serde(default)]
+    pub export: Option<ExportSection>,
+    #[serde(default)]
+    pub theme: Option<ThemeSection>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ThemeSection {
+    /// Recognised values: "claude-light" (default), "mocha".
+    pub name: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct DisplaySection {
+pub struct DisplaySection {
     /// Recognised values: "user", "assistant", "thinking", "tool_call", "tool_output",
     /// "system_context", "corrupted_line".
     #[serde(default = "default_visible_blocks")]
-    visible_blocks: Vec<String>,
+    pub visible_blocks: Vec<String>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExportSection {
+    pub output_dir: Option<String>,
+}
+
+/// Export configuration resolved from config file or defaults.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportConfig {
+    pub output_dir: PathBuf,
+}
+
+impl Default for ExportConfig {
+    fn default() -> Self {
+        Self {
+            output_dir: default_export_root(),
+        }
+    }
+}
+
+/// Resolves the default export root directory (`~/.session-manager/exports`).
+pub fn default_export_root() -> PathBuf {
+    if let Some(home) = dirs::home_dir() {
+        return home.join(".session-manager").join("exports");
+    }
+    PathBuf::from(".session-manager").join("exports")
+}
+
+/// Expands a leading tilde in a path if present using `dirs::home_dir()`.
+pub fn expand_tilde<P: AsRef<std::path::Path>>(path: P) -> PathBuf {
+    let p = path.as_ref();
+    if let Ok(stripped) = p.strip_prefix("~") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(stripped);
+        }
+    }
+    p.to_path_buf()
 }
 
 impl Default for DisplaySection {
@@ -133,13 +183,18 @@ pub fn load_config_from_path(path: &std::path::Path) -> DisplayConfig {
 
 /// Parses TOML content into a `DisplayConfig`.
 pub fn parse_config_content(content: &str) -> DisplayConfig {
+    parse_app_config_content(content).0
+}
+
+/// Parses TOML content into `(DisplayConfig, ExportConfig)`.
+pub fn parse_app_config_content(content: &str) -> (DisplayConfig, ExportConfig) {
     let config_file: ConfigFile = match toml::from_str(content) {
         Ok(config) => config,
         Err(err) => {
             eprintln!(
                 "[session-manager] Warning: failed to parse config file: {err}. Using defaults."
             );
-            return DisplayConfig::default();
+            return (DisplayConfig::default(), ExportConfig::default());
         }
     };
 
@@ -158,7 +213,58 @@ pub fn parse_config_content(content: &str) -> DisplayConfig {
         })
         .collect();
 
-    DisplayConfig { visible_blocks }
+    let export_config = match config_file.export {
+        Some(section) => match section.output_dir {
+            Some(dir) if !dir.trim().is_empty() => ExportConfig {
+                output_dir: expand_tilde(dir.trim()),
+            },
+            _ => ExportConfig::default(),
+        },
+        None => ExportConfig::default(),
+    };
+
+    (DisplayConfig { visible_blocks }, export_config)
+}
+
+/// Loads export configuration from `~/.session-manager/config.toml`.
+pub fn load_export_config() -> ExportConfig {
+    let Some(path) = config_path() else {
+        return ExportConfig::default();
+    };
+
+    load_export_config_from_path(&path)
+}
+
+/// Loads export configuration from an explicit path. Useful for testing.
+pub fn load_export_config_from_path(path: &std::path::Path) -> ExportConfig {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => return ExportConfig::default(),
+    };
+
+    parse_app_config_content(&content).1
+}
+
+/// Loads the UI theme from `~/.session-manager/config.toml`, defaulting to
+/// Claude light when the file, the `[theme]` section or the name is missing.
+pub fn load_theme_name() -> ThemeName {
+    config_path()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .map(|content| parse_theme_name(&content))
+        .unwrap_or_default()
+}
+
+pub fn parse_theme_name(content: &str) -> ThemeName {
+    let Ok(config_file) = toml::from_str::<ConfigFile>(content) else {
+        return ThemeName::default();
+    };
+    let Some(name) = config_file.theme.and_then(|section| section.name) else {
+        return ThemeName::default();
+    };
+    ThemeName::parse(&name).unwrap_or_else(|| {
+        eprintln!("[session-manager] Warning: unknown theme \"{name}\" in config, using default.");
+        ThemeName::default()
+    })
 }
 
 #[cfg(test)]
@@ -261,5 +367,59 @@ visible_blocks = ["user", "unknown_thing", "tool_output"]
         assert!(!config.is_visible(&BlockKind::User));
         assert!(config.is_visible(&BlockKind::Assistant));
         assert!(!config.is_visible(&BlockKind::ToolCall));
+    }
+
+    #[test]
+    fn parses_export_config_with_custom_output_dir() {
+        let content = r#"
+[display]
+visible_blocks = ["user"]
+
+[export]
+output_dir = "/custom/export/dir"
+"#;
+        let (display, export) = parse_app_config_content(content);
+        assert!(display.is_visible(&BlockKind::User));
+        assert!(!display.is_visible(&BlockKind::Assistant));
+        assert_eq!(export.output_dir, PathBuf::from("/custom/export/dir"));
+    }
+
+    #[test]
+    fn parses_export_config_with_tilde_expansion() {
+        let content = r#"
+[export]
+output_dir = "~/my-exports"
+"#;
+        let (_, export) = parse_app_config_content(content);
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(export.output_dir, home.join("my-exports"));
+        }
+    }
+
+    #[test]
+    fn missing_export_section_uses_default_output_dir() {
+        let content = r#"
+[display]
+visible_blocks = ["user"]
+"#;
+        let (_, export) = parse_app_config_content(content);
+        assert_eq!(export.output_dir, default_export_root());
+    }
+
+    #[test]
+    fn empty_export_output_dir_uses_default() {
+        let content = r#"
+[export]
+output_dir = "   "
+"#;
+        let (_, export) = parse_app_config_content(content);
+        assert_eq!(export.output_dir, default_export_root());
+    }
+
+    #[test]
+    fn parses_theme_section_and_falls_back_to_default() {
+        assert_eq!(parse_theme_name("[theme]\nname = \"mocha\"\n"), ThemeName::Mocha);
+        assert_eq!(parse_theme_name("[theme]\nname = \"nope\"\n"), ThemeName::ClaudeLight);
+        assert_eq!(parse_theme_name("[display]\nvisible_blocks = []\n"), ThemeName::ClaudeLight);
     }
 }

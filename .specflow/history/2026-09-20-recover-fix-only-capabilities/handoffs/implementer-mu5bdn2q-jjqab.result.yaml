@@ -1,0 +1,16 @@
+task_id: implementer-mu5bdn2q-jjqab
+lease_id: lease-mu5bdn2q-m8cxh
+outcome: needs_decision
+summary: >-
+  permission_insufficient: session-catalog 的 OpenCode 只读 SQLite catalog（任务 1.3）需要
+  rusqlite；当前 Cargo.toml/Cargo.lock 均未声明或锁定该依赖，而正确实现必须修改这两个
+  不在 allowed_paths（src/**、tests/**、当前 Change 目录）内的文件。根据任务边界不能自行
+  扩大权限，也不能部分实现后报告 completed，因此未修改实现代码或测试。
+evidence:
+  changed_files:
+    - .specflow/changes/recover-fix-only-capabilities/handoffs/implementer-mu5bdn2q-jjqab.result.yaml
+  test_results: []
+unresolved_issues:
+  - 需要授权修改 Cargo.toml 与 Cargo.lock，以引入并锁定 rusqlite（bundled）后才能实现 OpenCode SQLite catalog 及其 focused tests。
+  - 未运行测试；在权限阻塞确认后按要求立即停止，Pi/Codex/Claude 及 OpenCode 均未部分移植。
+requested_transition: reviewing

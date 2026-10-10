@@ -1,0 +1,14 @@
+task_id: planner-mu9ieh90-2jip5
+change_id: repair-phase1-system-spec-preservation
+role: planner
+adapter: manual
+lease_id: lease-mu9ieh90-s3jii
+inputs:
+  - proposal.md
+allowed_paths:
+  - .specflow/changes/repair-phase1-system-spec-preservation/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

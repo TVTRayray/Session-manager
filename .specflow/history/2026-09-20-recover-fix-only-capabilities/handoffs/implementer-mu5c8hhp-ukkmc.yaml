@@ -1,0 +1,27 @@
+task_id: implementer-mu5c8hhp-ukkmc
+change_id: recover-fix-only-capabilities
+role: implementer
+target_spec: session-catalog
+adapter: manual
+lease_id: lease-mu5c8hhp-9yyd6
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/session-catalog.md
+allowed_paths:
+  - Cargo.toml
+  - Cargo.lock
+  - src/catalog.rs
+  - src/app.rs
+  - src/delete.rs
+  - src/detail.rs
+  - src/resume.rs
+  - src/tui.rs
+  - src/bin/shortcut_probe.rs
+  - tests/**
+  - .specflow/changes/recover-fix-only-capabilities/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden

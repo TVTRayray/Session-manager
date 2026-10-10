@@ -1,0 +1,28 @@
+task_id: reviewer-mubze52p-imzgw
+lease_id: lease-mubze52p-lifzt
+outcome: completed
+verdict: repair
+category: implementation_defect
+summary: "TUI interaction review passed test compilation and regression checks (258 tests pass), but identified 4 critical implementation defects requiring repair: (1) Cross-engine search/dashboard jumps drop DetailRequest in apply_catalog_result causing the detail panel to permanently hang in Loading state; (2) Search result cards omit mandatory project name and relative timestamp per spec; (3) Dashboard recent_sessions lacks engine identity leading to incorrect engine routing on duplicate session IDs; (4) Search database query errors (StateError) are silently swallowed via unwrap_or_default, misleading users with an empty results message."
+evidence:
+  changed_files:
+    - .specflow/changes/efficiency-export-search-dashboard/reviews/reviewer-mubze52p-imzgw.md
+  test_results:
+    - command: "cargo fmt --check"
+      result: "passed"
+    - command: "cargo check --all-targets"
+      result: "passed"
+    - command: "cargo test --lib app::tests"
+      result: "95 passed, 0 failed"
+    - command: "cargo test --lib tui::tests"
+      result: "34 passed, 0 failed"
+    - command: "cargo test"
+      result: "258 passed (251 unit tests + 7 integration tests), 0 failed"
+    - command: "git diff --check"
+      result: "passed"
+unresolved_issues:
+  - "Cross-engine search/dashboard jump in apply_catalog_result drops the DetailRequest, causing detail panel to permanently stay in Loading state."
+  - "Search result cards do not render mandatory project name and relative timestamp required by spec."
+  - "Dashboard recent_sessions lacks engine identity, causing wrong-engine jumps when duplicate session IDs exist across engines."
+  - "Search database query errors (StateError) are silently swallowed via unwrap_or_default, misleading users as empty results."
+requested_transition: repair

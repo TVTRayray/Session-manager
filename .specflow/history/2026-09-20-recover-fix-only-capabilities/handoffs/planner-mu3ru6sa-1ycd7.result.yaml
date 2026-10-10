@@ -1,0 +1,32 @@
+task_id: planner-mu3ru6sa-1ycd7
+lease_id: lease-mu3ru6sa-qnn5g
+outcome: completed
+summary: >-
+  Audited the current code and six System Specs against source commit
+  f81c1275036b1b2d8946dfee93505bb464b58f57, then produced a selective,
+  five-domain recovery plan for Pi, OpenCode, search, hierarchy, and group summaries.
+evidence:
+  changed_files:
+    - .specflow/changes/recover-fix-only-capabilities/proposal.md
+    - .specflow/changes/recover-fix-only-capabilities/tasks.md
+    - .specflow/changes/recover-fix-only-capabilities/ux-design.md
+    - .specflow/changes/recover-fix-only-capabilities/design.md
+    - .specflow/changes/recover-fix-only-capabilities/spec-plan.yaml
+    - .specflow/changes/recover-fix-only-capabilities/planned-specs/session-catalog.md
+    - .specflow/changes/recover-fix-only-capabilities/planned-specs/session-detail.md
+    - .specflow/changes/recover-fix-only-capabilities/planned-specs/session-launch.md
+    - .specflow/changes/recover-fix-only-capabilities/planned-specs/session-deletion.md
+    - .specflow/changes/recover-fix-only-capabilities/planned-specs/tui-interaction.md
+    - .specflow/changes/recover-fix-only-capabilities/handoffs/planner-mu3ru6sa-1ycd7.result.yaml
+  test_results:
+    - "Static audit completed: current code, all six System Specs, and source commit implementation/test evidence were compared."
+    - "Artifact check passed: required files are present and no template placeholders were found."
+    - "Delta check passed: 2 ADDED, 11 MODIFIED, 0 REMOVED requirements; every MODIFIED name exactly matches its current System Spec."
+    - "Topology check passed: every depends_on entry references only an earlier spec."
+    - "Implementation tests not run by Planner; tasks require focused tests followed by full cargo test."
+unresolved_issues:
+  - >-
+    Non-blocking implementation verification: confirm the installed OpenCode SQLite
+    schema against fixtures. Any need to write the database, interpolate SQL, or
+    weaken file deletion boundaries requires a needs_decision transition.
+requested_transition: ready

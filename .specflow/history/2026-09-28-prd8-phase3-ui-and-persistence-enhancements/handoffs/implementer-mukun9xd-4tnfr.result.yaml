@@ -1,0 +1,32 @@
+task_id: implementer-mukun9xd-4tnfr
+lease_id: lease-mukun9xd-mokc2
+outcome: completed
+summary: "Fixed main-view z collapse from Detail focus; added focused regression coverage for ancestor selection, grouping modes, dashboard/engine transitions, and overlay isolation. Full cargo test is blocked by an unrelated reproducible PTY assertion."
+evidence:
+  changed_files:
+    - src/app.rs
+    - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/fixer-result-mukun9xd.yaml
+  test_results:
+    - command: "cargo fmt --check"
+      status: passed
+    - command: "cargo check --all-targets"
+      status: passed
+    - command: "cargo test --lib app::tests"
+      status: passed
+      details: "125 passed, 0 failed"
+    - command: "cargo test --lib tui::tests"
+      status: passed
+      details: "47 passed, 0 failed"
+    - command: "cargo test --lib"
+      status: passed
+      details: "318 passed, 0 failed"
+    - command: "cargo test"
+      status: failed
+      details: "PTY integration: 6 passed, 1 failed; tests/pty_shortcuts.rs:102 pty_probe_covers_text_input_enter_and_mouse_focus expects j LoadDetail(offset=0), but probe emits action=None after navigating to group header. Reproduces in isolated test; no z input."
+    - command: "cargo test --test pty_shortcuts -- --skip pty_probe_covers_text_input_enter_and_mouse_focus"
+      status: passed
+      details: "6 passed, 0 failed, 1 filtered out"
+    - command: "git diff --check"
+      status: passed
+unresolved_issues:
+  - "Unrelated PTY test expectation failure at tests/pty_shortcuts.rs:102; not changed under z-only scope."

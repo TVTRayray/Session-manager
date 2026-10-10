@@ -1,0 +1,18 @@
+task_id: reviewer-mudjuu98-uspp6
+change_id: prd8-phase1-interaction-bugfixes
+role: reviewer
+target_spec: tui-interaction
+adapter: manual
+lease_id: lease-mudjuu98-ih6pu
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/tui-interaction.md
+allowed_paths:
+  - .specflow/changes/prd8-phase1-interaction-bugfixes/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

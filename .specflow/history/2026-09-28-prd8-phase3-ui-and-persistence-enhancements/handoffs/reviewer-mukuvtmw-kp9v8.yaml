@@ -1,0 +1,18 @@
+task_id: reviewer-mukuvtmw-kp9v8
+change_id: prd8-phase3-ui-and-persistence-enhancements
+role: reviewer
+target_spec: tui-interaction
+adapter: manual
+lease_id: lease-mukuvtmw-ablxm
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/tui-interaction.md
+allowed_paths:
+  - .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

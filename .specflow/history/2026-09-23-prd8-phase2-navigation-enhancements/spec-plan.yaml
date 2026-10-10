@@ -1,0 +1,5 @@
+specs:
+  - id: tui-interaction
+    title: Navigation enhancements: fast vertical jump, circular list traversal, and bulk collapse
+    depends_on: []
+    delta_file: specs/tui-interaction.md

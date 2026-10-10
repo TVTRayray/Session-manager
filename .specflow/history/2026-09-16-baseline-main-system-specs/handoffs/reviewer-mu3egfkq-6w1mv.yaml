@@ -1,0 +1,18 @@
+task_id: reviewer-mu3egfkq-6w1mv
+change_id: baseline-main-system-specs
+role: reviewer
+target_spec: session-detail
+adapter: manual
+lease_id: lease-mu3egfkq-4pre5
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/session-detail.md
+allowed_paths:
+  - .specflow/changes/baseline-main-system-specs/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

@@ -1,0 +1,18 @@
+task_id: reviewer-mu3fn3cx-j5ojw
+change_id: baseline-main-system-specs
+role: reviewer
+target_spec: session-deletion
+adapter: manual
+lease_id: lease-mu3fn3cx-04m2b
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/session-deletion.md
+allowed_paths:
+  - .specflow/changes/baseline-main-system-specs/**
+expected_outputs:
+  - qa_report
+  - result
+test_commands: []
+next_on_success: ready
+subagents: forbidden

@@ -1,0 +1,38 @@
+task_id: implementer-mu6psqwb-rgpe2
+lease_id: lease-mu6psqwb-18lso
+outcome: completed
+summary: >-
+  Implemented session-deletion only: Pi uses the existing canonical engine-root
+  file boundary, OpenCode invokes its CLI with a separate opaque session-ID
+  argument, and existing confirmation, partial-failure, catalog-update,
+  engine-switch, Codex, and Claude behavior remains covered.
+evidence:
+  changed_files:
+    - src/delete.rs
+    - src/app.rs
+    - .specflow/changes/recover-fix-only-capabilities/handoffs/implementer-mu6psqwb-rgpe2.result.yaml
+  test_results:
+    - command: cargo test delete::tests -- --nocapture
+      result: passed
+      counts: 11 passed, 0 failed
+    - command: cargo test delete -- --nocapture
+      result: passed
+      counts: 20 passed, 0 failed
+    - command: cargo fmt --check && cargo test app::tests -- --nocapture
+      result: passed
+      counts: 63 passed, 0 failed
+    - command: cargo test
+      result: passed
+      counts: 171 passed, 0 failed (163 library, 3 main, 5 PTY; 0 doctests)
+    - command: git diff --check
+      result: passed
+      counts: 0 whitespace errors
+  security_checks:
+    - Pi in-root deletion passed; direct out-of-root and in-root symlink-to-outside targets were rejected and retained.
+    - OpenCode command construction is exactly opencode session delete SESSION_ID (opencode.cmd on Windows), with the session ID held as one argv value and never interpreted as a path.
+    - OpenCode success, spawn failure, nonzero exit, and missing exit-status branches passed focused tests.
+    - No shell invocation or SQLite access/write exists in the deletion implementation.
+    - No task-authored dependency, Cargo manifest, README, docs/prd-7.md, root design, later spec, search, hierarchy/tree, or Group Summary change was made.
+    - Changes stayed within the handoff allowed_paths; no new dependency or permission/requirements decision was needed.
+unresolved_issues: []
+requested_transition: reviewing

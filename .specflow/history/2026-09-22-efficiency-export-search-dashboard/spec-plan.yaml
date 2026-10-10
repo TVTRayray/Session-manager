@@ -1,0 +1,20 @@
+specs:
+  - id: session-export
+    title: Markdown single session and group export, secure path containment, and error aggregation
+    depends_on: []
+    delta_file: specs/session-export.md
+  - id: persisted-state
+    title: Schema v2 migration, FTS5 virtual table, index metadata, and worker connection factory
+    depends_on: []
+    delta_file: specs/persisted-state.md
+  - id: content-search
+    title: Asynchronous background indexing, full-text FTS5 queries, and block-level jump navigation
+    depends_on:
+      - persisted-state
+    delta_file: specs/content-search.md
+  - id: tui-interaction
+    title: Export shortcut, full-text search overlay, project dashboard, and modal safeguards
+    depends_on:
+      - session-export
+      - content-search
+    delta_file: specs/tui-interaction.md

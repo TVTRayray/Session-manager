@@ -1,0 +1,6 @@
+task_id: reviewer-mukmyfee-rjq6o
+lease_id: lease-mukmyfee-zt39d
+outcome: completed
+verdict: pass
+qa_report: .specflow/changes/prd8-phase3-ui-and-persistence-enhancements/reviews/reviewer-mukmyfee-rjq6o.md
+summary: "全面完成 tui-interaction 规格审查与对抗性检查：顶栏 Tab 与分组按钮 Hitbox 经 compute_header_layout 与渲染 Line 严格单一真值同步，覆盖四引擎边界、分隔符过滤、激活项幂等与窄屏安全截断；引擎切换无缝复用 switch_to_engine 并完整重置状态，无透传底层；搜索浮层覆盖 7 种状态矩阵，错误信息不被 loading 遮蔽，卡片高亮对比度充足且极端宽与 CJK/Emoji 安全；浮层模态完全隔离鼠标；325 项测试、代码格式与检查全数通过。"

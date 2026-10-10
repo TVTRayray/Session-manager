@@ -1,0 +1,19 @@
+task_id: implementer-mu97hcrj-gona3
+change_id: efficiency-state-and-tags
+role: implementer
+target_spec: session-catalog
+adapter: manual
+lease_id: lease-mu97hcrj-5gn33
+inputs:
+  - proposal.md
+  - tasks.md
+  - specs/session-catalog.md
+allowed_paths:
+  - src/**
+  - tests/**
+  - .specflow/changes/efficiency-state-and-tags/**
+expected_outputs:
+  - result
+test_commands: []
+next_on_success: reviewing
+subagents: forbidden
