@@ -9,7 +9,7 @@ use tui_tree_widget::TreeState;
 
 use crate::catalog::{
     CatalogLoad, EngineCatalogReader, FileHealth, SessionCatalogReader, SessionEngine,
-    SessionListItem,
+    SessionListItem, SessionRelation,
 };
 use crate::config::{DisplayConfig, ExportConfig};
 use crate::delete::DeleteRequest;
@@ -320,6 +320,7 @@ pub struct SessionTreeNode {
     pub display_time: String,
     pub cwd_tail: String,
     pub agent_name: Option<String>,
+    pub relation: SessionRelation,
     pub is_detached: bool,
     pub file_health: FileHealth,
     pub is_favorite: bool,
@@ -1177,8 +1178,26 @@ impl App {
                     self.rebuild_tree_after_session_list_change();
                     self.refresh_header_summary();
                 }
+                // Some engines delete child transcripts stored in a companion directory named
+                // after the session file (Claude's `<id>/subagents/`); drop those that are gone.
+                let companion_dir = success.deleted_path.with_extension("");
+                let removed_with_parent = |item: &SessionListItem| {
+                    item.abs_path.starts_with(&companion_dir) && !item.abs_path.exists()
+                };
+                let before = self.session_list.len();
+                self.session_list.retain(|item| !removed_with_parent(item));
+                if self.session_list.len() != before {
+                    self.selected_index = self
+                        .selected_index
+                        .map(|index| index.min(self.session_list.len().saturating_sub(1)))
+                        .filter(|_| !self.session_list.is_empty());
+                    self.rebuild_tree_after_session_list_change();
+                    self.refresh_header_summary();
+                }
                 if let Some(list) = self.catalog_cache.get_mut(&self.active_engine) {
-                    list.retain(|item| item.abs_path != success.deleted_path);
+                    list.retain(|item| {
+                        item.abs_path != success.deleted_path && !removed_with_parent(item)
+                    });
                 }
 
                 let message = format!("Deleted session {}", success.deleted_session_id);
@@ -2809,7 +2828,16 @@ impl App {
     }
 
     fn begin_resume_request(&mut self) -> Option<ResumeSessionRequest> {
-        let selected = self.selected_item()?.clone();
+        let mut selected = self.selected_item()?.clone();
+        // A sidechain transcript lives inside its parent session and has no resumable id.
+        if selected.relation == SessionRelation::Sidechain
+            && let Some(parent) = selected
+                .parent_session_id
+                .as_deref()
+                .and_then(|id| self.session_list.iter().find(|it| it.session_id == id))
+        {
+            selected = parent.clone();
+        }
         let engine = self.active_engine;
         let engine_label = engine.label();
         let cwd = selected.cwd_path.trim();
@@ -3393,6 +3421,7 @@ fn build_session_tree_node(
         display_time: item.display_time.clone(),
         cwd_tail: item.cwd_tail.clone(),
         agent_name: item.agent_name.clone(),
+        relation: item.relation,
         is_detached: detached[index],
         file_health: item.file_health.clone(),
         is_favorite: item.is_favorite,
@@ -3816,6 +3845,7 @@ mod tests {
             summary: format!("summary for {name}"),
             parent_session_id: None,
             agent_name: None,
+            relation: Default::default(),
             display_time: "2026-04-16 12:00".to_string(),
             cwd_tail: "demo".to_string(),
             cwd_group_label: "workspace/demo".to_string(),
@@ -4786,6 +4816,28 @@ mod tests {
         }
         assert_eq!(app.resume_state, ResumeState::Preparing);
         assert_eq!(app.resume_engine, Some(SessionEngine::Pi));
+    }
+
+    #[test]
+    fn enter_on_sidechain_resumes_its_parent_session() {
+        let parent = item("parent");
+        let mut sidechain = item("agent-a1");
+        sidechain.parent_session_id = Some("parent".to_string());
+        sidechain.relation = SessionRelation::Sidechain;
+        sidechain.cwd_path = "/workspace/agent".to_string();
+        let mut app = App::new(&stub_catalog(vec![parent, sidechain]));
+        app.selected_index = app
+            .session_list
+            .iter()
+            .position(|it| it.session_id == "agent-a1");
+
+        match app.handle_key(KeyEvent::from(KeyCode::Enter)) {
+            Some(AppAction::Resume(request)) => {
+                assert_eq!(request.session_id, "parent");
+                assert_eq!(request.cwd, PathBuf::from("/workspace/parent"));
+            }
+            other => panic!("expected resume request, got {other:?}"),
+        }
     }
 
     #[test]

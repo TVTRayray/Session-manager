@@ -10,7 +10,7 @@ use crate::app::{
     FocusedPanel, GroupMode, GroupSummaryCard, RightPanelMode, SearchPhase, SessionDetailState,
     SplitDirection, TagModalFocus, build_grouped_session_nodes,
 };
-use crate::catalog::{FileHealth, SessionEngine};
+use crate::catalog::{FileHealth, SessionEngine, SessionRelation};
 use crate::detail::{RenderedLine, RenderedLineKind};
 
 // --- Theme Definition ---
@@ -1652,11 +1652,17 @@ pub fn session_node_text_with_width_marked(
         FileHealth::Unreadable => " [unreadable]",
     };
     let detached_suffix = if node.is_detached { " [detached]" } else { "" };
-    let name = truncate_name(&node.name, 38);
     let mark_prefix = if is_marked { "[✓] " } else { "" };
     if is_child {
-        let agent = node.agent_name.as_deref().unwrap_or("Subagent");
-        let full = format!("{mark_prefix}↳ {agent} · {name}{detached_suffix}{health_suffix}");
+        let full = if node.relation == SessionRelation::Fork {
+            // The relation glyph replaces the `⑂` Claude appends to branch titles.
+            let name = truncate_name(node.name.trim_end_matches('⑂').trim_end(), 38);
+            format!("{mark_prefix}↳ ⑂ {name}{detached_suffix}{health_suffix}")
+        } else {
+            let name = truncate_name(&node.name, 38);
+            let agent = node.agent_name.as_deref().unwrap_or("Subagent");
+            format!("{mark_prefix}↳ {agent} · {name}{detached_suffix}{health_suffix}")
+        };
         if max_width < usize::MAX && display_width(&full) > max_width {
             return truncate_summary(&full, max_width);
         }
@@ -1670,7 +1676,18 @@ pub fn session_node_text_with_width_marked(
     };
 
     let star = if node.is_favorite { "★ " } else { "" };
-    let subagent_icon = if !node.children.is_empty() { "🤖 " } else { "" };
+    let name = truncate_name(&node.name, 38);
+    let subagent_icon = if node
+        .children
+        .iter()
+        .any(|child| child.relation != SessionRelation::Fork)
+    {
+        "🤖 "
+    } else if !node.children.is_empty() {
+        "⑂ "
+    } else {
+        ""
+    };
     let prefix = match mode {
         GroupMode::ByTime | GroupMode::ByTag => format!(
             "{mark_prefix}{star}{subagent_icon}[{}] {}{}{}{}",
@@ -1846,6 +1863,7 @@ mod tests {
                     summary: "hello world".to_string(),
                     parent_session_id: None,
                     agent_name: None,
+                    relation: Default::default(),
                     display_time: "2026-04-29 12:00".to_string(),
                     cwd_tail: "demo".to_string(),
                     cwd_group_label: "workspace/demo".to_string(),
@@ -2245,6 +2263,7 @@ mod tests {
             display_time: "2026-04-16 12:00".to_string(),
             cwd_tail: "my-repo".to_string(),
             agent_name: None,
+            relation: Default::default(),
             is_detached: false,
             file_health: FileHealth::Healthy,
             is_favorite: true,
@@ -2282,6 +2301,7 @@ mod tests {
             display_time: "2026-04-16 12:00".to_string(),
             cwd_tail: "my-repo".to_string(),
             agent_name: None,
+            relation: Default::default(),
             is_detached: false,
             file_health: FileHealth::Healthy,
             is_favorite: true,
@@ -2502,6 +2522,7 @@ mod tests {
                     summary: "新彭楠-备煤日进及消".to_string(),
                     parent_session_id: None,
                     agent_name: None,
+                    relation: Default::default(),
                     display_time: "09-16 14:02".to_string(),
                     cwd_tail: "python-script".to_string(),
                     cwd_group_label: "python-script".to_string(),
@@ -2879,6 +2900,7 @@ mod tests {
             is_favorite: true,
             tags: Vec::new(),
             agent_name: None,
+            relation: Default::default(),
             children: Vec::new(),
         };
 
@@ -3249,6 +3271,7 @@ mod tests {
             is_favorite: false,
             tags: Vec::new(),
             agent_name: Some("Explore".to_string()),
+            relation: Default::default(),
             children: Vec::new(),
         };
 
@@ -3264,6 +3287,7 @@ mod tests {
             is_favorite: false,
             tags: Vec::new(),
             agent_name: None,
+            relation: Default::default(),
             children: vec![child_node.clone()],
         };
 
@@ -3290,6 +3314,7 @@ mod tests {
             is_favorite: false,
             tags: Vec::new(),
             agent_name: None,
+            relation: Default::default(),
             children: Vec::new(),
         };
         let solo_text = session_node_text(&solo_node, &GroupMode::ByTime, false);
@@ -3301,6 +3326,22 @@ mod tests {
         assert!(!child_text.contains("🤖"));
         assert!(child_text.starts_with("↳ Explore · Child Subagent"));
 
+        // Fork children use the branch glyph instead of an agent label, and a parent whose
+        // children are all forks is not presented as a subagent owner.
+        let mut fork_child = child_node.clone();
+        fork_child.relation = SessionRelation::Fork;
+        fork_child.agent_name = None;
+        fork_child.name = "Alarm push ⑂".to_string();
+        let fork_text = session_node_text(&fork_child, &GroupMode::ByTime, true);
+        assert!(fork_text.starts_with("↳ ⑂ Alarm push"), "{fork_text}");
+        assert!(!fork_text.ends_with('⑂'));
+        let mut fork_parent = parent_node.clone();
+        fork_parent.children = vec![fork_child];
+        let fork_parent_text = session_node_text(&fork_parent, &GroupMode::ByTime, false);
+        assert!(
+            fork_parent_text.starts_with("⑂ [demo] Parent Session [1]"),
+            "{fork_parent_text}"
+        );
     }
 
     #[test]
@@ -3317,6 +3358,7 @@ mod tests {
             is_favorite: true,
             tags: Vec::new(),
             agent_name: None,
+            relation: Default::default(),
             children: Vec::new(),
         };
 
@@ -3342,6 +3384,7 @@ mod tests {
             is_favorite: false,
             tags: Vec::new(),
             agent_name: Some("Planner".to_string()),
+            relation: Default::default(),
             children: Vec::new(),
         };
         let marked_child_text = session_node_text_with_marking(&child_node, &GroupMode::ByTime, true, true);
@@ -3362,6 +3405,7 @@ mod tests {
             is_favorite: true,
             tags: vec!["tag1".to_string()],
             agent_name: None,
+            relation: Default::default(),
             children: Vec::new(),
         };
 

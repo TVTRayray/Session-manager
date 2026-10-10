@@ -1118,7 +1118,27 @@ fn process_claude_user_message(value: &Value) -> Vec<TranscriptBlock> {
         return Vec::new();
     };
 
+    // `isMeta` entries are injected by the harness (skill bodies, image notes, rename
+    // reminders), not typed by the user.
+    if value.get("isMeta").and_then(Value::as_bool) == Some(true) {
+        let text = content
+            .as_str()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| collect_message_text(Some(content)));
+        let preview = truncate_single_line(&strip_markup_tags(&text), 80);
+        return vec![TranscriptBlock::SystemContextFolded(
+            if preview.is_empty() {
+                "[injected context hidden]".to_string()
+            } else {
+                format!("[injected] {preview}")
+            },
+        )];
+    }
+
     if let Some(text) = content.as_str() {
+        if let Some(blocks) = claude_local_command_blocks(text) {
+            return blocks;
+        }
         return split_user_message(text);
     }
 
@@ -1147,6 +1167,71 @@ fn process_claude_user_message(value: &Value) -> Vec<TranscriptBlock> {
     }
 
     blocks
+}
+
+/// Removes `<tag>`/`</tag>` markers (keeping their text) so previews read as prose.
+fn strip_markup_tags(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        output.push_str(&rest[..start]);
+        let candidate = &rest[start + 1..];
+        let is_tag = candidate
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '/');
+        match candidate.find('>') {
+            Some(end) if is_tag && !candidate[..end].contains(char::is_whitespace) => {
+                output.push(' ');
+                rest = &candidate[end + 1..];
+            }
+            _ => {
+                output.push('<');
+                rest = candidate;
+            }
+        }
+    }
+    output.push_str(rest);
+    output.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Claude records slash commands run locally (`/rename`, `/model`, ...) as tagged user
+/// entries; show them as the command line and its output instead of hiding them.
+fn claude_local_command_blocks(text: &str) -> Option<Vec<TranscriptBlock>> {
+    fn tag_body<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+        let open = format!("<{tag}>");
+        let close = format!("</{tag}>");
+        let start = text.find(&open)? + open.len();
+        let end = text[start..].find(&close)? + start;
+        Some(text[start..end].trim())
+    }
+
+    let trimmed = text.trim_start();
+    if trimmed.starts_with("<command-name>") {
+        let name = tag_body(trimmed, "command-name")?;
+        let args = tag_body(trimmed, "command-args").unwrap_or_default();
+        let command = if args.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name} {args}")
+        };
+        return Some(vec![TranscriptBlock::UserText(command)]);
+    }
+    if trimmed.starts_with("<local-command-stdout>")
+        || trimmed.starts_with("<local-command-stderr>")
+    {
+        let output = tag_body(trimmed, "local-command-stdout")
+            .or_else(|| tag_body(trimmed, "local-command-stderr"))
+            .unwrap_or_default();
+        if output.is_empty() {
+            return Some(Vec::new());
+        }
+        return Some(vec![TranscriptBlock::ToolOutputSummary(format!(
+            "Command output ({})",
+            truncate_single_line(output, 100)
+        ))]);
+    }
+    None
 }
 
 fn process_claude_assistant_message(value: &Value) -> Vec<TranscriptBlock> {
@@ -2096,6 +2181,37 @@ mod tests {
                 TranscriptBlock::ToolCallSummary(
                     "Tool call: exec_command (cmd=rg --files src)".to_string()
                 ),
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_folds_injected_meta_and_shows_local_commands() {
+        let detail = must(parse_reader_for_engine(
+            SessionEngine::Claude,
+            Cursor::new(fixture(&[
+                r#"{"type":"user","isMeta":true,"sessionId":"c","message":{"role":"user","content":"Base directory for this skill: /skills/x\n\nlong body"}}"#,
+                r#"{"type":"user","isMeta":true,"sessionId":"c","message":{"role":"user","content":"<system-reminder>\nThe user named this session \"Alarm\".\n</system-reminder>"}}"#,
+                r#"{"type":"user","sessionId":"c","message":{"role":"user","content":"<command-name>/rename</command-name>\n<command-message>rename</command-message>\n<command-args>Alarm work</command-args>"}}"#,
+                r#"{"type":"user","sessionId":"c","message":{"role":"user","content":"<local-command-stdout>Session renamed to: Alarm work</local-command-stdout>"}}"#,
+                r#"{"type":"user","sessionId":"c","message":{"role":"user","content":"real question"}}"#,
+            ])),
+        ));
+
+        assert_eq!(
+            detail.transcript_blocks,
+            vec![
+                TranscriptBlock::SystemContextFolded(
+                    "[injected] Base directory for this skill: /skills/x long body".to_string()
+                ),
+                TranscriptBlock::SystemContextFolded(
+                    "[injected] The user named this session \"Alarm\".".to_string()
+                ),
+                TranscriptBlock::UserText("/rename Alarm work".to_string()),
+                TranscriptBlock::ToolOutputSummary(
+                    "Command output (Session renamed to: Alarm work)".to_string()
+                ),
+                TranscriptBlock::UserText("real question".to_string()),
             ]
         );
     }

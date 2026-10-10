@@ -155,6 +155,7 @@ fn make_probe_item(
         summary: name.to_string(),
         parent_session_id: None,
         agent_name: None,
+        relation: Default::default(),
         display_time: display_time.to_string(),
         cwd_tail: workspace.to_string(),
         cwd_group_label: format!("workspace/{workspace}"),

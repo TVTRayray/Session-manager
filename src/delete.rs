@@ -71,8 +71,49 @@ impl SessionDeleteExecutor for EngineAwareSessionDeleteExecutor {
             return delete_opencode_session(&request.session_id);
         }
         let root_dir = request.engine.root_dir(&self.home_dir);
+        if request.engine == SessionEngine::Claude {
+            return delete_claude_session(&root_dir, &request.path);
+        }
         delete_session_file(&root_dir, &request.path)
     }
+}
+
+/// Claude keeps per-session companions beside the transcript: `<id>/` (subagent
+/// transcripts, tool results, title cache) and `agent-<id>.meta.json` for subagents.
+/// Removing only the `.jsonl` would leave them orphaned forever.
+fn delete_claude_session(root_dir: &Path, path: &Path) -> Result<(), DeleteError> {
+    if fs::symlink_metadata(path).is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound) {
+        // A subagent transcript disappears together with its parent's companion directory.
+        return Ok(());
+    }
+    delete_session_file(root_dir, path)?;
+
+    let canonical_root = fs::canonicalize(root_dir).map_err(|err| {
+        DeleteError::Io(format!(
+            "Unable to read session directory {}: {err}",
+            root_dir.display()
+        ))
+    })?;
+    let companion_dir = path.with_extension("");
+    if companion_dir.is_dir() {
+        let validated = validate_session_path(&canonical_root, &companion_dir)
+            .map_err(DeleteError::RejectedPath)?;
+        if validated != canonical_root {
+            fs::remove_dir_all(&validated).map_err(|err| {
+                DeleteError::Io(format!(
+                    "Deleted session but could not remove {}: {err}",
+                    validated.display()
+                ))
+            })?;
+        }
+    }
+    let meta_file = path.with_extension("meta.json");
+    if meta_file.is_file() {
+        let validated = validate_session_path(&canonical_root, &meta_file)
+            .map_err(DeleteError::RejectedPath)?;
+        let _ = fs::remove_file(validated);
+    }
+    Ok(())
 }
 
 fn delete_opencode_session(session_id: &str) -> Result<(), DeleteError> {
@@ -329,6 +370,67 @@ mod tests {
 
         must(executor.delete_session(&request));
         assert!(!claude_session.exists());
+    }
+
+    #[test]
+    fn claude_delete_removes_companion_directory_and_tolerates_cascaded_children() {
+        let home = must(tempdir());
+        let project = home
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join("-tmp-demo");
+        let subagents = project.join("parent").join("subagents");
+        must(fs::create_dir_all(&subagents));
+        must(fs::create_dir_all(
+            project.join("parent").join("tool-results"),
+        ));
+        let parent = project.join("parent.jsonl");
+        let child = subagents.join("agent-a1.jsonl");
+        must(fs::write(&parent, "{}\n"));
+        must(fs::write(&child, "{}\n"));
+        must(fs::write(subagents.join("agent-a1.meta.json"), "{}"));
+        let sibling = project.join("other.jsonl");
+        must(fs::write(&sibling, "{}\n"));
+
+        let executor = EngineAwareSessionDeleteExecutor::from_home_dir(home.path().to_path_buf());
+        let request = |path: &Path, id: &str| DeleteRequest {
+            engine: SessionEngine::Claude,
+            path: path.to_path_buf(),
+            session_id: id.to_string(),
+        };
+
+        must(executor.delete_session(&request(&parent, "parent")));
+        assert!(!parent.exists());
+        assert!(!project.join("parent").exists());
+        assert!(sibling.exists());
+        must(executor.delete_session(&request(&child, "agent-a1")));
+    }
+
+    #[test]
+    fn claude_delete_of_subagent_removes_its_meta_file() {
+        let home = must(tempdir());
+        let subagents = home
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join("-tmp-demo")
+            .join("parent")
+            .join("subagents");
+        must(fs::create_dir_all(&subagents));
+        let child = subagents.join("agent-a1.jsonl");
+        let meta = subagents.join("agent-a1.meta.json");
+        must(fs::write(&child, "{}\n"));
+        must(fs::write(&meta, "{}"));
+
+        let executor = EngineAwareSessionDeleteExecutor::from_home_dir(home.path().to_path_buf());
+        must(executor.delete_session(&DeleteRequest {
+            engine: SessionEngine::Claude,
+            path: child.clone(),
+            session_id: "agent-a1".to_string(),
+        }));
+        assert!(!child.exists());
+        assert!(!meta.exists());
     }
 
     #[test]

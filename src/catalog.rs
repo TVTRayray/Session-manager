@@ -108,6 +108,21 @@ pub enum FileHealth {
 
 pub const UNTITLED_SESSION_NAME: &str = "Untitled session";
 
+/// Claude Code appends this marker to the title of conversations created by `/branch`.
+const CLAUDE_BRANCH_MARKER: char = '⑂';
+
+/// How a session relates to its `parent_session_id`; meaningful only when a parent is set.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SessionRelation {
+    /// A standalone, resumable session spawned by the parent agent.
+    #[default]
+    Subagent,
+    /// A subagent transcript stored inside the parent session; it is resumed through the parent.
+    Sidechain,
+    /// A conversation branched or forked from the parent.
+    Fork,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionListItem {
     pub session_id: String,
@@ -115,6 +130,7 @@ pub struct SessionListItem {
     pub summary: String,
     pub parent_session_id: Option<String>,
     pub agent_name: Option<String>,
+    pub relation: SessionRelation,
     pub display_time: String,
     pub cwd_tail: String,
     pub cwd_group_label: String,
@@ -187,9 +203,8 @@ impl EngineCatalogReader for FilesystemMultiSessionCatalog {
         match engine {
             SessionEngine::Pi => scan_pi_session_dir(&engine.root_dir(&self.home_dir)),
             SessionEngine::OpenCode => scan_opencode_db(&engine.opencode_db_path(&self.home_dir)),
-            SessionEngine::Codex | SessionEngine::Claude => {
-                scan_session_dir(&engine.root_dir(&self.home_dir))
-            }
+            SessionEngine::Codex => scan_session_dir(&engine.root_dir(&self.home_dir)),
+            SessionEngine::Claude => scan_claude_projects_dir(&engine.root_dir(&self.home_dir)),
         }
     }
 }
@@ -260,6 +275,7 @@ pub fn scan_opencode_db(db_path: &Path) -> Result<CatalogLoad, String> {
                 .as_deref()
                 .and_then(normalize_optional_metadata),
             agent_name: agent_name.as_deref().and_then(normalize_optional_metadata),
+            relation: SessionRelation::default(),
             display_time: format_system_time(modified_at),
             cwd_tail,
             cwd_group_label,
@@ -814,7 +830,39 @@ fn tintinweb_child_cwds(
     (transcript_cwd, header_cwd)
 }
 
+/// On-disk conventions that change how a JSONL session tree is interpreted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JsonlLayout {
+    Generic,
+    /// `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, with per-session companion
+    /// directories holding `subagents/agent-*.jsonl` and `tool-results/`.
+    Claude,
+}
+
+/// Header facts that are not part of the list item but drive cross-session linking.
+#[derive(Clone, Debug, Default)]
+struct StubEvidence {
+    forked_from: Option<String>,
+    root_message_uuid: Option<String>,
+    branch_marked: bool,
+}
+
 pub fn scan_session_dir(base_dir: &Path) -> Result<CatalogLoad, String> {
+    scan_jsonl_dir(base_dir, JsonlLayout::Generic, &mut HashMap::new())
+}
+
+pub fn scan_claude_projects_dir(base_dir: &Path) -> Result<CatalogLoad, String> {
+    let mut evidence = HashMap::new();
+    let mut load = scan_jsonl_dir(base_dir, JsonlLayout::Claude, &mut evidence)?;
+    apply_claude_fork_relations(&mut load.items, &evidence);
+    Ok(load)
+}
+
+fn scan_jsonl_dir(
+    base_dir: &Path,
+    layout: JsonlLayout,
+    evidence: &mut HashMap<PathBuf, StubEvidence>,
+) -> Result<CatalogLoad, String> {
     let canonical_root = fs::canonicalize(base_dir).map_err(|err| {
         format!(
             "Unable to read session directory {}: {err}",
@@ -835,9 +883,11 @@ pub fn scan_session_dir(base_dir: &Path) -> Result<CatalogLoad, String> {
     walk_session_dir(
         base_dir,
         &canonical_root,
+        layout,
         &mut items,
         &mut warnings,
         &mut file_health_map,
+        evidence,
     );
 
     items.sort_by(|left, right| right.modified_at.cmp(&left.modified_at));
@@ -851,9 +901,11 @@ pub fn scan_session_dir(base_dir: &Path) -> Result<CatalogLoad, String> {
 fn walk_session_dir(
     current_dir: &Path,
     canonical_root: &Path,
+    layout: JsonlLayout,
     items: &mut Vec<SessionListItem>,
     warnings: &mut Vec<String>,
     file_health_map: &mut HashMap<PathBuf, FileHealth>,
+    evidence: &mut HashMap<PathBuf, StubEvidence>,
 ) {
     let entries = match fs::read_dir(current_dir) {
         Ok(entries) => entries,
@@ -900,6 +952,7 @@ fn walk_session_dir(
                         summary: fallback_summary(&path),
                         parent_session_id: None,
                         agent_name: None,
+                        relation: SessionRelation::default(),
                         display_time: "metadata unavailable".to_string(),
                         cwd_tail: "-".to_string(),
                         cwd_group_label: "unknown-project".to_string(),
@@ -922,12 +975,24 @@ fn walk_session_dir(
             if path.file_name() == Some(OsStr::new("sol-pi")) {
                 continue;
             }
+            // Claude keeps large tool outputs and auto-memory next to sessions; neither
+            // contains transcripts, so skip them instead of walking thousands of files.
+            if layout == JsonlLayout::Claude
+                && matches!(
+                    path.file_name().and_then(OsStr::to_str),
+                    Some("tool-results" | "memory")
+                )
+            {
+                continue;
+            }
             walk_session_dir(
                 &validated_path,
                 canonical_root,
+                layout,
                 items,
                 warnings,
                 file_health_map,
+                evidence,
             );
             continue;
         }
@@ -940,6 +1005,13 @@ fn walk_session_dir(
         }
 
         let modified_at = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let stub = read_session_stub(&validated_path, layout);
+        if matches!(stub, StubRead::NoConversation) {
+            // Claude creates transcript files before the first prompt (and when a resume is
+            // launched from a directory it does not know). They hold only mode/permission
+            // bookkeeping, cannot be resumed, and would otherwise surface as ghost sessions.
+            continue;
+        }
         let (
             session_id,
             name,
@@ -951,7 +1023,8 @@ fn walk_session_dir(
             cwd_path,
             file_health,
             warning,
-        ) = match read_session_stub(&validated_path) {
+        ) = match stub {
+            StubRead::NoConversation => unreachable!("skipped above"),
             StubRead::Success {
                 session_id,
                 name,
@@ -961,18 +1034,22 @@ fn walk_session_dir(
                 cwd_tail,
                 cwd_group_label,
                 cwd_path,
-            } => (
-                session_id,
-                name,
-                summary,
-                parent_session_id,
-                agent_name,
-                cwd_tail,
-                cwd_group_label,
-                cwd_path,
-                FileHealth::Healthy,
-                None,
-            ),
+                evidence: stub_evidence,
+            } => {
+                evidence.insert(validated_path.clone(), stub_evidence);
+                (
+                    session_id,
+                    name,
+                    summary,
+                    parent_session_id,
+                    agent_name,
+                    cwd_tail,
+                    cwd_group_label,
+                    cwd_path,
+                    FileHealth::Healthy,
+                    None,
+                )
+            }
             StubRead::Warning(message) => (
                 fallback_session_id(&path),
                 UNTITLED_SESSION_NAME.to_string(),
@@ -991,24 +1068,138 @@ fn walk_session_dir(
             warnings.push(warning);
         }
 
-        file_health_map.insert(validated_path.clone(), file_health.clone());
-        items.push(SessionListItem {
+        let mut item = SessionListItem {
             session_id,
             name,
             summary,
             parent_session_id,
             agent_name,
+            relation: SessionRelation::default(),
             display_time: format_system_time(modified_at),
             cwd_tail,
             cwd_group_label,
             cwd_path,
-            abs_path: validated_path,
+            abs_path: validated_path.clone(),
             is_loadable: file_health != FileHealth::Unreadable,
             modified_at,
-            file_health,
+            file_health: file_health.clone(),
             is_favorite: false,
             tags: Vec::new(),
-        });
+        };
+        if layout == JsonlLayout::Claude {
+            attach_claude_sidechain(&mut item, &validated_path);
+        }
+
+        file_health_map.insert(validated_path, file_health);
+        items.push(item);
+    }
+}
+
+/// Links `<parent>/subagents/agent-<id>.jsonl` to its parent session. Every line of a
+/// subagent transcript carries the parent's `sessionId`, so the file stem is the only
+/// identity that does not collide with the parent.
+fn attach_claude_sidechain(item: &mut SessionListItem, path: &Path) {
+    let Some(subagents_dir) = path.parent() else {
+        return;
+    };
+    if subagents_dir.file_name() != Some(OsStr::new("subagents")) {
+        return;
+    }
+    let Some(parent_session_id) = subagents_dir
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(OsStr::to_str)
+    else {
+        return;
+    };
+
+    item.session_id = fallback_session_id(path);
+    item.parent_session_id = Some(parent_session_id.to_string());
+    item.relation = SessionRelation::Sidechain;
+
+    let meta = fs::read_to_string(path.with_extension("meta.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    let meta_text = |key: &str| {
+        meta.as_ref()
+            .and_then(|meta| meta.get(key))
+            .and_then(Value::as_str)
+            .and_then(normalize_optional_metadata)
+    };
+    item.agent_name = meta_text("agentType").or_else(|| Some("Subagent".to_string()));
+    if let Some(description) = meta_text("description").and_then(|d| normalize_session_name(&d)) {
+        item.name = description;
+    }
+}
+
+/// Resolves Claude forks. `--fork-session` records `forkedFrom.sessionId` explicitly;
+/// `/branch` instead copies the transcript (keeping message uuids) and marks the title with
+/// `⑂`, so a marked session is linked to the single unmarked session sharing its root
+/// message. Anything ambiguous stays an independent root.
+fn apply_claude_fork_relations(
+    items: &mut [SessionListItem],
+    evidence: &HashMap<PathBuf, StubEvidence>,
+) {
+    let known_ids = items
+        .iter()
+        .map(|item| item.session_id.clone())
+        .collect::<HashSet<_>>();
+    let mut by_root_message: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (index, item) in items.iter().enumerate() {
+        if item.parent_session_id.is_some() {
+            continue;
+        }
+        if let Some(root) = evidence
+            .get(&item.abs_path)
+            .and_then(|evidence| evidence.root_message_uuid.as_deref())
+        {
+            by_root_message.entry(root).or_default().push(index);
+        }
+    }
+
+    let mut links = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        if item.parent_session_id.is_some() {
+            continue;
+        }
+        let Some(own) = evidence.get(&item.abs_path) else {
+            continue;
+        };
+        if let Some(source) = own
+            .forked_from
+            .as_deref()
+            .filter(|source| *source != item.session_id && known_ids.contains(*source))
+        {
+            links.push((index, source.to_string()));
+            continue;
+        }
+        if !own.branch_marked {
+            continue;
+        }
+        let Some(siblings) = own
+            .root_message_uuid
+            .as_deref()
+            .and_then(|root| by_root_message.get(root))
+        else {
+            continue;
+        };
+        let candidates = siblings
+            .iter()
+            .filter(|candidate| **candidate != index)
+            .filter(|candidate| {
+                !evidence
+                    .get(&items[**candidate].abs_path)
+                    .is_some_and(|evidence| evidence.branch_marked)
+            })
+            .collect::<Vec<_>>();
+        if let [parent] = candidates.as_slice() {
+            links.push((index, items[**parent].session_id.clone()));
+        }
+    }
+
+    for (index, parent_session_id) in links {
+        items[index].parent_session_id = Some(parent_session_id);
+        items[index].relation = SessionRelation::Fork;
     }
 }
 
@@ -1022,11 +1213,14 @@ enum StubRead {
         cwd_tail: String,
         cwd_group_label: String,
         cwd_path: String,
+        evidence: StubEvidence,
     },
     Warning(String),
+    /// A Claude transcript without a single user or assistant message.
+    NoConversation,
 }
 
-fn read_session_stub(path: &Path) -> StubRead {
+fn read_session_stub(path: &Path, layout: JsonlLayout) -> StubRead {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(err) => {
@@ -1046,6 +1240,10 @@ fn read_session_stub(path: &Path) -> StubRead {
     let mut explicit_name: Option<String> = None;
     let mut generated_name: Option<String> = None;
     let mut scan_embedded_names = false;
+    let mut claude_session_id: Option<String> = None;
+    let mut claude_cwd: Option<String> = None;
+    let mut has_conversation = false;
+    let mut evidence = StubEvidence::default();
 
     for (index, line_result) in reader.lines().enumerate() {
         let line = match line_result {
@@ -1059,13 +1257,17 @@ fn read_session_stub(path: &Path) -> StubRead {
             }
         };
         let inspect_stub = index < 50;
-        if !inspect_stub && !scan_embedded_names {
+        let probe_conversation = layout == JsonlLayout::Claude && !has_conversation;
+        if !inspect_stub && !scan_embedded_names && !probe_conversation {
             break;
         }
         let may_contain_name = line.contains("\"session_info\"")
             || line.contains("\"custom-title\"")
-            || line.contains("\"ai-title\"");
-        if !inspect_stub && !may_contain_name {
+            || line.contains("\"ai-title\"")
+            || line.contains("\"agent-name\"");
+        let may_be_conversation = probe_conversation
+            && (line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\""));
+        if !inspect_stub && !may_contain_name && !may_be_conversation {
             continue;
         }
 
@@ -1085,9 +1287,13 @@ fn read_session_stub(path: &Path) -> StubRead {
                     | "session_info"
                     | "custom-title"
                     | "ai-title"
+                    | "agent-name"
             )
         ) {
             scan_embedded_names = true;
+        }
+        if matches!(msg_type, Some("user" | "assistant")) {
+            has_conversation = true;
         }
 
         match msg_type {
@@ -1106,6 +1312,7 @@ fn read_session_stub(path: &Path) -> StubRead {
                     .and_then(Value::as_str)
                     .and_then(normalize_session_name)
                 {
+                    evidence.branch_marked |= name.ends_with(CLAUDE_BRANCH_MARKER);
                     explicit_name = Some(name);
                 }
             }
@@ -1115,8 +1322,15 @@ fn read_session_stub(path: &Path) -> StubRead {
                     .and_then(Value::as_str)
                     .and_then(normalize_session_name)
                 {
+                    evidence.branch_marked |= name.ends_with(CLAUDE_BRANCH_MARKER);
                     generated_name = Some(name);
                 }
+            }
+            Some("agent-name") => {
+                evidence.branch_marked |= value
+                    .get("agentName")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| name.trim_end().ends_with(CLAUDE_BRANCH_MARKER));
             }
             _ => {}
         }
@@ -1160,22 +1374,46 @@ fn read_session_stub(path: &Path) -> StubRead {
                 .or_else(|| payload.get("agent"))
                 .and_then(Value::as_str)
                 .and_then(normalize_optional_metadata);
-        } else if matches!(msg_type, Some("user" | "assistant")) {
-            session_id = value
-                .get("sessionId")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| fallback_session_id(path));
-            cwd_path = value
-                .get("cwd")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| "-".to_string());
+        } else if let Some(line_session_id) = value.get("sessionId").and_then(Value::as_str) {
+            // Claude stamps every entry with the cwd *at that moment*, which follows `cd`
+            // into subdirectories. The first stamp is the launch directory: the project the
+            // session belongs to and the only directory `claude --resume` can find it from.
+            claude_session_id.get_or_insert_with(|| line_session_id.to_string());
+            if claude_cwd.is_none() {
+                claude_cwd = value
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .and_then(normalize_optional_metadata);
+            }
+            if evidence.forked_from.is_none() {
+                evidence.forked_from = value
+                    .pointer("/forkedFrom/sessionId")
+                    .and_then(Value::as_str)
+                    .and_then(normalize_optional_metadata);
+            }
+            if evidence.root_message_uuid.is_none()
+                && value.get("parentUuid").is_some_and(Value::is_null)
+            {
+                evidence.root_message_uuid = value
+                    .get("uuid")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+            }
         }
 
         if summary.is_none() {
             summary = extract_user_summary(&value);
         }
+    }
+
+    if layout == JsonlLayout::Claude && !has_conversation {
+        return StubRead::NoConversation;
+    }
+    if let Some(id) = claude_session_id {
+        session_id = id;
+    }
+    if let Some(cwd) = claude_cwd {
+        cwd_path = cwd;
     }
 
     if cwd_path != "-" || summary.is_some() || explicit_name.is_some() || generated_name.is_some() {
@@ -1195,6 +1433,7 @@ fn read_session_stub(path: &Path) -> StubRead {
             cwd_tail,
             cwd_group_label,
             cwd_path,
+            evidence,
         };
     }
 
@@ -1205,6 +1444,10 @@ fn read_session_stub(path: &Path) -> StubRead {
 }
 
 fn extract_user_summary(value: &Value) -> Option<String> {
+    // Claude marks harness-injected user entries (skill bodies, reminders) as meta.
+    if value.get("isMeta").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
     if matches!(
         value.get("type").and_then(Value::as_str),
         Some("user" | "USER_INPUT")
@@ -1496,7 +1739,7 @@ mod tests {
         ));
         must(fs::write(
             claude_root.join("claude.jsonl"),
-            r#"{"type":"session_meta","payload":{"id":"claude","cwd":"/tmp/claude"}}"#,
+            r#"{"type":"user","sessionId":"claude","cwd":"/tmp/claude","parentUuid":null,"uuid":"u1","message":{"role":"user","content":"hello"}}"#,
         ));
 
         let catalog = FilesystemMultiSessionCatalog::from_path(home.path().to_path_buf());
@@ -1507,6 +1750,237 @@ mod tests {
         assert_eq!(codex.items[0].session_id, "codex");
         assert_eq!(claude.items.len(), 1);
         assert_eq!(claude.items[0].session_id, "claude");
+    }
+
+    fn claude_line(
+        kind: &str,
+        session_id: &str,
+        cwd: &str,
+        uuid: &str,
+        parent: Option<&str>,
+        extra: &str,
+    ) -> String {
+        let parent = parent.map_or("null".to_string(), |p| format!("\"{p}\""));
+        format!(
+            r#"{{"type":"{kind}","sessionId":"{session_id}","cwd":"{cwd}","uuid":"{uuid}","parentUuid":{parent},"message":{{"role":"{kind}","content":"prompt {uuid}"}}{extra}}}"#
+        )
+    }
+
+    fn write_claude_session(project: &Path, session_id: &str, lines: &[String]) -> PathBuf {
+        must(fs::create_dir_all(project));
+        let path = project.join(format!("{session_id}.jsonl"));
+        must(fs::write(&path, lines.join("\n")));
+        path
+    }
+
+    fn claude_items(home: &Path) -> Vec<SessionListItem> {
+        let catalog = FilesystemMultiSessionCatalog::from_path(home.to_path_buf());
+        must(catalog.load_sessions_for(SessionEngine::Claude)).items
+    }
+
+    fn claude_item<'a>(items: &'a [SessionListItem], session_id: &str) -> &'a SessionListItem {
+        items
+            .iter()
+            .find(|item| item.session_id == session_id)
+            .unwrap_or_else(|| panic!("missing {session_id}"))
+    }
+
+    #[test]
+    fn claude_skips_transcripts_without_conversation() {
+        let home = must(tempdir());
+        let project = home.path().join(".claude/projects/-work-app");
+        write_claude_session(
+            &project,
+            "ghost",
+            &[
+                r#"{"type":"mode","mode":"normal","sessionId":"ghost"}"#.to_string(),
+                r#"{"type":"permission-mode","permissionMode":"auto","sessionId":"ghost"}"#
+                    .to_string(),
+                r#"{"type":"last-prompt","sessionId":"ghost"}"#.to_string(),
+            ],
+        );
+        write_claude_session(
+            &project,
+            "real",
+            &[claude_line("user", "real", "/work/app", "u1", None, "")],
+        );
+
+        let load = must(
+            FilesystemMultiSessionCatalog::from_path(home.path().to_path_buf())
+                .load_sessions_for(SessionEngine::Claude),
+        );
+        assert_eq!(load.items.len(), 1);
+        assert_eq!(load.items[0].session_id, "real");
+        assert!(load.warnings.is_empty(), "{:?}", load.warnings);
+    }
+
+    #[test]
+    fn claude_conversation_beyond_header_window_is_not_a_ghost() {
+        let home = must(tempdir());
+        let project = home.path().join(".claude/projects/-work-app");
+        let mut lines = (0..60)
+            .map(|_| r#"{"type":"mode","mode":"normal","sessionId":"late"}"#.to_string())
+            .collect::<Vec<_>>();
+        lines.push(claude_line("user", "late", "/work/app", "u1", None, ""));
+        write_claude_session(&project, "late", &lines);
+
+        let items = claude_items(home.path());
+        assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn claude_groups_by_launch_directory_not_latest_cd() {
+        let home = must(tempdir());
+        let project = home.path().join(".claude/projects/-work-entrust-app-iron");
+        write_claude_session(
+            &project,
+            "s1",
+            &[
+                claude_line("user", "s1", "/work/entrust/app-iron", "u1", None, ""),
+                claude_line(
+                    "assistant",
+                    "s1",
+                    "/work/entrust/app-iron/common/src/ana",
+                    "a1",
+                    Some("u1"),
+                    "",
+                ),
+                claude_line(
+                    "user",
+                    "s1",
+                    "/work/entrust/app-iron/common/src/ana",
+                    "u2",
+                    Some("a1"),
+                    "",
+                ),
+            ],
+        );
+
+        let items = claude_items(home.path());
+        assert_eq!(items[0].cwd_path, "/work/entrust/app-iron");
+        assert_eq!(items[0].cwd_group_label, "entrust/app-iron");
+        assert_eq!(items[0].cwd_tail, "app-iron");
+    }
+
+    #[test]
+    fn claude_subagent_transcripts_become_sidechain_children() {
+        let home = must(tempdir());
+        let project = home.path().join(".claude/projects/-work-app");
+        write_claude_session(
+            &project,
+            "parent",
+            &[claude_line("user", "parent", "/work/app", "u1", None, "")],
+        );
+        let subagents = project.join("parent").join("subagents");
+        write_claude_session(
+            &subagents,
+            "agent-a1",
+            &[claude_line(
+                "user",
+                "parent",
+                "/work/app",
+                "s1",
+                None,
+                r#","isSidechain":true"#,
+            )],
+        );
+        must(fs::write(
+            subagents.join("agent-a1.meta.json"),
+            r#"{"agentType":"Explore","description":"Map the tree widget"}"#,
+        ));
+        let tool_results = project.join("parent").join("tool-results");
+        must(fs::create_dir_all(&tool_results));
+        must(fs::write(tool_results.join("big.jsonl"), "{}"));
+
+        let items = claude_items(home.path());
+        assert_eq!(items.len(), 2);
+        let child = claude_item(&items, "agent-a1");
+        assert_eq!(child.parent_session_id.as_deref(), Some("parent"));
+        assert_eq!(child.relation, SessionRelation::Sidechain);
+        assert_eq!(child.agent_name.as_deref(), Some("Explore"));
+        assert_eq!(child.name, "Map the tree widget");
+        assert_eq!(claude_item(&items, "parent").parent_session_id, None);
+    }
+
+    #[test]
+    fn claude_links_forked_sessions_explicitly_and_by_branch_marker() {
+        let home = must(tempdir());
+        let project = home.path().join(".claude/projects/-work-app");
+        write_claude_session(
+            &project,
+            "origin",
+            &[
+                r#"{"type":"custom-title","customTitle":"Origin","sessionId":"origin"}"#
+                    .to_string(),
+                claude_line("user", "origin", "/work/app", "root-u", None, ""),
+            ],
+        );
+        write_claude_session(
+            &project,
+            "branch",
+            &[
+                r#"{"type":"ai-title","aiTitle":"Origin ⑂","sessionId":"branch"}"#.to_string(),
+                claude_line("user", "branch", "/work/app", "root-u", None, ""),
+            ],
+        );
+        write_claude_session(
+            &project,
+            "forked",
+            &[claude_line(
+                "user",
+                "forked",
+                "/work/app",
+                "f1",
+                None,
+                r#","forkedFrom":{"sessionId":"origin","messageUuid":"f1"}"#,
+            )],
+        );
+        write_claude_session(
+            &project,
+            "orphan",
+            &[claude_line(
+                "user",
+                "orphan",
+                "/work/app",
+                "o1",
+                None,
+                r#","forkedFrom":{"sessionId":"deleted","messageUuid":"o1"}"#,
+            )],
+        );
+
+        let items = claude_items(home.path());
+        let branch = claude_item(&items, "branch");
+        assert_eq!(branch.parent_session_id.as_deref(), Some("origin"));
+        assert_eq!(branch.relation, SessionRelation::Fork);
+        let forked = claude_item(&items, "forked");
+        assert_eq!(forked.parent_session_id.as_deref(), Some("origin"));
+        assert_eq!(forked.relation, SessionRelation::Fork);
+        assert_eq!(claude_item(&items, "orphan").parent_session_id, None);
+        assert_eq!(claude_item(&items, "origin").parent_session_id, None);
+    }
+
+    #[test]
+    fn claude_branch_with_ambiguous_origin_stays_root() {
+        let home = must(tempdir());
+        let project = home.path().join(".claude/projects/-work-app");
+        for id in ["copy-a", "copy-b"] {
+            write_claude_session(
+                &project,
+                id,
+                &[claude_line("user", id, "/work/app", "shared", None, "")],
+            );
+        }
+        write_claude_session(
+            &project,
+            "branch",
+            &[
+                r#"{"type":"agent-name","agentName":"Task ⑂","sessionId":"branch"}"#.to_string(),
+                claude_line("user", "branch", "/work/app", "shared", None, ""),
+            ],
+        );
+
+        let items = claude_items(home.path());
+        assert!(items.iter().all(|item| item.parent_session_id.is_none()));
     }
 
     #[test]
