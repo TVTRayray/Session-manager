@@ -102,6 +102,41 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     let status_text = if app.search_state.phase == SearchPhase::Input {
         search_prompt_line(app, outer[2].width)
+    } else if app.is_visual_mode() {
+        let count = app.marked_session_ids.len();
+        let mut spans = Vec::new();
+        if let Some(progress) = &app.index_progress {
+            if !progress.is_complete {
+                spans.push(Span::styled(
+                    format!(" [索引中 {}/{}] ", progress.indexed_count, progress.total_count),
+                    Style::default().fg(THEME_WARN),
+                ));
+            }
+        }
+        spans.push(Span::styled(
+            " -- VISUAL SELECT ",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!("({count} sessions)"),
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            " -- ",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            "[j/k/J/K: adjust | d: batch delete | v: commit | Esc: cancel]",
+            Style::default().fg(THEME_BORDER),
+        ));
+        if !app.status_message.is_empty() {
+            spans.push(Span::styled(
+                " >> ",
+                Style::default().fg(THEME_WARN).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(app.status_message.as_str(), Style::default().fg(THEME_WARN)));
+        }
+        Line::from(spans)
     } else {
         let index_indicator = if let Some(progress) = &app.index_progress {
             if !progress.is_complete {
@@ -116,34 +151,36 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             None
         };
 
+        let marked_indicator = if !app.marked_session_ids.is_empty() {
+            Some(format!("[{} marked]", app.marked_session_ids.len()))
+        } else {
+            None
+        };
+
+        let mut spans = Vec::new();
+        if let Some(ind) = index_indicator {
+            spans.push(Span::styled(format!(" {ind} "), Style::default().fg(THEME_WARN)));
+        }
+        if let Some(mark) = marked_indicator {
+            spans.push(Span::styled(
+                format!(" {mark} "),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+
         if app.status_message.is_empty() {
             let default_msg = " Tab:Engine | j/k:Nav | /:Search | Ctrl+F:FullText | e:Export | D:Dash | ?:Help | q:Quit";
-            if let Some(ind) = index_indicator {
-                Line::from(vec![
-                    Span::styled(format!(" {ind} "), Style::default().fg(THEME_WARN)),
-                    Span::raw(default_msg),
-                ])
-            } else {
-                Line::from(default_msg)
-            }
-        } else if let Some(ind) = index_indicator {
-            Line::from(vec![
-                Span::styled(format!(" {ind} "), Style::default().fg(THEME_WARN)),
-                Span::styled(
-                    " >> ",
-                    Style::default().fg(THEME_WARN).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(app.status_message.as_str(), Style::default().fg(THEME_WARN)),
-            ])
+            spans.push(Span::raw(default_msg));
         } else {
-            Line::from(vec![
-                Span::styled(
-                    " >> ",
-                    Style::default().fg(THEME_WARN).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(app.status_message.as_str(), Style::default().fg(THEME_WARN)),
-            ])
+            spans.push(Span::styled(
+                " >> ",
+                Style::default().fg(THEME_WARN).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(app.status_message.as_str(), Style::default().fg(THEME_WARN)));
         }
+        Line::from(spans)
     };
 
     let status = Paragraph::new(status_text).style(Style::default().bg(THEME_BG));
@@ -178,6 +215,13 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                 Line::from(""),
                 buttons,
             ]),
+            DeleteScope::Batch { session_count } => Text::from(vec![
+                Line::from("Delete all marked sessions permanently?"),
+                Line::from(""),
+                Line::from(format!("Marked sessions: {session_count}")),
+                Line::from(""),
+                buttons,
+            ]),
         };
 
         let modal = Paragraph::new(modal_text)
@@ -187,6 +231,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
                     .title(match modal.scope {
                         DeleteScope::Single => "Confirm Delete",
                         DeleteScope::Group { .. } => "Confirm Bulk Delete",
+                        DeleteScope::Batch { .. } => "Confirm Batch Delete",
                     }),
             )
             .alignment(Alignment::Center)
@@ -255,7 +300,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
 
     if app.show_help_modal {
-        let area = centered_rect(75, 25, frame.area());
+        let area = centered_rect(75, 29, frame.area());
         frame.render_widget(Clear, area);
         let help_text = Text::from(vec![
             Line::from("Keyboard Shortcuts"),
@@ -263,13 +308,16 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             Line::from("  Tab / Shift+Tab   Switch engine"),
             Line::from("  j / k / Arrows    Navigate (j/k cycle)"),
             Line::from("  J / K             Jump 5 rows"),
-            Line::from("  z                 Collapse all"),
+            Line::from("  z                 Collapse / expand all"),
             Line::from("  Enter              Toggle / Resume"),
             Line::from("  /                  Search sessions"),
             Line::from("  n / N              Next / prev match"),
             Line::from("  Ctrl+N             New session"),
             Line::from("  Space              Expand / Collapse"),
             Line::from("  f                  Toggle favorite"),
+            Line::from("  x                  Toggle mark (batch delete)"),
+            Line::from("  v                  Visual mode (range select)"),
+            Line::from("  X                  Clear all marks"),
             Line::from("  t                  Edit tags"),
             Line::from("  e                  Export to Markdown"),
             Line::from("  Ctrl+F             Full-text search"),
@@ -279,7 +327,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             Line::from("  Ctrl+Alt+H/V      Switch layout"),
             Line::from("  Ctrl+Alt+Arrows   Switch focus"),
             Line::from("  Ctrl+Alt+=/-      Adjust panel size"),
-            Line::from("  q / Esc            Quit"),
+            Line::from("  Esc                Exit visual mode / cancel"),
+            Line::from("  q                  Quit"),
         ]);
         let help = Paragraph::new(help_text)
             .block(
@@ -1293,6 +1342,7 @@ fn build_session_tree_items(app: &App) -> Vec<TreeItem<'static, String>> {
                         highlight_pattern,
                         &app.search_state.matches,
                         current_match,
+                        &app.marked_session_ids,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -1318,19 +1368,17 @@ fn build_session_item(
     highlight_pattern: Option<&str>,
     match_indexes: &[usize],
     current_match: Option<usize>,
+    marked_ids: &std::collections::HashSet<String>,
 ) -> TreeItem<'static, String> {
     let is_current = current_match == Some(node.session_index);
-    let node_text = session_node_text(node, mode, is_child);
+    let is_marked = marked_ids.contains(&node.session_id);
+    let node_text = session_node_text_with_width_marked(node, mode, is_child, usize::MAX, is_marked);
     let text = match highlight_pattern {
         Some(pattern) if match_indexes.contains(&node.session_index) => {
             highlight_session_match(&node_text, pattern, is_current)
         }
         _ => {
-            if is_child || (!node.is_favorite && node.tags.is_empty()) {
-                Line::from(node_text)
-            } else {
-                render_styled_session_line(node, &node_text)
-            }
+            render_styled_session_line(node, &node_text)
         }
     };
     if node.children.is_empty() {
@@ -1347,6 +1395,7 @@ fn build_session_item(
                     highlight_pattern,
                     match_indexes,
                     current_match,
+                    marked_ids,
                 )
             })
             .collect::<Vec<_>>();
@@ -1361,6 +1410,16 @@ pub(crate) fn render_styled_session_line(
 ) -> Line<'static> {
     let mut spans = Vec::new();
     let mut rest = node_text;
+
+    if rest.starts_with("[✓] ") {
+        spans.push(Span::styled(
+            "[✓] ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+        rest = &rest["[✓] ".len()..];
+    }
 
     if node.is_favorite {
         if rest.starts_with("★ ") {
@@ -1382,20 +1441,30 @@ pub(crate) fn render_styled_session_line(
         }
     }
 
-    if !node.tags.is_empty() {
-        if let Some(pos) = rest.rfind(" #") {
-            let body = &rest[..pos];
-            let tags_part = &rest[pos..];
-            spans.push(Span::styled(
-                body.to_string(),
-                Style::default().fg(THEME_TEXT),
-            ));
-            spans.push(Span::styled(
-                tags_part.to_string(),
-                Style::default().fg(THEME_BORDER),
-            ));
-            return Line::from(spans);
-        }
+    if rest.starts_with("🤖 ") {
+        spans.push(Span::styled(
+            "🤖 ",
+            Style::default()
+                .fg(THEME_HIGHLIGHT)
+                .add_modifier(Modifier::BOLD),
+        ));
+        rest = &rest["🤖 ".len()..];
+    }
+
+    if !node.tags.is_empty()
+        && let Some(pos) = rest.rfind(" #")
+    {
+        let body = &rest[..pos];
+        let tags_part = &rest[pos..];
+        spans.push(Span::styled(
+            body.to_string(),
+            Style::default().fg(THEME_TEXT),
+        ));
+        spans.push(Span::styled(
+            tags_part.to_string(),
+            Style::default().fg(THEME_BORDER),
+        ));
+        return Line::from(spans);
     }
 
     spans.push(Span::styled(
@@ -1549,7 +1618,16 @@ pub fn session_node_text(
     mode: &GroupMode,
     is_child: bool,
 ) -> String {
-    session_node_text_with_width(node, mode, is_child, usize::MAX)
+    session_node_text_with_width_marked(node, mode, is_child, usize::MAX, false)
+}
+
+pub fn session_node_text_with_marking(
+    node: &crate::app::SessionTreeNode,
+    mode: &GroupMode,
+    is_child: bool,
+    is_marked: bool,
+) -> String {
+    session_node_text_with_width_marked(node, mode, is_child, usize::MAX, is_marked)
 }
 
 pub fn session_node_text_with_width(
@@ -1558,6 +1636,16 @@ pub fn session_node_text_with_width(
     is_child: bool,
     max_width: usize,
 ) -> String {
+    session_node_text_with_width_marked(node, mode, is_child, max_width, false)
+}
+
+pub fn session_node_text_with_width_marked(
+    node: &crate::app::SessionTreeNode,
+    mode: &GroupMode,
+    is_child: bool,
+    max_width: usize,
+    is_marked: bool,
+) -> String {
     let health_suffix = match node.file_health {
         FileHealth::Healthy => "",
         FileHealth::Warning => " [warning]",
@@ -1565,9 +1653,10 @@ pub fn session_node_text_with_width(
     };
     let detached_suffix = if node.is_detached { " [detached]" } else { "" };
     let name = truncate_name(&node.name, 38);
+    let mark_prefix = if is_marked { "[✓] " } else { "" };
     if is_child {
         let agent = node.agent_name.as_deref().unwrap_or("Subagent");
-        let full = format!("↳ {agent} · {name}{detached_suffix}{health_suffix}");
+        let full = format!("{mark_prefix}↳ {agent} · {name}{detached_suffix}{health_suffix}");
         if max_width < usize::MAX && display_width(&full) > max_width {
             return truncate_summary(&full, max_width);
         }
@@ -1581,13 +1670,14 @@ pub fn session_node_text_with_width(
     };
 
     let star = if node.is_favorite { "★ " } else { "" };
+    let subagent_icon = if !node.children.is_empty() { "🤖 " } else { "" };
     let prefix = match mode {
         GroupMode::ByTime | GroupMode::ByTag => format!(
-            "{star}[{}] {}{}{}{}",
+            "{mark_prefix}{star}{subagent_icon}[{}] {}{}{}{}",
             node.cwd_tail, name, child_suffix, detached_suffix, health_suffix
         ),
         GroupMode::ByProject => format!(
-            "{star}[{}] {}{}{}{}",
+            "{mark_prefix}{star}{subagent_icon}[{}] {}{}{}{}",
             short_time(&node.display_time),
             name,
             child_suffix,
@@ -2113,7 +2203,7 @@ mod tests {
             "Keyboard Shortcuts",
             "j / k / Arrows    Navigate (j/k cycle)",
             "J / K             Jump 5 rows",
-            "z                 Collapse all",
+            "z                 Collapse / expand all",
             "Ctrl+Alt+H/V",
             "Ctrl+Alt+Arrows",
             "Ctrl+Alt+=/-",
@@ -2142,7 +2232,7 @@ mod tests {
 
         assert!(rendered.contains("j / k / Arrows    Navigate (j/k cycle)"));
         assert!(rendered.contains("J / K             Jump 5 rows"));
-        assert!(rendered.contains("z                 Collapse all"));
+        assert!(rendered.contains("z                 Collapse / expand all"));
     }
 
     #[test]
@@ -3143,5 +3233,260 @@ mod tests {
             let mut terminal = ratatui::Terminal::new(backend).unwrap();
             terminal.draw(|f| render(f, &mut app)).unwrap();
         }
+    }
+
+    #[test]
+    fn session_node_text_renders_subagent_icon_on_left() {
+        let child_node = crate::app::SessionTreeNode {
+            identifier: "child-1".to_string(),
+            session_index: 1,
+            session_id: "child-1".to_string(),
+            name: "Child Subagent".to_string(),
+            display_time: "2026-04-29 12:05".to_string(),
+            cwd_tail: "demo".to_string(),
+            file_health: FileHealth::Healthy,
+            is_detached: false,
+            is_favorite: false,
+            tags: Vec::new(),
+            agent_name: Some("Explore".to_string()),
+            children: Vec::new(),
+        };
+
+        let parent_node = crate::app::SessionTreeNode {
+            identifier: "parent-1".to_string(),
+            session_index: 0,
+            session_id: "parent-1".to_string(),
+            name: "Parent Session".to_string(),
+            display_time: "2026-04-29 12:00".to_string(),
+            cwd_tail: "demo".to_string(),
+            file_health: FileHealth::Healthy,
+            is_detached: false,
+            is_favorite: false,
+            tags: Vec::new(),
+            agent_name: None,
+            children: vec![child_node.clone()],
+        };
+
+        // Root session with subagents: has 🤖 on left and [1] on right
+        let parent_text = session_node_text(&parent_node, &GroupMode::ByTime, false);
+        assert!(parent_text.starts_with("🤖 [demo] Parent Session [1]"));
+
+        // Favorite parent: has ★ 🤖 on left
+        let mut fav_parent = parent_node.clone();
+        fav_parent.is_favorite = true;
+        let fav_parent_text = session_node_text(&fav_parent, &GroupMode::ByTime, false);
+        assert!(fav_parent_text.starts_with("★ 🤖 [demo] Parent Session [1]"));
+
+        // Root session without subagents: does NOT have 🤖
+        let solo_node = crate::app::SessionTreeNode {
+            identifier: "solo-1".to_string(),
+            session_index: 2,
+            session_id: "solo-1".to_string(),
+            name: "Solo Session".to_string(),
+            display_time: "2026-04-29 12:00".to_string(),
+            cwd_tail: "demo".to_string(),
+            file_health: FileHealth::Healthy,
+            is_detached: false,
+            is_favorite: false,
+            tags: Vec::new(),
+            agent_name: None,
+            children: Vec::new(),
+        };
+        let solo_text = session_node_text(&solo_node, &GroupMode::ByTime, false);
+        assert!(!solo_text.contains("🤖"));
+        assert!(solo_text.starts_with("[demo] Solo Session"));
+
+        // Child subagent session: renders with ↳ Agent ·, does NOT have 🤖
+        let child_text = session_node_text(&child_node, &GroupMode::ByTime, true);
+        assert!(!child_text.contains("🤖"));
+        assert!(child_text.starts_with("↳ Explore · Child Subagent"));
+
+    }
+
+    #[test]
+    fn session_node_text_renders_marking_checkmark() {
+        let node = crate::app::SessionTreeNode {
+            identifier: "sess-marked".to_string(),
+            session_index: 0,
+            session_id: "sess-marked".to_string(),
+            name: "Session Title".to_string(),
+            display_time: "2026-04-29 12:00".to_string(),
+            cwd_tail: "demo".to_string(),
+            file_health: FileHealth::Healthy,
+            is_detached: false,
+            is_favorite: true,
+            tags: Vec::new(),
+            agent_name: None,
+            children: Vec::new(),
+        };
+
+        // Unmarked
+        let unmarked_text = session_node_text_with_marking(&node, &GroupMode::ByTime, false, false);
+        assert!(!unmarked_text.contains("[✓]"));
+        assert!(unmarked_text.starts_with("★ [demo] Session Title"));
+
+        // Marked
+        let marked_text = session_node_text_with_marking(&node, &GroupMode::ByTime, false, true);
+        assert!(marked_text.starts_with("[✓] ★ [demo] Session Title"));
+
+        // Marked child
+        let child_node = crate::app::SessionTreeNode {
+            identifier: "child-marked".to_string(),
+            session_index: 1,
+            session_id: "child-marked".to_string(),
+            name: "Child Subagent".to_string(),
+            display_time: "2026-04-29 12:00".to_string(),
+            cwd_tail: "demo".to_string(),
+            file_health: FileHealth::Healthy,
+            is_detached: false,
+            is_favorite: false,
+            tags: Vec::new(),
+            agent_name: Some("Planner".to_string()),
+            children: Vec::new(),
+        };
+        let marked_child_text = session_node_text_with_marking(&child_node, &GroupMode::ByTime, true, true);
+        assert!(marked_child_text.starts_with("[✓] ↳ Planner · Child Subagent"));
+    }
+
+    #[test]
+    fn render_styled_session_line_styles_subagent_and_marked() {
+        let node = crate::app::SessionTreeNode {
+            identifier: "test-node".to_string(),
+            session_index: 0,
+            session_id: "test-node".to_string(),
+            name: "Test Session".to_string(),
+            display_time: "2026-04-29 12:00".to_string(),
+            cwd_tail: "demo".to_string(),
+            file_health: FileHealth::Healthy,
+            is_detached: false,
+            is_favorite: true,
+            tags: vec!["tag1".to_string()],
+            agent_name: None,
+            children: Vec::new(),
+        };
+
+        let raw_line = "[✓] ★ 🤖 [demo] Test Session #tag1";
+        let line = render_styled_session_line(&node, raw_line);
+
+        // Span 0: [✓] (green bold)
+        assert_eq!(line.spans[0].content, "[✓] ");
+        assert_eq!(line.spans[0].style.fg, Some(Color::Green));
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
+
+        // Span 1: ★ (gold bold)
+        assert_eq!(line.spans[1].content, "★ ");
+        assert_eq!(line.spans[1].style.fg, Some(Color::Rgb(249, 226, 175)));
+        assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
+
+        // Span 2: 🤖 (theme highlight bold)
+        assert_eq!(line.spans[2].content, "🤖 ");
+        assert_eq!(line.spans[2].style.fg, Some(THEME_HIGHLIGHT));
+        assert!(line.spans[2].style.add_modifier.contains(Modifier::BOLD));
+
+        // Remaining spans: body and tags
+        assert_eq!(line.spans[3].content, "[demo] Test Session");
+        assert_eq!(line.spans[3].style.fg, Some(THEME_TEXT));
+        assert_eq!(line.spans[4].content, " #tag1");
+        assert_eq!(line.spans[4].style.fg, Some(THEME_BORDER));
+    }
+
+    #[test]
+    fn batch_delete_modal_renders_marked_count_and_buttons() {
+        let mut app = App::new(&StubCatalog);
+        app.delete_modal_state = Some(crate::app::DeleteModalState {
+            target_session_id: "3 marked sessions".to_string(),
+            focus: crate::app::DeleteModalFocus::Cancel,
+            scope: DeleteScope::Batch { session_count: 3 },
+        });
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered: String = (0..24)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Confirm Batch Delete"));
+        assert!(rendered.contains("Delete all marked sessions permanently?"));
+        assert!(rendered.contains("Marked sessions: 3"));
+        assert!(rendered.contains("[ Cancel ]"));
+        assert!(rendered.contains("Delete"));
+    }
+
+    #[test]
+    fn status_bar_renders_marked_indicator() {
+        let mut app = App::new(&StubCatalog);
+        app.marked_session_ids.insert("sess-1".to_string());
+        app.marked_session_ids.insert("sess-2".to_string());
+
+        let backend = ratatui::backend::TestBackend::new(100, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered: String = (0..24)
+            .map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("[2 marked]"));
+    }
+
+    #[test]
+    fn help_modal_renders_mark_shortcuts() {
+        let mut app = App::new(&StubCatalog);
+        app.show_help_modal = true;
+
+        let backend = ratatui::backend::TestBackend::new(80, 28);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered: String = (0..28)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("x                  Toggle mark (batch delete)"));
+        assert!(rendered.contains("X                  Clear all marks"));
+    }
+
+    #[test]
+    fn test_visual_mode_status_bar_rendering() {
+        let mut app = App::new(&StubCatalog);
+        app.visual_anchor = Some(vec!["root".to_string()]);
+        app.marked_session_ids.insert("sess-1".to_string());
+        app.marked_session_ids.insert("sess-2".to_string());
+
+        let backend = ratatui::backend::TestBackend::new(120, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered: String = (0..24)
+            .map(|y| (0..120).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("-- VISUAL SELECT"));
+        assert!(rendered.contains("(2 sessions)"));
+        assert!(rendered.contains("[j/k/J/K: adjust | d: batch delete | v: commit | Esc: cancel]"));
+    }
+
+    #[test]
+    fn test_help_modal_displays_visual_mode_shortcut() {
+        let mut app = App::new(&StubCatalog);
+        app.show_help_modal = true;
+
+        let backend = ratatui::backend::TestBackend::new(80, 32);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered: String = (0..32)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("v                  Visual mode (range select)"));
+        assert!(rendered.contains("Esc                Exit visual mode / cancel"));
     }
 }

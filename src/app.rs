@@ -59,6 +59,9 @@ pub enum DeleteScope {
         group_label: String,
         session_count: usize,
     },
+    Batch {
+        session_count: usize,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -435,6 +438,9 @@ pub struct App {
     pending_full_redraw: bool,
     pub terminal_size: TerminalSizeState,
     catalog_request_token: u64,
+    pub marked_session_ids: HashSet<String>,
+    pub visual_anchor: Option<Vec<String>>,
+    pub pre_visual_marks: HashSet<String>,
 }
 
 impl App {
@@ -539,6 +545,9 @@ impl App {
                     pending_full_redraw: false,
                     terminal_size: default_terminal_size(),
                     catalog_request_token: 0,
+                    marked_session_ids: HashSet::new(),
+                    visual_anchor: None,
+                    pre_visual_marks: HashSet::new(),
                 };
                 app.open_all_groups();
                 app.sync_tree_selection_from_selected_index();
@@ -610,6 +619,9 @@ impl App {
                     pending_full_redraw: false,
                     terminal_size: default_terminal_size(),
                     catalog_request_token: 0,
+                    marked_session_ids: HashSet::new(),
+                    visual_anchor: None,
+                    pre_visual_marks: HashSet::new(),
                 };
                 app.open_all_groups();
                 app.sync_tree_selection_from_selected_index();
@@ -925,22 +937,34 @@ impl App {
                 self.begin_detail_request().map(AppAction::LoadDetail)
             }
             KeyCode::Char('z') => {
-                self.collapse_all_nodes();
+                self.toggle_collapse_expand_all();
+                if self.is_visual_mode() {
+                    self.update_visual_selection();
+                }
                 None
             }
             KeyCode::Left if self.focused_panel == FocusedPanel::List => {
                 self.tree_state.key_left();
                 self.sync_tree_selection_from_tree();
+                if self.is_visual_mode() {
+                    self.update_visual_selection();
+                }
                 None
             }
             KeyCode::Right if self.focused_panel == FocusedPanel::List => {
                 self.tree_state.key_right();
                 self.sync_tree_selection_from_tree();
+                if self.is_visual_mode() {
+                    self.update_visual_selection();
+                }
                 None
             }
             KeyCode::Char(' ') if self.focused_panel == FocusedPanel::List => {
                 self.tree_state.toggle_selected();
                 self.sync_tree_selection_from_tree();
+                if self.is_visual_mode() {
+                    self.update_visual_selection();
+                }
                 None
             }
             KeyCode::PageDown => self.scroll_detail(8).map(AppAction::LoadDetail),
@@ -953,6 +977,24 @@ impl App {
             KeyCode::Char('N') => self.jump_to_previous_match(),
             KeyCode::Char('f') => {
                 self.toggle_favorite();
+                None
+            }
+            KeyCode::Char('v') => {
+                self.toggle_visual_mode();
+                None
+            }
+            KeyCode::Char('x') => {
+                self.toggle_mark_current();
+                None
+            }
+            KeyCode::Char('X') => {
+                self.clear_marks();
+                None
+            }
+            KeyCode::Esc => {
+                if self.is_visual_mode() {
+                    self.exit_visual_mode(false);
+                }
                 None
             }
             KeyCode::Char('t') => {
@@ -1122,6 +1164,7 @@ impl App {
 
         match result {
             DeleteResult::Success(success) => {
+                self.marked_session_ids.remove(&success.deleted_session_id);
                 if let Some(index) = self
                     .session_list
                     .iter()
@@ -1167,6 +1210,7 @@ impl App {
         self.pending_bulk_delete_target = None;
 
         for success in &result.deleted {
+            self.marked_session_ids.remove(&success.deleted_session_id);
             if let Some(index) = self
                 .session_list
                 .iter()
@@ -1192,10 +1236,18 @@ impl App {
         };
         self.bulk_delete_result_summary = Some(summary.clone());
 
-        let message = format!(
-            "Deleted {deleted_count}/{} sessions in group {} (failed: {failed_count})",
-            result.requested_count, result.group_label
-        );
+        let is_batch = result.group_identifier.starts_with("batch:");
+        let message = if is_batch {
+            format!(
+                "Deleted {deleted_count}/{} marked sessions (failed: {failed_count})",
+                result.requested_count
+            )
+        } else {
+            format!(
+                "Deleted {deleted_count}/{} sessions in group {} (failed: {failed_count})",
+                result.requested_count, result.group_label
+            )
+        };
         self.delete_result_message = Some(message.clone());
         self.status_message = if failed_count == 0 {
             with_status_message(Some(message.as_str()), None)
@@ -2278,6 +2330,170 @@ impl App {
         }
     }
 
+    pub fn is_marked(&self, session_id: &str) -> bool {
+        self.marked_session_ids.contains(session_id)
+    }
+
+    pub fn toggle_mark_current(&mut self) {
+        match &self.tree_focus_node {
+            Some(TreeFocusNode::GroupHeader(identifier)) => {
+                let groups = build_grouped_session_nodes(&self.session_list, &self.group_mode);
+                if let Some(group) = groups.into_iter().find(|g| &g.identifier == identifier) {
+                    let mut session_ids = Vec::new();
+                    for root in &group.children {
+                        collect_session_ids(root, &mut session_ids);
+                    }
+                    session_ids.sort_unstable();
+                    session_ids.dedup();
+                    let all_marked = !session_ids.is_empty()
+                        && session_ids.iter().all(|id| self.marked_session_ids.contains(id));
+                    if all_marked {
+                        for id in &session_ids {
+                            self.marked_session_ids.remove(id);
+                        }
+                    } else {
+                        for id in session_ids {
+                            self.marked_session_ids.insert(id);
+                        }
+                    }
+                    self.pending_full_redraw = true;
+                }
+            }
+            Some(TreeFocusNode::SessionLeaf(_)) | None => {
+                if let Some(item) = self.selected_item() {
+                    let id = item.session_id.clone();
+                    if self.marked_session_ids.contains(&id) {
+                        self.marked_session_ids.remove(&id);
+                    } else {
+                        self.marked_session_ids.insert(id);
+                    }
+                    self.pending_full_redraw = true;
+                }
+            }
+        }
+    }
+
+    pub fn clear_marks(&mut self) {
+        self.exit_visual_mode(false);
+        self.marked_session_ids.clear();
+        self.pending_full_redraw = true;
+    }
+
+    pub fn is_visual_mode(&self) -> bool {
+        self.visual_anchor.is_some()
+    }
+
+    pub fn toggle_visual_mode(&mut self) {
+        if self.has_active_modal() {
+            return;
+        }
+        if self.is_visual_mode() {
+            self.exit_visual_mode(true);
+        } else {
+            self.begin_visual_mode();
+        }
+    }
+
+    pub fn begin_visual_mode(&mut self) {
+        if self.has_active_modal() {
+            return;
+        }
+        let visible = self.visible_tree_identifiers();
+        if visible.is_empty() {
+            return;
+        }
+
+        let current = if self.tree_state.selected().is_empty() {
+            self.first_leaf_identifier()
+                .filter(|id| visible.contains(id))
+                .or_else(|| visible.first().cloned())
+        } else {
+            Some(self.tree_state.selected().to_vec())
+        };
+
+        let Some(anchor) = current else {
+            return;
+        };
+
+        if self.tree_state.selected() != anchor.as_slice() {
+            self.tree_state.select(anchor.clone());
+            self.sync_tree_selection_from_tree();
+        }
+
+        self.visual_anchor = Some(anchor);
+        self.pre_visual_marks = self.marked_session_ids.clone();
+        self.update_visual_selection();
+        self.pending_full_redraw = true;
+    }
+
+    pub fn exit_visual_mode(&mut self, commit: bool) {
+        if !commit {
+            self.marked_session_ids = self.pre_visual_marks.clone();
+        }
+        self.visual_anchor = None;
+        self.pre_visual_marks.clear();
+        self.pending_full_redraw = true;
+    }
+
+    pub fn update_visual_selection(&mut self) {
+        let Some(anchor) = self.visual_anchor.clone() else {
+            return;
+        };
+        let visible = self.visible_tree_identifiers();
+        if visible.is_empty() {
+            return;
+        }
+
+        let Some(anchor_pos) = visible.iter().position(|id| id == &anchor) else {
+            return;
+        };
+
+        let current = self.tree_state.selected().to_vec();
+        let curr_pos = visible
+            .iter()
+            .position(|id| *id == current)
+            .unwrap_or(anchor_pos);
+
+        let min_pos = anchor_pos.min(curr_pos);
+        let max_pos = anchor_pos.max(curr_pos);
+
+        let mut range_session_ids = HashSet::new();
+        for item_path in &visible[min_pos..=max_pos] {
+            if item_path.len() >= 2 {
+                if let Some(leaf_id) = item_path.last() {
+                    if let Some(session) = self
+                        .session_list
+                        .iter()
+                        .find(|s| leaf_identifier(s) == *leaf_id)
+                    {
+                        range_session_ids.insert(session.session_id.clone());
+                    }
+                }
+            } else if item_path.len() == 1 {
+                let group_id = &item_path[0];
+                let groups = build_grouped_session_nodes(&self.session_list, &self.group_mode);
+                if let Some(group) = groups.into_iter().find(|g| &g.identifier == group_id) {
+                    if !self.tree_state.opened().contains(&vec![group.identifier.clone()]) {
+                        let mut session_ids = Vec::new();
+                        for root in &group.children {
+                            collect_session_ids(root, &mut session_ids);
+                        }
+                        for id in session_ids {
+                            range_session_ids.insert(id);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.marked_session_ids = self
+            .pre_visual_marks
+            .union(&range_session_ids)
+            .cloned()
+            .collect();
+        self.pending_full_redraw = true;
+    }
+
     pub fn merge_session_user_meta(&mut self) {
         let meta_map = self.state_store.load_all_meta();
         for item in &mut self.session_list {
@@ -2319,6 +2535,41 @@ impl App {
     fn begin_delete_confirmation(&mut self) {
         if self.has_active_modal() {
             return;
+        }
+
+        if self.is_visual_mode() {
+            self.exit_visual_mode(true);
+        }
+
+        if !self.marked_session_ids.is_empty() {
+            let marked_targets: Vec<DeleteRequest> = self
+                .session_list
+                .iter()
+                .filter(|item| self.marked_session_ids.contains(&item.session_id))
+                .map(|item| DeleteRequest {
+                    engine: self.active_engine,
+                    path: item.abs_path.clone(),
+                    session_id: item.session_id.clone(),
+                })
+                .collect();
+
+            if !marked_targets.is_empty() {
+                let session_count = marked_targets.len();
+                let target = BulkDeleteRequest {
+                    engine: self.active_engine,
+                    group_identifier: "batch:marked".to_string(),
+                    group_label: format!("{session_count} marked"),
+                    targets: marked_targets,
+                };
+                self.pending_delete_target = None;
+                self.pending_bulk_delete_target = Some(target);
+                self.delete_modal_state = Some(DeleteModalState {
+                    target_session_id: format!("{session_count} marked sessions"),
+                    focus: DeleteModalFocus::Cancel,
+                    scope: DeleteScope::Batch { session_count },
+                });
+                return;
+            }
         }
 
         if let Some(TreeFocusNode::GroupHeader(identifier)) = &self.tree_focus_node {
@@ -2382,6 +2633,11 @@ impl App {
     }
 
     fn handle_tree_enter(&mut self) -> Option<AppAction> {
+        if self.is_visual_mode() {
+            self.exit_visual_mode(true);
+            return None;
+        }
+
         match &self.tree_focus_node {
             Some(TreeFocusNode::GroupHeader(_)) => {
                 self.tree_state.toggle_selected();
@@ -2400,6 +2656,8 @@ impl App {
             self.refresh_header_summary();
             return;
         }
+
+        let effective_wrap = if self.is_visual_mode() { false } else { wrap };
 
         let next_identifier = if self.tree_state.selected().is_empty() {
             if delta >= 0 {
@@ -2424,13 +2682,13 @@ impl App {
                     if visible.len() <= 1 {
                         0
                     } else if delta > 0 {
-                        if wrap {
+                        if effective_wrap {
                             (position + 1) % visible.len()
                         } else {
                             (position + 1).min(visible.len() - 1)
                         }
                     } else if delta < 0 {
-                        if position == 0 && wrap {
+                        if position == 0 && effective_wrap {
                             visible.len() - 1
                         } else {
                             position.saturating_sub(1)
@@ -2448,6 +2706,9 @@ impl App {
             self.tree_state.select(identifier);
         }
         self.sync_tree_selection_from_tree();
+        if self.is_visual_mode() {
+            self.update_visual_selection();
+        }
     }
 
     pub(crate) fn jump_selection(&mut self, delta: isize) {
@@ -2490,6 +2751,9 @@ impl App {
             self.tree_state.select(identifier);
         }
         self.sync_tree_selection_from_tree();
+        if self.is_visual_mode() {
+            self.update_visual_selection();
+        }
     }
 
     pub(crate) fn collapse_all_nodes(&mut self) {
@@ -2516,6 +2780,28 @@ impl App {
 
         self.tree_state.select(target);
         self.sync_tree_selection_from_tree();
+    }
+
+    pub(crate) fn toggle_collapse_expand_all(&mut self) {
+        let groups = build_grouped_session_nodes(&self.session_list, &self.group_mode);
+        let any_group_opened = groups
+            .iter()
+            .any(|group| self.tree_state.opened().contains(&vec![group.identifier.clone()]));
+
+        if any_group_opened {
+            self.collapse_all_nodes();
+        } else {
+            self.clear_path_hint();
+            self.open_all_groups();
+            let visible = self.visible_tree_identifiers();
+            if !visible.is_empty() {
+                let current_selected = self.tree_state.selected().to_vec();
+                if current_selected.is_empty() || !visible.contains(&current_selected) {
+                    self.tree_state.select(visible[0].clone());
+                }
+            }
+            self.sync_tree_selection_from_tree();
+        }
     }
 
     fn begin_detail_request(&mut self) -> Option<DetailRequest> {
@@ -2656,6 +2942,9 @@ impl App {
         self.tag_modal_state = None;
         self.pending_delete_target = None;
         self.pending_bulk_delete_target = None;
+        self.visual_anchor = None;
+        self.pre_visual_marks.clear();
+        self.marked_session_ids.clear();
         self.clear_path_hint();
         self.clear_search_results();
         self.search_state.last_pattern = None;
@@ -2795,7 +3084,7 @@ impl App {
             .position(|item| leaf_identifier(item) == *selected_leaf)
     }
 
-    fn open_all_groups(&mut self) {
+    pub(crate) fn open_all_groups(&mut self) {
         for group in build_grouped_session_nodes(&self.session_list, &self.group_mode) {
             self.tree_state.open(vec![group.identifier]);
         }
@@ -3126,6 +3415,13 @@ fn collect_session_indexes(node: &SessionTreeNode, indexes: &mut Vec<usize>) {
     indexes.push(node.session_index);
     for child in &node.children {
         collect_session_indexes(child, indexes);
+    }
+}
+
+fn collect_session_ids(node: &SessionTreeNode, ids: &mut Vec<String>) {
+    ids.push(node.session_id.clone());
+    for child in &node.children {
+        collect_session_ids(child, ids);
     }
 }
 
@@ -7293,5 +7589,528 @@ mod tests {
             let line = crate::tui::render_header_line(&app, 0);
             assert!(line.spans.is_empty());
         }
+    }
+
+    #[test]
+    fn z_key_cycles_between_collapse_and_expand_all() {
+        let mut sess1 = item("sess1");
+        sess1.display_time = "2026-04-16 10:00".to_string();
+        let mut sess2 = item("sess2");
+        sess2.display_time = "2026-04-16 11:00".to_string();
+        let mut sess3 = item("sess3");
+        sess3.display_time = "2026-04-15 12:00".to_string();
+
+        let mut app = App::new(&stub_catalog(vec![sess1, sess2, sess3]));
+        app.focused_panel = FocusedPanel::List;
+
+        // Initially all groups are opened (2 groups + 3 sessions = 5 visible items)
+        let visible_init = app.visible_tree_identifiers();
+        assert_eq!(visible_init.len(), 5);
+        assert!(!app.tree_state.opened().is_empty());
+
+        // 1st 'z': Collapse all
+        let action1 = app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert!(action1.is_none());
+        assert!(app.tree_state.opened().is_empty());
+        let visible_collapsed = app.visible_tree_identifiers();
+        assert_eq!(visible_collapsed.len(), 2);
+        for path in &visible_collapsed {
+            assert_eq!(path.len(), 1, "Only group headers should be visible when collapsed");
+        }
+        assert_eq!(app.tree_state.selected().len(), 1);
+        assert_eq!(app.right_panel_mode, RightPanelMode::GroupSummary);
+
+        // 2nd 'z': Expand / open all groups
+        let action2 = app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert!(action2.is_none());
+        assert!(!app.tree_state.opened().is_empty());
+        let visible_expanded = app.visible_tree_identifiers();
+        assert_eq!(visible_expanded.len(), 5);
+        assert_eq!(app.tree_state.selected().len(), 1);
+        assert_eq!(app.right_panel_mode, RightPanelMode::GroupSummary);
+
+        // 3rd 'z': Collapse all again
+        let action3 = app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert!(action3.is_none());
+        assert!(app.tree_state.opened().is_empty());
+        assert_eq!(app.visible_tree_identifiers().len(), 2);
+
+        // 4th 'z': Expand / open all again
+        let action4 = app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert!(action4.is_none());
+        assert!(!app.tree_state.opened().is_empty());
+        assert_eq!(app.visible_tree_identifiers().len(), 5);
+    }
+
+    #[test]
+    fn z_key_cycle_when_navigating_between_groups_while_collapsed() {
+        let mut sess1 = item("sess1");
+        sess1.display_time = "2026-04-16 10:00".to_string();
+        let mut sess2 = item("sess2");
+        sess2.display_time = "2026-04-15 12:00".to_string();
+
+        let mut app = App::new(&stub_catalog(vec![sess1, sess2]));
+        let group_2_id = "group:2026-04-15".to_string();
+
+        // 1. Collapse all
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert!(app.tree_state.opened().is_empty());
+        assert_eq!(app.tree_state.selected()[0], "group:2026-04-16");
+
+        // 2. Navigate down to 2nd group header
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.tree_state.selected()[0], group_2_id);
+
+        // 3. Press 'z' to expand all groups -> selection should stay on group 2 header
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert!(!app.tree_state.opened().is_empty());
+        assert_eq!(app.tree_state.selected(), &[group_2_id.clone()]);
+        assert_eq!(
+            app.tree_focus_node,
+            Some(TreeFocusNode::GroupHeader(group_2_id))
+        );
+        assert_eq!(app.right_panel_mode, RightPanelMode::GroupSummary);
+    }
+
+    #[test]
+    fn z_key_cycle_when_some_groups_are_manually_collapsed() {
+        let mut sess1 = item("sess1");
+        sess1.display_time = "2026-04-16 10:00".to_string();
+        let mut sess2 = item("sess2");
+        sess2.display_time = "2026-04-15 12:00".to_string();
+
+        let mut app = App::new(&stub_catalog(vec![sess1, sess2]));
+        let group_1_path = vec!["group:2026-04-16".to_string()];
+        let group_2_path = vec!["group:2026-04-15".to_string()];
+
+        // Both groups start open
+        assert!(app.tree_state.opened().contains(&group_1_path));
+        assert!(app.tree_state.opened().contains(&group_2_path));
+
+        // Manually close group 1 using close
+        app.tree_state.close(&group_1_path);
+        assert!(!app.tree_state.opened().contains(&group_1_path));
+        assert!(app.tree_state.opened().contains(&group_2_path));
+
+        // Press 'z' -> since group 2 is still open, it should collapse all
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert!(app.tree_state.opened().is_empty());
+
+        // Press 'z' again -> should open all groups
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        assert!(app.tree_state.opened().contains(&group_1_path));
+        assert!(app.tree_state.opened().contains(&group_2_path));
+    }
+
+    #[test]
+    fn z_key_cycle_with_empty_catalog() {
+        let mut app = App::new(&stub_catalog(vec![]));
+        assert_eq!(app.handle_key(KeyEvent::from(KeyCode::Char('z'))), None);
+        assert_eq!(app.handle_key(KeyEvent::from(KeyCode::Char('z'))), None);
+    }
+
+    #[test]
+    fn x_key_toggles_single_session_mark() {
+        let mut sess1 = item("sess1");
+        sess1.display_time = "2026-04-16 10:00".to_string();
+        let mut app = App::new(&stub_catalog(vec![sess1]));
+        assert!(!app.is_marked("sess1"));
+
+        // Press 'x' -> mark
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+        assert!(app.is_marked("sess1"));
+        assert_eq!(app.marked_session_ids.len(), 1);
+
+        // Press 'x' again -> unmark
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+        assert!(!app.is_marked("sess1"));
+        assert!(app.marked_session_ids.is_empty());
+    }
+
+    #[test]
+    fn x_key_on_group_header_toggles_all_sessions_in_group() {
+        let mut sess1 = item("sess1");
+        sess1.display_time = "2026-04-16 10:00".to_string();
+        let mut sess2 = item("sess2");
+        sess2.display_time = "2026-04-16 11:00".to_string();
+        let mut sess3 = item("sess3");
+        sess3.display_time = "2026-04-15 12:00".to_string();
+
+        let mut app = App::new(&stub_catalog(vec![sess1, sess2, sess3]));
+        // Collapse to focus group headers easily
+        app.handle_key(KeyEvent::from(KeyCode::Char('z')));
+        // Selected is group:2026-04-16 which contains sess1 and sess2
+        assert_eq!(app.tree_focus_node, Some(TreeFocusNode::GroupHeader("group:2026-04-16".to_string())));
+
+        // Press 'x' on group header -> both sess1 and sess2 become marked
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+        assert!(app.is_marked("sess1"));
+        assert!(app.is_marked("sess2"));
+        assert!(!app.is_marked("sess3"));
+
+        // Press 'x' again on group header -> all are marked in group, so unmark both
+        app.handle_key(KeyEvent::from(KeyCode::Char('x')));
+        assert!(!app.is_marked("sess1"));
+        assert!(!app.is_marked("sess2"));
+        assert!(!app.is_marked("sess3"));
+    }
+
+    #[test]
+    fn shift_x_clears_all_marked_sessions() {
+        let mut sess1 = item("sess1");
+        sess1.display_time = "2026-04-16 10:00".to_string();
+        let mut sess2 = item("sess2");
+        sess2.display_time = "2026-04-15 10:00".to_string();
+
+        let mut app = App::new(&stub_catalog(vec![sess1, sess2]));
+        app.marked_session_ids.insert("sess1".to_string());
+        app.marked_session_ids.insert("sess2".to_string());
+        assert_eq!(app.marked_session_ids.len(), 2);
+
+        // Press 'X' (Shift+X) -> clear marks
+        app.handle_key(KeyEvent::from(KeyCode::Char('X')));
+        assert!(app.marked_session_ids.is_empty());
+    }
+
+    #[test]
+    fn engine_switch_clears_marked_sessions() {
+        let mut sess1 = item("sess1");
+        sess1.display_time = "2026-04-16 10:00".to_string();
+
+        let mut app = App::new(&stub_catalog(vec![sess1]));
+        app.marked_session_ids.insert("sess1".to_string());
+        assert!(!app.marked_session_ids.is_empty());
+
+        // Press Tab to switch engine -> clears marks
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert!(app.marked_session_ids.is_empty());
+    }
+
+    #[test]
+    fn d_key_with_marked_sessions_triggers_batch_delete_modal() {
+        let mut sess1 = item("sess1");
+        sess1.display_time = "2026-04-16 10:00".to_string();
+        let mut sess2 = item("sess2");
+        sess2.display_time = "2026-04-15 10:00".to_string();
+
+        let mut app = App::new(&stub_catalog(vec![sess1, sess2]));
+        app.marked_session_ids.insert("sess1".to_string());
+        app.marked_session_ids.insert("sess2".to_string());
+
+        // Press 'd' -> opens batch delete modal
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        assert!(app.delete_modal_state.is_some());
+        let modal = app.delete_modal_state.as_ref().unwrap();
+        assert_eq!(modal.scope, DeleteScope::Batch { session_count: 2 });
+        assert_eq!(modal.target_session_id, "2 marked sessions");
+
+        assert!(app.pending_bulk_delete_target.is_some());
+        let target = app.pending_bulk_delete_target.as_ref().unwrap();
+        assert_eq!(target.group_identifier, "batch:marked");
+        assert_eq!(target.targets.len(), 2);
+    }
+
+    #[test]
+    fn confirming_batch_delete_executes_bulk_delete_and_cleans_marks() {
+        let mut sess1 = item("sess1");
+        sess1.display_time = "2026-04-16 10:00".to_string();
+        let mut sess2 = item("sess2");
+        sess2.display_time = "2026-04-15 10:00".to_string();
+        let mut sess3 = item("sess3");
+        sess3.display_time = "2026-04-14 10:00".to_string();
+
+        let mut app = App::new(&stub_catalog(vec![sess1.clone(), sess2.clone(), sess3.clone()]));
+        app.marked_session_ids.insert("sess1".to_string());
+        app.marked_session_ids.insert("sess2".to_string());
+
+        // Press 'd' to open batch modal
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+
+        // Navigate to Confirm button: Right
+        app.handle_key(KeyEvent::from(KeyCode::Right));
+        assert_eq!(
+            app.delete_modal_state.as_ref().unwrap().focus,
+            DeleteModalFocus::Confirm
+        );
+
+        // Press Enter to confirm -> returns AppAction::BulkDelete
+        let action = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        let Some(AppAction::BulkDelete(req)) = action else {
+            panic!("expected BulkDelete action");
+        };
+        assert_eq!(req.group_identifier, "batch:marked");
+        assert_eq!(req.targets.len(), 2);
+
+        // Apply bulk delete result
+        let result = BulkDeleteResult {
+            engine: SessionEngine::Pi,
+            group_identifier: "batch:marked".to_string(),
+            group_label: "2 marked".to_string(),
+            requested_count: 2,
+            deleted: vec![
+                DeleteSuccess {
+                    deleted_path: sess1.abs_path.clone(),
+                    deleted_session_id: "sess1".to_string(),
+                },
+                DeleteSuccess {
+                    deleted_path: sess2.abs_path.clone(),
+                    deleted_session_id: "sess2".to_string(),
+                },
+            ],
+            failures: Vec::new(),
+        };
+
+        app.apply_bulk_delete_result(result);
+
+        // Verify sess1 and sess2 removed from session_list and marked_session_ids
+        assert_eq!(app.session_list.len(), 1);
+        assert_eq!(app.session_list[0].session_id, "sess3");
+        assert!(app.marked_session_ids.is_empty());
+        assert_eq!(
+            app.delete_result_message.as_deref(),
+            Some("Deleted 2/2 marked sessions (failed: 0)")
+        );
+    }
+
+    #[test]
+    fn test_visual_mode_entry_sets_anchor_and_marks_current_session() {
+        let mut sess1 = item("sess1");
+        sess1.display_time = "2026-04-16 10:00".to_string();
+        let mut sess2 = item("sess2");
+        sess2.display_time = "2026-04-15 10:00".to_string();
+
+        let mut app = App::new(&stub_catalog(vec![sess1, sess2]));
+        assert!(!app.is_visual_mode());
+        assert!(app.marked_session_ids.is_empty());
+
+        // Focus first session
+        app.selected_index = Some(0);
+        app.sync_tree_selection_from_selected_index();
+
+        // Press 'v' to enter visual mode
+        let action = app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        assert!(action.is_none());
+        assert!(app.is_visual_mode());
+        assert_eq!(app.visual_anchor, Some(app.tree_state.selected().to_vec()));
+        assert!(app.marked_session_ids.contains("sess1"));
+        assert_eq!(app.marked_session_ids.len(), 1);
+    }
+
+    #[test]
+    fn test_visual_mode_j_and_k_dynamically_expand_and_contract_selection() {
+        let items: Vec<SessionListItem> = (0..5).map(|i| item(&format!("sess-{i}"))).collect();
+        let mut app = App::new(&stub_catalog(items));
+        app.selected_index = Some(0);
+        app.sync_tree_selection_from_selected_index();
+
+        // Enter visual mode at row with sess-0
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        assert_eq!(app.marked_session_ids.len(), 1);
+        assert!(app.marked_session_ids.contains("sess-0"));
+
+        // Press j -> move to sess-1: selection expands to sess-0 and sess-1
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.marked_session_ids.len(), 2);
+        assert!(app.marked_session_ids.contains("sess-0"));
+        assert!(app.marked_session_ids.contains("sess-1"));
+
+        // Press j -> move to sess-2: expands to sess-0, sess-1, sess-2
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.marked_session_ids.len(), 3);
+        assert!(app.marked_session_ids.contains("sess-0"));
+        assert!(app.marked_session_ids.contains("sess-1"));
+        assert!(app.marked_session_ids.contains("sess-2"));
+
+        // Press k -> move back to sess-1: selection contracts back to sess-0 and sess-1
+        app.handle_key(KeyEvent::from(KeyCode::Char('k')));
+        assert_eq!(app.marked_session_ids.len(), 2);
+        assert!(app.marked_session_ids.contains("sess-0"));
+        assert!(app.marked_session_ids.contains("sess-1"));
+        assert!(!app.marked_session_ids.contains("sess-2"));
+
+        // Press k -> back to anchor sess-0: selection contracts to just sess-0
+        app.handle_key(KeyEvent::from(KeyCode::Char('k')));
+        assert_eq!(app.marked_session_ids.len(), 1);
+        assert!(app.marked_session_ids.contains("sess-0"));
+        assert!(!app.marked_session_ids.contains("sess-1"));
+    }
+
+    #[test]
+    fn test_visual_mode_j_and_k_jump_range_selection() {
+        let items: Vec<SessionListItem> = (0..10).map(|i| item(&format!("sess-{i:02}"))).collect();
+        let mut app = App::new(&stub_catalog(items));
+        let visible = app.visible_tree_identifiers();
+        // Row 0 is group header, Row 1 is sess-00, ..., Row 10 is sess-09
+        app.tree_state.select(visible[1].clone());
+        app.sync_tree_selection_from_tree();
+
+        // Enter visual mode at row 1 (sess-00)
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        assert_eq!(app.marked_session_ids.len(), 1);
+        assert!(app.marked_session_ids.contains("sess-00"));
+
+        // Press J (Shift+j) to jump 5 rows: row 1 -> row 6
+        app.handle_key(KeyEvent::from(KeyCode::Char('J')));
+        assert_eq!(app.tree_state.selected(), visible[6].as_slice());
+        // All sessions from row 1 to row 6 (sess-00 to sess-05) should be marked: 6 sessions
+        assert_eq!(app.marked_session_ids.len(), 6);
+        for i in 0..=5 {
+            assert!(app.marked_session_ids.contains(&format!("sess-{i:02}")));
+        }
+
+        // Press K (Shift+k) to jump back 5 rows: row 6 -> row 1
+        app.handle_key(KeyEvent::from(KeyCode::Char('K')));
+        assert_eq!(app.tree_state.selected(), visible[1].as_slice());
+        assert_eq!(app.marked_session_ids.len(), 1);
+        assert!(app.marked_session_ids.contains("sess-00"));
+    }
+
+    #[test]
+    fn test_visual_mode_clamps_at_boundaries_without_wrapping() {
+        let items: Vec<SessionListItem> = (0..4).map(|i| item(&format!("sess-{i}"))).collect();
+        let mut app = App::new(&stub_catalog(items));
+        let visible = app.visible_tree_identifiers();
+        let last_idx = visible.len() - 1;
+
+        // Position on the last row
+        app.tree_state.select(visible[last_idx].clone());
+        app.sync_tree_selection_from_tree();
+
+        // Enter visual mode at bottom row
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        assert_eq!(app.marked_session_ids.len(), 1);
+
+        // In normal mode, j wraps to top. In visual mode, effective_wrap is false so it MUST clamp at bottom.
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.tree_state.selected(), visible[last_idx].as_slice());
+        assert_eq!(app.marked_session_ids.len(), 1);
+
+        // Position on the first row (row 0: group header)
+        app.tree_state.select(visible[0].clone());
+        app.sync_tree_selection_from_tree();
+        app.update_visual_selection();
+
+        // At row 0, pressing k MUST clamp at row 0 without wrapping to bottom
+        app.handle_key(KeyEvent::from(KeyCode::Char('k')));
+        assert_eq!(app.tree_state.selected(), visible[0].as_slice());
+    }
+
+    #[test]
+    fn test_visual_mode_esc_cancels_selection_and_reverts_pre_marks() {
+        let mut sess1 = item("sess1");
+        sess1.display_time = "2026-04-16 10:00".to_string();
+        let mut sess2 = item("sess2");
+        sess2.display_time = "2026-04-16 11:00".to_string();
+        let mut sess3 = item("sess3");
+        sess3.display_time = "2026-04-16 12:00".to_string();
+
+        let mut app = App::new(&stub_catalog(vec![sess1, sess2, sess3]));
+
+        // Pre-mark sess1 using single mark
+        app.marked_session_ids.insert("sess1".to_string());
+        assert_eq!(app.marked_session_ids.len(), 1);
+
+        // Focus sess2
+        let visible = app.visible_tree_identifiers();
+        let sess2_id = visible
+            .iter()
+            .find(|p| p.last().map(|s| s.contains("sess2")).unwrap_or(false))
+            .unwrap()
+            .clone();
+        app.tree_state.select(sess2_id);
+        app.sync_tree_selection_from_tree();
+
+        // Enter visual mode
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        assert!(app.is_visual_mode());
+        assert!(app.marked_session_ids.contains("sess1"));
+        assert!(app.marked_session_ids.contains("sess2"));
+
+        // Move to sess3
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert!(app.marked_session_ids.contains("sess3"));
+        assert_eq!(app.marked_session_ids.len(), 3);
+
+        // Press Esc -> exits visual mode and reverts to pre_visual_marks (sess1 only)
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(!app.is_visual_mode());
+        assert_eq!(app.marked_session_ids.len(), 1);
+        assert!(app.marked_session_ids.contains("sess1"));
+        assert!(!app.marked_session_ids.contains("sess2"));
+        assert!(!app.marked_session_ids.contains("sess3"));
+    }
+
+    #[test]
+    fn test_visual_mode_v_and_enter_commits_selection() {
+        let items: Vec<SessionListItem> = (0..3).map(|i| item(&format!("sess-{i}"))).collect();
+        let mut app = App::new(&stub_catalog(items));
+        app.selected_index = Some(0);
+        app.sync_tree_selection_from_selected_index();
+
+        // 1. Commit with 'v'
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.marked_session_ids.len(), 2);
+        assert!(app.is_visual_mode());
+
+        // Press 'v' again -> commits selection and exits visual mode
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        assert!(!app.is_visual_mode());
+        assert_eq!(app.marked_session_ids.len(), 2);
+        assert!(app.marked_session_ids.contains("sess-0"));
+        assert!(app.marked_session_ids.contains("sess-1"));
+
+        // Clear marks
+        app.handle_key(KeyEvent::from(KeyCode::Char('X')));
+        assert!(app.marked_session_ids.is_empty());
+
+        // 2. Commit with 'Enter'
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert!(app.is_visual_mode());
+        let enter_action = app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(enter_action.is_none()); // Does not trigger resume during visual mode
+        assert!(!app.is_visual_mode());
+        assert_eq!(app.marked_session_ids.len(), 2);
+    }
+
+    #[test]
+    fn test_visual_mode_d_triggers_batch_delete_modal() {
+        let items: Vec<SessionListItem> = (0..4).map(|i| item(&format!("sess-{i}"))).collect();
+        let mut app = App::new(&stub_catalog(items));
+        app.selected_index = Some(0);
+        app.sync_tree_selection_from_selected_index();
+
+        // Enter visual mode and select 3 sessions
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.marked_session_ids.len(), 3);
+        assert!(app.is_visual_mode());
+
+        // Press 'd' -> commits visual mode and opens Batch Delete modal
+        app.handle_key(KeyEvent::from(KeyCode::Char('d')));
+        assert!(!app.is_visual_mode());
+        assert!(app.delete_modal_state.is_some());
+        let modal = app.delete_modal_state.as_ref().unwrap();
+        assert_eq!(modal.scope, DeleteScope::Batch { session_count: 3 });
+        assert_eq!(modal.target_session_id, "3 marked sessions");
+    }
+
+    #[test]
+    fn test_visual_mode_cleared_on_engine_switch() {
+        let items: Vec<SessionListItem> = vec![item("sess-pi")];
+        let mut app = App::new(&stub_catalog(items));
+        app.selected_index = Some(0);
+        app.sync_tree_selection_from_selected_index();
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('v')));
+        assert!(app.is_visual_mode());
+        assert_eq!(app.marked_session_ids.len(), 1);
+
+        // Switch engine with Tab
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert!(!app.is_visual_mode());
+        assert!(app.marked_session_ids.is_empty());
     }
 }
