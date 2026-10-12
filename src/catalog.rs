@@ -22,8 +22,21 @@ impl SessionEngine {
         Self::Pi
     }
 
+    /// Default tab order; users can reorder it (see `normalize_order`).
     pub fn tab_order() -> &'static [Self] {
         &[Self::Pi, Self::OpenCode, Self::Codex, Self::Claude]
+    }
+
+    /// Turns a possibly partial or duplicated engine list into a full order:
+    /// first occurrences kept, missing engines appended in default order.
+    pub fn normalize_order(engines: impl IntoIterator<Item = Self>) -> Vec<Self> {
+        let mut order: Vec<Self> = Vec::with_capacity(Self::tab_order().len());
+        for engine in engines.into_iter().chain(Self::tab_order().iter().copied()) {
+            if !order.contains(&engine) {
+                order.push(engine);
+            }
+        }
+        order
     }
 
     pub fn storage_key(self) -> &'static str {
@@ -80,23 +93,6 @@ impl SessionEngine {
         self.root_dir(home_dir).join("opencode.db")
     }
 
-    pub fn next(self) -> Self {
-        match self {
-            Self::Pi => Self::OpenCode,
-            Self::OpenCode => Self::Codex,
-            Self::Codex => Self::Claude,
-            Self::Claude => Self::Pi,
-        }
-    }
-
-    pub fn previous(self) -> Self {
-        match self {
-            Self::Pi => Self::Claude,
-            Self::OpenCode => Self::Pi,
-            Self::Codex => Self::OpenCode,
-            Self::Claude => Self::Codex,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

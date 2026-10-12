@@ -264,6 +264,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             Line::from("Keyboard Shortcuts"),
             Line::from(""),
             Line::from("  Tab / Shift+Tab   Switch engine"),
+            Line::from("  < / >              Move engine earlier / later"),
             Line::from("  j / k / Arrows    Navigate (j/k cycle)"),
             Line::from("  J / K             Jump 5 rows"),
             Line::from("  z                 Collapse / expand all"),
@@ -1521,13 +1522,13 @@ pub struct HeaderLayout {
     pub group_buttons: Vec<(GroupMode, HeaderHitbox)>,
 }
 
-pub fn compute_header_layout(terminal_width: u16) -> HeaderLayout {
+pub fn compute_header_layout(terminal_width: u16, engine_order: &[SessionEngine]) -> HeaderLayout {
     let sep_w = 3u16;
     let min_gap = 1u16;
 
     let mut left_width = 0u16;
     let mut left_items = Vec::new();
-    for (i, &engine) in SessionEngine::tab_order().iter().enumerate() {
+    for (i, &engine) in engine_order.iter().enumerate() {
         if i > 0 {
             left_width = left_width.saturating_add(sep_w);
         }
@@ -1589,9 +1590,9 @@ pub fn render_header_line(app: &App, terminal_width: u16) -> Line<'static> {
     if terminal_width == 0 {
         return Line::from("");
     }
-    let layout = compute_header_layout(terminal_width);
+    let layout = compute_header_layout(terminal_width, &app.engine_order);
     let mut spans = Vec::new();
-    for (index, &engine) in SessionEngine::tab_order().iter().enumerate() {
+    for (index, &engine) in app.engine_order.iter().enumerate() {
         if index > 0 {
             spans.push(Span::styled(
                 " | ",

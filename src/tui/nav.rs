@@ -34,7 +34,7 @@ pub enum NavEntry {
 
 pub fn nav_entries(app: &App) -> Vec<NavEntry> {
     let mut entries = vec![NavEntry::Section("ENGINE")];
-    for &engine in SessionEngine::tab_order() {
+    for &engine in &app.engine_order {
         let count = if engine == app.active_engine {
             Some(main_session_count(&app.session_list))
         } else {

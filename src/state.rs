@@ -11,6 +11,8 @@ use crate::app::GroupMode;
 use crate::catalog::SessionEngine;
 
 pub const KEY_GROUP_BY: &str = "group_by";
+pub const KEY_ENGINE_ORDER: &str = "engine_order";
+pub const KEY_LAST_ENGINE: &str = "last_engine";
 
 pub fn group_mode_to_str(mode: &GroupMode) -> &'static str {
     mode.as_storage_str()
@@ -623,6 +625,39 @@ impl StateStore {
     /// Persists the group-by mode preference.
     pub fn save_group_mode(&self, mode: &GroupMode) -> Result<(), StateError> {
         self.set_setting(KEY_GROUP_BY, group_mode_to_str(mode))
+    }
+
+    /// Loads the user's engine tab order, completed with any engines it lacks.
+    pub fn load_engine_order(&self) -> Vec<SessionEngine> {
+        let stored = match self.get_setting(KEY_ENGINE_ORDER) {
+            Ok(Some(raw)) => raw
+                .split(',')
+                .filter_map(|key| SessionEngine::from_storage_key(key.trim()))
+                .collect(),
+            _ => Vec::new(),
+        };
+        SessionEngine::normalize_order(stored)
+    }
+
+    pub fn save_engine_order(&self, order: &[SessionEngine]) -> Result<(), StateError> {
+        let raw = order
+            .iter()
+            .map(|engine| engine.storage_key())
+            .collect::<Vec<_>>()
+            .join(",");
+        self.set_setting(KEY_ENGINE_ORDER, &raw)
+    }
+
+    /// The engine that was active when the app was last used, if recorded.
+    pub fn load_last_engine(&self) -> Option<SessionEngine> {
+        match self.get_setting(KEY_LAST_ENGINE) {
+            Ok(Some(raw)) => SessionEngine::from_storage_key(&raw),
+            _ => None,
+        }
+    }
+
+    pub fn save_last_engine(&self, engine: SessionEngine) -> Result<(), StateError> {
+        self.set_setting(KEY_LAST_ENGINE, engine.storage_key())
     }
 
     /// Atomically replaces indexed transcript blocks and updates index_meta for a session.
@@ -2081,6 +2116,28 @@ mod tests {
         // Store valid value
         store.save_group_mode(&GroupMode::ByProject).unwrap();
         assert_eq!(store.load_group_mode(), GroupMode::ByProject);
+    }
+
+    #[test]
+    fn engine_order_and_last_engine_roundtrip_with_fallbacks() {
+        use SessionEngine::{Claude, Codex, OpenCode, Pi};
+        let temp_dir = TempDir::new().unwrap();
+        let store = StateStore::open_at(&temp_dir.path().join("engines.db"));
+
+        assert_eq!(store.load_engine_order(), vec![Pi, OpenCode, Codex, Claude]);
+        assert_eq!(store.load_last_engine(), None);
+
+        store.save_engine_order(&[Claude, Pi, OpenCode, Codex]).unwrap();
+        assert_eq!(store.load_engine_order(), vec![Claude, Pi, OpenCode, Codex]);
+
+        // Partial, duplicated or unknown entries are completed in default order.
+        store.set_setting(KEY_ENGINE_ORDER, "codex, bogus,codex").unwrap();
+        assert_eq!(store.load_engine_order(), vec![Codex, Pi, OpenCode, Claude]);
+
+        store.save_last_engine(Claude).unwrap();
+        assert_eq!(store.load_last_engine(), Some(Claude));
+        store.set_setting(KEY_LAST_ENGINE, "bogus").unwrap();
+        assert_eq!(store.load_last_engine(), None);
     }
 
     #[test]
