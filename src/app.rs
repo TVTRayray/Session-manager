@@ -397,6 +397,8 @@ pub struct CatalogLoadResult {
 
 pub struct App {
     pub active_engine: SessionEngine,
+    /// Tab order of the engines, as arranged by the user.
+    pub engine_order: Vec<SessionEngine>,
     pub session_list: Vec<SessionListItem>,
     pub selected_index: Option<usize>,
     pub detail_state: SessionDetailState,
@@ -501,6 +503,7 @@ impl App {
 
                 let mut app = Self {
                     active_engine: default_engine,
+                    engine_order: state_store.load_engine_order(),
                     session_list: session_list.clone(),
                     selected_index,
                     detail_state,
@@ -572,6 +575,7 @@ impl App {
                 let restored_group_mode = state_store.load_group_mode();
                 let mut app = Self {
                     active_engine: SessionEngine::default_engine(),
+                    engine_order: state_store.load_engine_order(),
                     session_list: Vec::new(),
                     selected_index: None,
                     detail_state: SessionDetailState::Error("No sessions found.".to_string()),
@@ -884,6 +888,10 @@ impl App {
         if event.code == KeyCode::BackTab {
             return Some(AppAction::LoadCatalog(self.switch_engine(false)));
         }
+        if matches!(event.code, KeyCode::Char('<') | KeyCode::Char('>')) {
+            self.move_active_engine(event.code == KeyCode::Char('>'));
+            return None;
+        }
         if event.code == KeyCode::Char('g') {
             self.set_group_mode_and_persist(self.group_mode.toggle());
             return None;
@@ -950,7 +958,7 @@ impl App {
                 }
                 None
             }
-            KeyCode::Left if self.focused_panel == FocusedPanel::List => {
+            KeyCode::Left => {
                 self.tree_state.key_left();
                 self.sync_tree_selection_from_tree();
                 if self.is_visual_mode() {
@@ -958,7 +966,7 @@ impl App {
                 }
                 None
             }
-            KeyCode::Right if self.focused_panel == FocusedPanel::List => {
+            KeyCode::Right => {
                 self.tree_state.key_right();
                 self.sync_tree_selection_from_tree();
                 if self.is_visual_mode() {
@@ -966,7 +974,7 @@ impl App {
                 }
                 None
             }
-            KeyCode::Char(' ') if self.focused_panel == FocusedPanel::List => {
+            KeyCode::Char(' ') => {
                 self.tree_state.toggle_selected();
                 self.sync_tree_selection_from_tree();
                 if self.is_visual_mode() {
@@ -1041,7 +1049,7 @@ impl App {
                         self.clear_path_hint();
                         return None;
                     }
-                    let header_layout = crate::tui::compute_header_layout(terminal_width);
+                    let header_layout = crate::tui::compute_header_layout(terminal_width, &self.engine_order);
                     for (engine, hitbox) in header_layout.engine_tabs {
                         if hitbox.contains(event.column) {
                             self.clear_path_hint();
@@ -2978,16 +2986,61 @@ impl App {
 
     pub fn switch_to_engine(&mut self, target_engine: SessionEngine) -> CatalogRequest {
         self.active_engine = target_engine;
+        // Best effort: a degraded store already warned at startup.
+        let _ = self.state_store.save_last_engine(target_engine);
         self.begin_catalog_request()
     }
 
+    /// Opens the engine used last time, or the first one in the user's order.
+    /// Call before the initial catalog request.
+    pub fn restore_engine_preference(&mut self) {
+        self.active_engine = self
+            .state_store
+            .load_last_engine()
+            .or_else(|| self.engine_order.first().copied())
+            .unwrap_or_else(SessionEngine::default_engine);
+    }
+
     fn switch_engine(&mut self, forward: bool) -> CatalogRequest {
+        let len = self.engine_order.len();
+        let index = self.active_engine_position();
         let target = if forward {
-            self.active_engine.next()
+            (index + 1) % len
         } else {
-            self.active_engine.previous()
+            (index + len - 1) % len
         };
-        self.switch_to_engine(target)
+        self.switch_to_engine(self.engine_order[target])
+    }
+
+    fn active_engine_position(&self) -> usize {
+        self.engine_order
+            .iter()
+            .position(|engine| *engine == self.active_engine)
+            .unwrap_or(0)
+    }
+
+    /// Moves the active engine one slot earlier or later in the tab order.
+    fn move_active_engine(&mut self, forward: bool) {
+        let index = self.active_engine_position();
+        let target = if forward {
+            index + 1
+        } else {
+            index.wrapping_sub(1)
+        };
+        if target >= self.engine_order.len() {
+            return;
+        }
+        self.engine_order.swap(index, target);
+        let order = self
+            .engine_order
+            .iter()
+            .map(|engine| engine.label())
+            .collect::<Vec<_>>()
+            .join(" › ");
+        self.status_message = match self.state_store.save_engine_order(&self.engine_order) {
+            Ok(()) => with_status_message(Some(&format!("Engine order: {order}")), None),
+            Err(_) => "警告: 引擎顺序仅在内存生效，未持久化".to_string(),
+        };
     }
 
     fn begin_catalog_request(&mut self) -> CatalogRequest {
@@ -4335,6 +4388,75 @@ mod tests {
 
         let _ = app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
         assert!(app.tree_state.opened().contains(&group));
+    }
+
+    #[test]
+    fn space_toggles_group_even_when_detail_has_focus() {
+        let mut app = App::new(&stub_catalog(vec![item("one"), item("two")]));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Left));
+        let group = app.tree_state.selected().to_vec();
+        // Scrolling the transcript moves focus to the detail pane.
+        app.focused_panel = FocusedPanel::Detail;
+
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(!app.tree_state.opened().contains(&group));
+        let _ = app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(app.tree_state.opened().contains(&group));
+    }
+
+    #[test]
+    fn engine_order_drives_tab_cycle_and_can_be_rearranged() {
+        use SessionEngine::{Claude, Codex, OpenCode, Pi};
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("engine_order.db");
+        {
+            let store = StateStore::open_at(&db_path);
+            let mut app = App::new_with_state_store(&stub_catalog(vec![item("one")]), store);
+            assert_eq!(app.engine_order, vec![Pi, OpenCode, Codex, Claude]);
+
+            // Move Claude to the front: switch to it, then press `<` three times.
+            let _ = switch_to_engine(&mut app, Claude);
+            for _ in 0..4 {
+                let _ = app.handle_key(KeyEvent::from(KeyCode::Char('<')));
+            }
+            assert_eq!(app.engine_order, vec![Claude, Pi, OpenCode, Codex]);
+            assert!(app.status_message.contains("Engine order: Claude › Pi › OpenCode › Codex"));
+
+            // Tab follows the custom order and wraps around.
+            let Some(AppAction::LoadCatalog(request)) = app.handle_key(KeyEvent::from(KeyCode::Tab))
+            else {
+                panic!("Tab should load the next engine");
+            };
+            assert_eq!(request.engine, Pi);
+            let _ = switch_to_engine(&mut app, Codex);
+            let Some(AppAction::LoadCatalog(request)) = app.handle_key(KeyEvent::from(KeyCode::Tab))
+            else {
+                panic!("Tab should wrap to the first engine");
+            };
+            assert_eq!(request.engine, Claude);
+
+            // `>` moves the active engine later; it is a no-op at the end.
+            let _ = switch_to_engine(&mut app, OpenCode);
+            let _ = app.handle_key(KeyEvent::from(KeyCode::Char('>')));
+            let _ = app.handle_key(KeyEvent::from(KeyCode::Char('>')));
+            assert_eq!(app.engine_order, vec![Claude, Pi, Codex, OpenCode]);
+        }
+
+        // A restart restores both the order and the last engine used.
+        let store = StateStore::open_at(&db_path);
+        let mut app = App::new_with_state_store(&stub_catalog(vec![item("one")]), store);
+        assert_eq!(app.engine_order, vec![Claude, Pi, Codex, OpenCode]);
+        app.restore_engine_preference();
+        assert_eq!(app.active_engine, OpenCode);
+        assert_eq!(app.initial_catalog_request().engine, OpenCode);
+    }
+
+    #[test]
+    fn restore_engine_preference_defaults_to_first_engine_in_order() {
+        let mut app = App::new(&stub_catalog(vec![item("one")]));
+        app.engine_order = vec![SessionEngine::Codex, SessionEngine::Pi];
+        app.restore_engine_preference();
+        assert_eq!(app.active_engine, SessionEngine::Codex);
     }
 
     #[test]
@@ -7237,7 +7359,7 @@ mod tests {
         assert_eq!(app.active_engine, SessionEngine::Pi);
         assert_eq!(app.selected_index, Some(0));
 
-        let layout = crate::tui::compute_header_layout(130);
+        let layout = crate::tui::compute_header_layout(130, SessionEngine::tab_order());
         let pi_box = layout
             .engine_tabs
             .iter()
@@ -7479,7 +7601,7 @@ mod tests {
         // threshold = 46 (left) + 1 (gap) + 41 (right) = 88
         let width = 88;
         app.set_terminal_size(width, 30);
-        let layout = crate::tui::compute_header_layout(width);
+        let layout = crate::tui::compute_header_layout(width, SessionEngine::tab_order());
 
         assert_eq!(layout.left_width, 46);
         assert_eq!(layout.right_width, 41);
@@ -7573,7 +7695,7 @@ mod tests {
         // threshold - 1 = 87
         let width = 87;
         app.set_terminal_size(width, 30);
-        let layout = crate::tui::compute_header_layout(width);
+        let layout = crate::tui::compute_header_layout(width, SessionEngine::tab_order());
 
         assert_eq!(layout.engine_tabs.len(), 4);
         assert!(layout.group_buttons.is_empty());
@@ -7616,7 +7738,7 @@ mod tests {
 
         // 1. 40x12: Right buttons hidden, Claude clipped (width 40 < 46)
         {
-            let layout = crate::tui::compute_header_layout(40);
+            let layout = crate::tui::compute_header_layout(40, SessionEngine::tab_order());
             assert_eq!(layout.engine_tabs.len(), 3); // Pi, OpenCode, Codex fit, Claude cut off
             assert!(layout.group_buttons.is_empty());
 
@@ -7655,7 +7777,7 @@ mod tests {
 
         // 2. 2x5: Extreme narrow
         {
-            let layout = crate::tui::compute_header_layout(2);
+            let layout = crate::tui::compute_header_layout(2, SessionEngine::tab_order());
             assert!(layout.engine_tabs.is_empty());
             assert!(layout.group_buttons.is_empty());
 
@@ -7676,7 +7798,7 @@ mod tests {
 
         // 3. 1x1: Extreme narrow
         {
-            let layout = crate::tui::compute_header_layout(1);
+            let layout = crate::tui::compute_header_layout(1, SessionEngine::tab_order());
             assert!(layout.engine_tabs.is_empty());
             assert!(layout.group_buttons.is_empty());
             let action = app.handle_mouse(
@@ -7696,7 +7818,7 @@ mod tests {
 
         // 4. 0x0: Zero width
         {
-            let layout = crate::tui::compute_header_layout(0);
+            let layout = crate::tui::compute_header_layout(0, SessionEngine::tab_order());
             assert!(layout.engine_tabs.is_empty());
             assert!(layout.group_buttons.is_empty());
             let action = app.handle_mouse(
