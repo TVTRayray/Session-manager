@@ -2876,8 +2876,12 @@ impl App {
 
     fn begin_resume_request(&mut self) -> Option<ResumeSessionRequest> {
         let mut selected = self.selected_item()?.clone();
-        // A sidechain transcript lives inside its parent session and has no resumable id.
-        if selected.relation == SessionRelation::Sidechain
+        // A sidechain transcript lives inside its parent session and has no resumable id; an
+        // earlier transcript of a continued conversation resumes as its newest continuation.
+        if matches!(
+            selected.relation,
+            SessionRelation::Sidechain | SessionRelation::Continued
+        )
             && let Some(parent) = selected
                 .parent_session_id
                 .as_deref()

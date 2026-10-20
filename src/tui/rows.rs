@@ -263,11 +263,13 @@ impl<'a> RowBuilder<'a> {
         }
         if is_child {
             prefix.push_str("↳ ");
-            if node.relation == SessionRelation::Fork {
-                prefix.push_str("⑂ ");
-            } else {
-                prefix.push_str(node.agent_name.as_deref().unwrap_or("Subagent"));
-                prefix.push_str(" · ");
+            match node.relation {
+                SessionRelation::Fork => prefix.push_str("⑂ "),
+                SessionRelation::Continued => prefix.push_str("↺ "),
+                SessionRelation::Subagent | SessionRelation::Sidechain => {
+                    prefix.push_str(node.agent_name.as_deref().unwrap_or("Subagent"));
+                    prefix.push_str(" · ");
+                }
             }
         }
         let name = if node.relation == SessionRelation::Fork {
@@ -501,6 +503,11 @@ mod tests {
         let rendered = text(&session_row(&fork, 2, &layout, false, RowHighlight::default()));
         assert!(rendered.contains("↳ ⑂ branch "));
         assert!(!rendered.contains("branch ⑂"));
+
+        let mut earlier = node("task");
+        earlier.relation = SessionRelation::Continued;
+        let rendered = text(&session_row(&earlier, 2, &layout, false, RowHighlight::default()));
+        assert!(rendered.contains("↳ ↺ task "));
     }
 
     #[test]
