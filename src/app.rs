@@ -1213,17 +1213,14 @@ impl App {
         match result {
             DeleteResult::Success(success) => {
                 self.marked_session_ids.remove(&success.deleted_session_id);
-                if let Some(index) = self
+                let neighbors = self.visible_neighbor_leaves();
+                let deleted_index = self
                     .session_list
                     .iter()
-                    .position(|item| item.abs_path == success.deleted_path)
-                {
+                    .position(|item| item.abs_path == success.deleted_path);
+                if let Some(index) = deleted_index {
                     self.session_list.remove(index);
                     self.file_health_map.remove(&success.deleted_path);
-                    self.selected_index =
-                        restore_selection_after_delete(index, self.session_list.len());
-                    self.rebuild_tree_after_session_list_change();
-                    self.refresh_header_summary();
                 }
                 // Some engines delete child transcripts stored in a companion directory named
                 // after the session file (Claude's `<id>/subagents/`); drop those that are gone.
@@ -1233,11 +1230,11 @@ impl App {
                 };
                 let before = self.session_list.len();
                 self.session_list.retain(|item| !removed_with_parent(item));
-                if self.session_list.len() != before {
-                    self.selected_index = self
-                        .selected_index
-                        .map(|index| index.min(self.session_list.len().saturating_sub(1)))
-                        .filter(|_| !self.session_list.is_empty());
+                if deleted_index.is_some() || self.session_list.len() != before {
+                    let fallback = deleted_index.and_then(|index| {
+                        restore_selection_after_delete(index, self.session_list.len())
+                    });
+                    self.selected_index = self.first_surviving_leaf(&neighbors).or(fallback);
                     self.rebuild_tree_after_session_list_change();
                     self.refresh_header_summary();
                 }
@@ -1275,6 +1272,7 @@ impl App {
         self.pending_delete_target = None;
         self.pending_bulk_delete_target = None;
 
+        let neighbors = self.visible_neighbor_leaves();
         for success in &result.deleted {
             self.marked_session_ids.remove(&success.deleted_session_id);
             if let Some(index) = self
@@ -1321,20 +1319,28 @@ impl App {
             with_status_message(None, Some(message.as_str()))
         };
 
-        self.selected_index = None;
-        self.tree_state = TreeState::default();
-        self.open_all_groups();
         let group_exists = build_grouped_session_nodes(&self.session_list, &self.group_mode)
             .into_iter()
             .any(|group| group.identifier == result.group_identifier);
         if group_exists {
+            self.selected_index = None;
+            self.tree_state = TreeState::default();
+            self.open_all_groups();
             self.tree_state.select(vec![result.group_identifier]);
-        } else if let Some(first_leaf) = self.first_leaf_identifier() {
-            self.tree_state.select(first_leaf);
+            self.sync_tree_selection_from_tree();
+        } else if let Some(index) = self.first_surviving_leaf(&neighbors) {
+            self.selected_index = Some(index);
+            self.rebuild_tree_after_session_list_change();
+            self.refresh_header_summary();
         } else {
-            self.tree_state.select(Vec::new());
+            self.selected_index = None;
+            self.tree_state = TreeState::default();
+            self.open_all_groups();
+            if let Some(first_leaf) = self.first_leaf_identifier() {
+                self.tree_state.select(first_leaf);
+            }
+            self.sync_tree_selection_from_tree();
         }
-        self.sync_tree_selection_from_tree();
 
         match self.selected_index {
             Some(_) => self.begin_detail_request(),
@@ -2876,8 +2882,12 @@ impl App {
 
     fn begin_resume_request(&mut self) -> Option<ResumeSessionRequest> {
         let mut selected = self.selected_item()?.clone();
-        // A sidechain transcript lives inside its parent session and has no resumable id.
-        if selected.relation == SessionRelation::Sidechain
+        // A sidechain transcript lives inside its parent session and has no resumable id; an
+        // earlier transcript of a continued conversation resumes as its newest continuation.
+        if matches!(
+            selected.relation,
+            SessionRelation::Sidechain | SessionRelation::Continued
+        )
             && let Some(parent) = selected
                 .parent_session_id
                 .as_deref()
@@ -3170,9 +3180,38 @@ impl App {
                 .current_match
                 .filter(|position| *position < self.search_state.matches.len());
         }
+        let opened = self.tree_state.opened().clone();
         self.tree_state = TreeState::default();
+        for path in opened {
+            self.tree_state.open(path);
+        }
         self.open_all_groups();
         self.sync_tree_selection_from_selected_index();
+    }
+
+    /// Leaf identifiers of the rows around the current selection in on-screen order: those
+    /// below it first, then those above it, nearest first. Captured before removing sessions
+    /// so the selection can land on the nearest row that survives.
+    fn visible_neighbor_leaves(&self) -> Vec<String> {
+        let visible = self.visible_tree_identifiers();
+        let selected = self.tree_state.selected();
+        let Some(position) = visible.iter().position(|path| path.as_slice() == selected) else {
+            return Vec::new();
+        };
+        visible[position + 1..]
+            .iter()
+            .chain(visible[..position].iter().rev())
+            .filter(|path| path.len() >= 2)
+            .filter_map(|path| path.last().cloned())
+            .collect()
+    }
+
+    fn first_surviving_leaf(&self, leaves: &[String]) -> Option<usize> {
+        leaves.iter().find_map(|leaf| {
+            self.session_list
+                .iter()
+                .position(|item| leaf_identifier(item) == *leaf)
+        })
     }
 
     fn sync_tree_selection_from_selected_index(&mut self) {
@@ -4900,6 +4939,63 @@ mod tests {
             }
             other => panic!("expected neighbor detail request, got {other:?}"),
         }
+    }
+
+    fn interleaved_project_app() -> App {
+        // Newest first, alternating projects: the flat list neighbour of `a1` is `b1`, while
+        // on screen (grouped by project) the row below `a1` is `a2`.
+        let items = [("a1", "a"), ("b1", "b"), ("a2", "a"), ("b2", "b")]
+            .into_iter()
+            .map(|(name, project)| {
+                let mut session = item(name);
+                session.cwd_path = format!("/workspace/{project}");
+                session.cwd_tail = project.to_string();
+                session.cwd_group_label = format!("workspace/{project}");
+                session
+            })
+            .collect();
+        let mut app = App::new(&stub_catalog(items));
+        app.group_mode = GroupMode::ByProject;
+        app.selected_index = Some(0);
+        app.rebuild_tree_after_session_list_change();
+        app
+    }
+
+    #[test]
+    fn delete_selects_the_next_row_on_screen_not_the_next_list_item() {
+        let mut app = interleaved_project_app();
+
+        let _ = app.apply_delete_result(DeleteResult::Success(DeleteSuccess {
+            deleted_path: PathBuf::from("/tmp/a1.jsonl"),
+            deleted_session_id: "a1".to_string(),
+        }));
+        assert_eq!(app.selected_item().map(|it| it.name.as_str()), Some("a2"));
+
+        // The last row of a project falls back to the row above it.
+        let _ = app.apply_delete_result(DeleteResult::Success(DeleteSuccess {
+            deleted_path: PathBuf::from("/tmp/a2.jsonl"),
+            deleted_session_id: "a2".to_string(),
+        }));
+        let remaining = app.selected_item().map(|it| it.name.clone());
+        assert!(matches!(remaining.as_deref(), Some("b1" | "b2")));
+    }
+
+    #[test]
+    fn batch_delete_selects_the_nearest_surviving_row_on_screen() {
+        let mut app = interleaved_project_app();
+
+        let _ = app.apply_bulk_delete_result(BulkDeleteResult {
+            engine: app.active_engine,
+            group_identifier: "batch:marked".to_string(),
+            group_label: "marked".to_string(),
+            requested_count: 1,
+            deleted: vec![DeleteSuccess {
+                deleted_path: PathBuf::from("/tmp/a1.jsonl"),
+                deleted_session_id: "a1".to_string(),
+            }],
+            failures: Vec::new(),
+        });
+        assert_eq!(app.selected_item().map(|it| it.name.as_str()), Some("a2"));
     }
 
     #[test]

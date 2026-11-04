@@ -117,6 +117,9 @@ pub enum SessionRelation {
     Sidechain,
     /// A conversation branched or forked from the parent.
     Fork,
+    /// An earlier transcript of the parent: Claude continued it in a new session that
+    /// copies its history, so both files are one logical conversation.
+    Continued,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -839,6 +842,7 @@ enum JsonlLayout {
 #[derive(Clone, Debug, Default)]
 struct StubEvidence {
     forked_from: Option<String>,
+    continued_in: Option<String>,
     root_message_uuid: Option<String>,
     branch_marked: bool,
 }
@@ -1128,10 +1132,14 @@ fn attach_claude_sidechain(item: &mut SessionListItem, path: &Path) {
     }
 }
 
-/// Resolves Claude forks. `--fork-session` records `forkedFrom.sessionId` explicitly;
-/// `/branch` instead copies the transcript (keeping message uuids) and marks the title with
-/// `⑂`, so a marked session is linked to the single unmarked session sharing its root
-/// message. Anything ambiguous stays an independent root.
+/// Resolves Claude forks and continuations. When Claude continues a session in a new one it
+/// copies the history (message uuids included) and records `continued-in` in the original,
+/// so a chain of continuations is one logical conversation headed by its newest session;
+/// the earlier transcripts nest under that head. `--fork-session` records
+/// `forkedFrom.sessionId` explicitly; `/branch` instead copies the transcript and marks the
+/// title with `⑂`, so a marked session is linked to the single unmarked conversation sharing
+/// its root message. Forks of any chain member attach to the head. Anything ambiguous stays
+/// an independent root.
 fn apply_claude_fork_relations(
     items: &mut [SessionListItem],
     evidence: &HashMap<PathBuf, StubEvidence>,
@@ -1140,16 +1148,55 @@ fn apply_claude_fork_relations(
         .iter()
         .map(|item| item.session_id.clone())
         .collect::<HashSet<_>>();
-    let mut by_root_message: HashMap<&str, Vec<usize>> = HashMap::new();
-    for (index, item) in items.iter().enumerate() {
-        if item.parent_session_id.is_some() {
+    let evidence_of = |item: &SessionListItem| evidence.get(&item.abs_path);
+
+    let continued_in = items
+        .iter()
+        .filter(|item| item.parent_session_id.is_none())
+        .filter_map(|item| {
+            let next = evidence_of(item)?.continued_in.as_deref()?;
+            (next != item.session_id && known_ids.contains(next))
+                .then_some((item.session_id.as_str(), next))
+        })
+        .collect::<HashMap<_, _>>();
+    let head_of = |session_id: &str| -> String {
+        let mut current = session_id;
+        let mut seen = HashSet::from([current]);
+        while let Some(next) = continued_in.get(current).copied() {
+            if !seen.insert(next) {
+                // A continuation cycle has no well-defined head.
+                return session_id.to_string();
+            }
+            current = next;
+        }
+        current.to_string()
+    };
+
+    let forked_from = |item: &SessionListItem| {
+        evidence_of(item)?
+            .forked_from
+            .as_deref()
+            .filter(|source| *source != item.session_id && known_ids.contains(*source))
+    };
+
+    // Origins a `⑂` branch may come from. Explicit forks are excluded: copying one would
+    // also copy its `forkedFrom`, so an unlinked branch cannot have been made from it.
+    let mut by_root_message: HashMap<&str, HashSet<String>> = HashMap::new();
+    for item in items.iter() {
+        if item.parent_session_id.is_some() || forked_from(item).is_some() {
             continue;
         }
-        if let Some(root) = evidence
-            .get(&item.abs_path)
-            .and_then(|evidence| evidence.root_message_uuid.as_deref())
-        {
-            by_root_message.entry(root).or_default().push(index);
+        let Some(own) = evidence_of(item) else {
+            continue;
+        };
+        if own.branch_marked {
+            continue;
+        }
+        if let Some(root) = own.root_message_uuid.as_deref() {
+            by_root_message
+                .entry(root)
+                .or_default()
+                .insert(head_of(&item.session_id));
         }
     }
 
@@ -1158,44 +1205,40 @@ fn apply_claude_fork_relations(
         if item.parent_session_id.is_some() {
             continue;
         }
-        let Some(own) = evidence.get(&item.abs_path) else {
+        let Some(own) = evidence_of(item) else {
             continue;
         };
-        if let Some(source) = own
-            .forked_from
-            .as_deref()
-            .filter(|source| *source != item.session_id && known_ids.contains(*source))
-        {
-            links.push((index, source.to_string()));
+        let head = head_of(&item.session_id);
+        if head != item.session_id {
+            links.push((index, head, SessionRelation::Continued));
+            continue;
+        }
+        if let Some(source) = forked_from(item) {
+            links.push((index, head_of(source), SessionRelation::Fork));
             continue;
         }
         if !own.branch_marked {
             continue;
         }
-        let Some(siblings) = own
+        let Some(conversations) = own
             .root_message_uuid
             .as_deref()
             .and_then(|root| by_root_message.get(root))
         else {
             continue;
         };
-        let candidates = siblings
+        let candidates = conversations
             .iter()
-            .filter(|candidate| **candidate != index)
-            .filter(|candidate| {
-                !evidence
-                    .get(&items[**candidate].abs_path)
-                    .is_some_and(|evidence| evidence.branch_marked)
-            })
+            .filter(|candidate| **candidate != item.session_id)
             .collect::<Vec<_>>();
         if let [parent] = candidates.as_slice() {
-            links.push((index, items[**parent].session_id.clone()));
+            links.push((index, (*parent).clone(), SessionRelation::Fork));
         }
     }
 
-    for (index, parent_session_id) in links {
+    for (index, parent_session_id, relation) in links {
         items[index].parent_session_id = Some(parent_session_id);
-        items[index].relation = SessionRelation::Fork;
+        items[index].relation = relation;
     }
 }
 
@@ -1260,7 +1303,8 @@ fn read_session_stub(path: &Path, layout: JsonlLayout) -> StubRead {
         let may_contain_name = line.contains("\"session_info\"")
             || line.contains("\"custom-title\"")
             || line.contains("\"ai-title\"")
-            || line.contains("\"agent-name\"");
+            || line.contains("\"agent-name\"")
+            || line.contains("\"continued-in\"");
         let may_be_conversation = probe_conversation
             && (line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\""));
         if !inspect_stub && !may_contain_name && !may_be_conversation {
@@ -1327,6 +1371,15 @@ fn read_session_stub(path: &Path, layout: JsonlLayout) -> StubRead {
                     .get("agentName")
                     .and_then(Value::as_str)
                     .is_some_and(|name| name.trim_end().ends_with(CLAUDE_BRANCH_MARKER));
+            }
+            Some("continued-in") => {
+                if let Some(next) = value
+                    .get("continuedInSessionId")
+                    .and_then(Value::as_str)
+                    .and_then(normalize_optional_metadata)
+                {
+                    evidence.continued_in = Some(next);
+                }
             }
             _ => {}
         }
@@ -1953,6 +2006,102 @@ mod tests {
         assert_eq!(forked.relation, SessionRelation::Fork);
         assert_eq!(claude_item(&items, "orphan").parent_session_id, None);
         assert_eq!(claude_item(&items, "origin").parent_session_id, None);
+    }
+
+    #[test]
+    fn claude_continuation_chain_is_one_conversation_with_forks_on_its_head() {
+        let home = must(tempdir());
+        let project = home.path().join(".claude/projects/-work-app");
+        let history = |id: &str| {
+            vec![
+                r#"{"type":"custom-title","customTitle":"Root","sessionId":"ID"}"#
+                    .replace("ID", id),
+                claude_line("user", id, "/work/app", "root-u", None, ""),
+                claude_line("assistant", id, "/work/app", "a1", Some("root-u"), ""),
+            ]
+        };
+        let mut original = history("original");
+        original.push(
+            r#"{"type":"continued-in","sessionId":"original","continuedInSessionId":"middle"}"#
+                .to_string(),
+        );
+        write_claude_session(&project, "original", &original);
+        let mut middle = history("middle");
+        middle.push(
+            r#"{"type":"continued-in","sessionId":"middle","continuedInSessionId":"latest"}"#
+                .to_string(),
+        );
+        write_claude_session(&project, "middle", &middle);
+        write_claude_session(&project, "latest", &history("latest"));
+        write_claude_session(
+            &project,
+            "fork-of-original",
+            &[claude_line(
+                "user",
+                "fork-of-original",
+                "/work/app",
+                "root-u",
+                None,
+                r#","forkedFrom":{"sessionId":"original","messageUuid":"root-u"}"#,
+            )],
+        );
+        write_claude_session(
+            &project,
+            "fork-of-latest",
+            &[claude_line(
+                "user",
+                "fork-of-latest",
+                "/work/app",
+                "root-u",
+                None,
+                r#","forkedFrom":{"sessionId":"latest","messageUuid":"root-u"}"#,
+            )],
+        );
+        write_claude_session(
+            &project,
+            "branch",
+            &[
+                r#"{"type":"ai-title","aiTitle":"Root ⑂","sessionId":"branch"}"#.to_string(),
+                claude_line("user", "branch", "/work/app", "root-u", None, ""),
+            ],
+        );
+
+        let items = claude_items(home.path());
+        assert_eq!(claude_item(&items, "latest").parent_session_id, None);
+        for id in ["original", "middle"] {
+            let earlier = claude_item(&items, id);
+            assert_eq!(earlier.parent_session_id.as_deref(), Some("latest"));
+            assert_eq!(earlier.relation, SessionRelation::Continued);
+        }
+        for id in ["fork-of-original", "fork-of-latest", "branch"] {
+            let fork = claude_item(&items, id);
+            assert_eq!(fork.parent_session_id.as_deref(), Some("latest"), "{id}");
+            assert_eq!(fork.relation, SessionRelation::Fork);
+        }
+    }
+
+    #[test]
+    fn claude_continuation_cycle_or_missing_target_stays_root() {
+        let home = must(tempdir());
+        let project = home.path().join(".claude/projects/-work-app");
+        for (id, next) in [("a", "b"), ("b", "a"), ("c", "deleted")] {
+            write_claude_session(
+                &project,
+                id,
+                &[
+                    claude_line("user", id, "/work/app", &format!("{id}-u"), None, ""),
+                    format!(
+                        r#"{{"type":"continued-in","sessionId":"{id}","continuedInSessionId":"{next}"}}"#
+                    ),
+                ],
+            );
+        }
+
+        let items = claude_items(home.path());
+        assert_eq!(claude_item(&items, "c").parent_session_id, None);
+        // A cycle links each member to the other; the tree builder detaches cycles.
+        assert_eq!(claude_item(&items, "a").parent_session_id, None);
+        assert_eq!(claude_item(&items, "b").parent_session_id, None);
     }
 
     #[test]
