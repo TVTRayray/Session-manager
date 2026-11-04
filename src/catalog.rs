@@ -92,7 +92,6 @@ impl SessionEngine {
     pub fn opencode_db_path(self, home_dir: &Path) -> PathBuf {
         self.root_dir(home_dir).join("opencode.db")
     }
-
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3172,7 +3171,13 @@ mod tests {
     #[test]
     fn consumer_layers_do_not_hardcode_session_engine_variants() {
         let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let adapter_files = ["catalog.rs", "detail.rs", "resume.rs", "delete.rs"];
+        let adapter_files = [
+            "catalog.rs",
+            "detail.rs",
+            "resume.rs",
+            "delete.rs",
+            "api.rs",
+        ];
         let variant_patterns = [
             "SessionEngine::Pi",
             "SessionEngine::OpenCode",

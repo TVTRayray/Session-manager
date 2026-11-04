@@ -25,6 +25,10 @@ use sessions_manager::tui;
 type AppTerminal = Terminal<CrosstermBackend<io::Stdout>>;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("api") {
+        std::process::exit(sessions_manager::api::run(&args[1..]));
+    }
     let catalog = FilesystemSessionCatalog::from_home_dir().map_err(io::Error::other)?;
     let catalog_loader =
         FilesystemMultiSessionCatalog::from_home_dir().map_err(io::Error::other)?;
